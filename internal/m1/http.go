@@ -15,7 +15,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"unicode/utf8"
 )
 
 type API struct {
@@ -63,6 +62,9 @@ func NewHandler(store Store, origin *url.URL, web fs.FS) http.Handler {
 	mux.HandleFunc("GET /v1/auth/session", api.session)
 	mux.HandleFunc("POST /v1/auth/logout", api.logout)
 	mux.HandleFunc("GET /v1/overview", api.overview)
+	mux.HandleFunc("GET /v1/admin/users", api.listUsers)
+	mux.HandleFunc("POST /v1/admin/users", api.createUser)
+	mux.HandleFunc("POST /v1/admin/users/{id}/{action}", api.changeUser)
 	apiNotFound := func(w http.ResponseWriter, _ *http.Request) {
 		writeError(w, http.StatusNotFound, "not_found")
 	}
@@ -91,7 +93,7 @@ func (a *API) frontend(w http.ResponseWriter, r *http.Request) {
 	}
 	p := strings.TrimPrefix(r.URL.Path, "/")
 	switch p {
-	case "", "initialize", "login", "overview":
+	case "", "initialize", "login", "overview", "users":
 		w.Header().Set("Cache-Control", "no-store")
 		http.ServeFileFS(w, r, a.web, "index.html")
 	default:
@@ -123,6 +125,12 @@ func failure(w http.ResponseWriter, operation string, err error) {
 		writeError(w, http.StatusUnauthorized, errSession.Error())
 	case errors.Is(err, errCredentials):
 		writeError(w, http.StatusUnauthorized, errCredentials.Error())
+	case errors.Is(err, errForbidden):
+		writeError(w, http.StatusForbidden, errForbidden.Error())
+	case errors.Is(err, errUserMissing):
+		writeError(w, http.StatusNotFound, errUserMissing.Error())
+	case errors.Is(err, errUserExists), errors.Is(err, errLastAdmin), errors.Is(err, errUserTransition):
+		writeError(w, http.StatusConflict, err.Error())
 	default:
 		// PostgreSQL errors can contain argument data. Only the operation is logged.
 		slog.Error("DeskRealm operation failed", "operation", operation)
@@ -204,7 +212,7 @@ func (a *API) bootstrap(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_organization")
 	case !usernamePattern.MatchString(request.Username):
 		writeError(w, http.StatusBadRequest, "invalid_username")
-	case utf8.RuneCountInString(request.Password) < 12 || len(request.Password) > 256:
+	case !validPassword(request.Password):
 		writeError(w, http.StatusBadRequest, "invalid_password")
 	case !validToken(request.Ticket):
 		writeError(w, http.StatusUnauthorized, errTicket.Error())

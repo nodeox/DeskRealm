@@ -3,10 +3,12 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 mode="${1:-}"
-if [[ "$mode" != bootstrap-api && "$mode" != bootstrap-browser ]]; then
-  echo "usage: $0 bootstrap-api|bootstrap-browser" >&2
-  exit 2
-fi
+case "$mode" in
+  bootstrap-api) tests=(TestBootstrapPostgres TestBrowserSessionPostgres) ;;
+  user-status) tests=(TestUserStatusPostgres TestAccountRevocationPostgres) ;;
+  bootstrap-browser) ;;
+  *) echo "usage: $0 bootstrap-api|user-status|bootstrap-browser" >&2; exit 2 ;;
+esac
 
 scratch=$(mktemp -d "${TMPDIR:-/tmp}/deskrealm-m1.XXXXXX")
 container="deskrealm-test-$(basename "$scratch")"
@@ -48,23 +50,24 @@ mapping=$(docker port "$container" 5432/tcp)
 port="${mapping##*:}"
 export DESKREALM_TEST_DATABASE_URL="postgres://postgres:$test_password@127.0.0.1:$port/deskrealm?sslmode=disable"
 
-if [[ "$mode" == bootstrap-api ]]; then
+if [[ "$mode" != bootstrap-browser ]]; then
   export DESKREALM_REQUIRE_DB_TESTS=1
-  if ! go test -json -count=1 ./internal/m1 -run '^(TestBootstrapPostgres|TestBrowserSessionPostgres)$' >"$scratch/results.json"; then
+  pattern=$(IFS='|'; echo "${tests[*]}")
+  if ! go test -json -count=1 ./internal/m1 -run "^($pattern)$" >"$scratch/results.json"; then
     cat "$scratch/results.json" >&2
     exit 1
   fi
-  python3 - "$scratch/results.json" <<'PY'
+  python3 - "$scratch/results.json" "${tests[@]}" <<'PY'
 import json
 import sys
 
 with open(sys.argv[1]) as log:
     events = [json.loads(line) for line in log]
-required = {"TestBootstrapPostgres", "TestBrowserSessionPostgres"}
+required = set(sys.argv[2:])
 actual = {event.get("Test") for event in events if event.get("Action") == "pass"}
 if not required <= actual or any(e.get("Action") in {"skip", "fail"} for e in events):
     sys.exit("missing, skipped or failed PostgreSQL regression")
-print("PostgreSQL bootstrap and session regressions passed")
+print("PostgreSQL regressions passed:", ", ".join(sorted(required)))
 PY
   exit 0
 fi

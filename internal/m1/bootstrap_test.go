@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -138,14 +139,19 @@ func TestBootstrapPostgres(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	migration, err := migrationFiles.ReadFile("migrations/00001_bootstrap.sql")
+	migrations, err := fs.Glob(migrationFiles, "migrations/*.sql")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := migrateFrom(ctx, db, fstest.MapFS{
-		"00001_bootstrap.sql": {Data: migration},
-		"00002_fail.sql":      {Data: []byte("-- +goose Up\nCREATE TABLE never_committed (id int);\nSELECT 1/0;\n")},
-	}); err == nil {
+	files := fstest.MapFS{"90000_fail.sql": {Data: []byte("-- +goose Up\nCREATE TABLE never_committed (id int);\nSELECT 1/0;\n")}}
+	for _, path := range migrations {
+		data, err := migrationFiles.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		files[strings.TrimPrefix(path, "migrations/")] = &fstest.MapFile{Data: data}
+	}
+	if err := migrateFrom(ctx, db, files); err == nil {
 		t.Fatal("invalid SQL migration unexpectedly succeeded")
 	}
 	var absent bool

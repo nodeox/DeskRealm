@@ -167,12 +167,16 @@ func (s Store) initialize(ctx context.Context, in bootstrapRequest) error {
 }
 
 func audit(ctx context.Context, tx pgx.Tx, organizationID, actorID, action, resourceID string) error {
+	return auditWithReason(ctx, tx, organizationID, actorID, action, resourceID, "")
+}
+
+func auditWithReason(ctx context.Context, tx pgx.Tx, organizationID, actorID, action, resourceID, reason string) error {
 	_, err := tx.Exec(ctx, `
 		WITH event AS (
-			INSERT INTO audit_events (organization_id, actor_id, action, result, resource_id)
-			VALUES ($1, $2, $3, 'success', $4) RETURNING id
+			INSERT INTO audit_events (organization_id, actor_id, action, result, resource_id, reason)
+			VALUES ($1, $2, $3, 'success', $4, NULLIF($5, '')) RETURNING id
 		)
-		INSERT INTO outbox (event_id) SELECT id FROM event`, organizationID, actorID, action, resourceID)
+		INSERT INTO outbox (event_id) SELECT id FROM event`, organizationID, actorID, action, resourceID, reason)
 	return err
 }
 

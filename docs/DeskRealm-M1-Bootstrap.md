@@ -1,6 +1,6 @@
 # DeskRealm M1 首次初始化与登录
 
-当前可运行的控制面包括 PostgreSQL 迁移、一次性首管初始化、本地账号登录、中文概览和服务端注销。初始化、成功登录及注销各有审计记录。后续计划接入账号生命周期、TOTP、OIDC、作用域授权、设备和任务。
+当前可运行的控制面包括 PostgreSQL 迁移、一次性首管初始化、本地账号登录、中文概览、服务端注销和成员管理。初始化、成功登录、注销和成员状态变更均进入审计。后续计划接入邀请、恢复、身份源、作用域授权、设备和任务。
 
 ## 本地开发检查
 
@@ -8,6 +8,7 @@
 
 ```sh
 bash scripts/deskrealm-m1-test bootstrap-api
+bash scripts/deskrealm-m1-test user-status
 npm --prefix web ci --ignore-scripts
 npm --prefix web run typecheck
 PLAYWRIGHT_SKIP_BROWSER_GC=1 npm --prefix web exec -- playwright install chromium
@@ -43,3 +44,6 @@ go run ./cmd/deskrealm serve
 | `GET /v1/auth/session` | 当前账号、组织、角色、会话绑定的 CSRF 值 |
 | `POST /v1/auth/logout` | 撤销会话并清理 Cookie 后返回 204 |
 | `GET /v1/overview` | 当前组织及管理能力 |
+| `GET /v1/admin/users` | 平台管理员可分页查看账号、角色和状态 |
+| `POST /v1/admin/users` | 创建成员账号，需当前会话的 CSRF 值 |
+| `POST /v1/admin/users/{id}/{enable,disable,archive}` | 记录原因并变更状态。停用或归档会撤销现有登录会话 |

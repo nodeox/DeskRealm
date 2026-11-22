@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import { nextTick, onMounted, ref, watch } from 'vue'
+import { api, json, RequestError } from './api'
+import UsersPanel from './UsersPanel.vue'
 
-type Screen = 'loading' | 'initialize' | 'login' | 'overview' | 'unavailable'
+type Screen = 'loading' | 'initialize' | 'login' | 'overview' | 'users' | 'unavailable'
 type Session = {
   username: string
   organization: string
@@ -32,37 +34,9 @@ watch(() => props.ticket, (value) => {
   }
 })
 
-const messages: Record<string, string> = {
-  already_initialized: '中心已完成初始化，请登录。',
-  invalid_or_expired_ticket: '初始化链接无效或已过期。请在中心主机重新生成链接。',
-  invalid_organization: '请输入 1 到 80 个字符的组织名称。',
-  invalid_username: '账号须以英文字母开头，长度为 3 到 40 位，可包含数字、点、下划线和连字符。',
-  invalid_password: '密码至少需要 12 个字符。',
-  invalid_credentials: '账号或密码有误，请重新输入。',
-  try_again_later: '请求过于频繁，请稍后重试。',
-  origin_denied: '当前访问地址与中心配置不一致。',
-  service_error: '中心暂时无法处理请求，请稍后重试。',
-}
-
-class RequestError extends Error {
-  constructor(readonly status: number, readonly code: string) {
-    super(messages[code] ?? '请求失败，请重试。')
-  }
-}
-
-async function api<T>(path: string, options?: RequestInit): Promise<T> {
-  const response = await fetch(path, options)
-  if (!response.ok) {
-    const data = await response.json().catch(() => null) as { error?: string } | null
-    throw new RequestError(response.status, data?.error ?? 'service_error')
-  }
-  if (response.status === 204 || response.status === 201) return undefined as T
-  return response.json() as Promise<T>
-}
-
 async function show(page: Screen) {
   screen.value = page
-  const path = page === 'initialize' || page === 'login' || page === 'overview' ? '/' + page : ''
+  const path = page === 'initialize' || page === 'login' || page === 'overview' || page === 'users' ? '/' + page : ''
   if (path && path !== location.pathname) history.replaceState(null, '', path)
   await nextTick()
   heading.value?.focus()
@@ -79,7 +53,7 @@ async function loadSignedIn(allowAnonymous: boolean) {
     throw cause
   }
   overview.value = await api<Overview>('/v1/overview')
-  await show('overview')
+  await show(overview.value.can_manage && location.pathname === '/users' ? 'users' : 'overview')
 }
 
 async function load() {
@@ -92,10 +66,6 @@ async function load() {
   } catch {
     await show('unavailable')
   }
-}
-
-function json(value: object) {
-  return { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(value) }
 }
 
 async function submit() {
@@ -150,24 +120,28 @@ onMounted(load)
 </script>
 
 <template>
-  <div v-if="screen === 'overview' && session && overview" class="workspace">
+  <div v-if="(screen === 'overview' || screen === 'users') && session && overview" class="workspace">
     <aside class="sidebar" aria-label="工作台导航">
       <div class="brand"><span class="brand-icon" aria-hidden="true"></span><span><strong>端域</strong><small>DeskRealm</small></span></div>
       <p class="nav-heading">工作台</p>
-      <a class="nav-current" href="/overview" aria-current="page">概览</a>
+      <nav class="nav-links">
+        <a class="nav-link" href="/overview" :aria-current="screen === 'overview' ? 'page' : undefined">概览</a>
+        <a v-if="overview.can_manage" class="nav-link" href="/users" :aria-current="screen === 'users' ? 'page' : undefined">用户与权限</a>
+      </nav>
     </aside>
     <header class="topbar">
-      <span class="breadcrumb">工作台 / 概览</span>
+      <span class="breadcrumb">工作台 / {{ screen === 'users' ? '用户与权限' : '概览' }}</span>
       <div class="account">
         <div><strong>{{ session.username }}</strong><small>{{ overview.can_manage ? '平台管理员' : '成员' }}</small></div>
         <button class="secondary" :disabled="submitting" @click="logout">退出登录</button>
       </div>
     </header>
     <main class="content">
-      <h1 ref="heading" tabindex="-1">概览</h1>
+      <h1 ref="heading" tabindex="-1">{{ screen === 'users' ? '用户与权限' : '概览' }}</h1>
       <p class="muted">{{ overview.organization }}</p>
       <p v-if="error" class="error" role="alert">{{ error }}</p>
-      <section class="panel" aria-labelledby="organization-title">
+      <UsersPanel v-if="screen === 'users'" :csrf="session.csrf_token" @expired="load" />
+      <section v-else class="panel" aria-labelledby="organization-title">
         <h2 id="organization-title">当前组织</h2>
         <dl>
           <div><dt>组织</dt><dd>{{ overview.organization }}</dd></div>
