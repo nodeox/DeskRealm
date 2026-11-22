@@ -9,9 +9,9 @@
 
 ### M0 安装与传输基线
 
-- [ ] **BASE-01**: 管理员可用固定版本和摘要生成 Linux 中心与单中继的 Compose 配置，配置包含正确发布的原生端口。
-- [ ] **BASE-02**: 管理员可重复运行安装原型，查看有效中心和公钥指纹，并用持久状态重建服务。
-- [ ] **BASE-03**: 测试人员可复跑双 Windows 注册、直连、强制中继和服务重建的取证步骤。
+- [x] **BASE-01**: 管理员可用固定版本和摘要生成 Linux 中心与单中继的 Compose 配置，配置包含正确发布的原生端口。
+- [x] **BASE-02**: 管理员可重复运行安装原型，查看有效中心和公钥指纹，并用持久状态重建服务。
+- [x] **BASE-03**: 测试人员可复跑双 Windows 注册、直连、强制中继和服务重建的取证步骤。
 
 ### M1 用户、设备与管理面
 
@@ -64,9 +64,9 @@ M4 包括浏览器主控、原生 LDAP、邮件验证和恢复、更多平台、
 
 | Requirement | Phase | Status |
 | --- | --- | --- |
-| BASE-01 | Phase 1 | Pending |
-| BASE-02 | Phase 1 | Pending |
-| BASE-03 | Phase 1 | Pending |
+| BASE-01 | Phase 1 | Complete |
+| BASE-02 | Phase 1 | Complete |
+| BASE-03 | Phase 1 | Complete |
 | FR-02 | Phase 2 | Pending |
 | FR-03 | Phase 2 | Pending |
 | FR-04 | Phase 2 | Pending |
