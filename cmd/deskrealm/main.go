@@ -123,6 +123,16 @@ func run(ctx context.Context, args []string) error {
 		ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second,
 		WriteTimeout: 20 * time.Second, IdleTimeout: time.Minute,
 	}
+	workerCtx, cancelWorker := context.WithCancel(ctx)
+	workerDone := make(chan struct{})
+	go func() {
+		defer close(workerDone)
+		store.RunTaskWorker(workerCtx)
+	}()
+	defer func() {
+		cancelWorker()
+		<-workerDone
+	}()
 	done := make(chan struct{})
 	defer close(done)
 	go func() {

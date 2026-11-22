@@ -157,7 +157,7 @@ func auditQuery(ctx context.Context, tx pgx.Tx, who actor, f auditFilter, id str
 	return pgx.AppendRows(out, rows, pgx.RowToStructByPos[auditRow])
 }
 
-func (a *API) auditActor(r *http.Request, write bool, run func(pgx.Tx, actor) error) error {
+func (a *API) withActor(r *http.Request, write bool, run func(pgx.Tx, actor) error) error {
 	ctx := r.Context()
 	options := pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly}
 	if write {
@@ -186,7 +186,7 @@ func (a *API) readAudit(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	var out auditPage
 	var detail auditDetail
-	err = a.auditActor(r, false, func(tx pgx.Tx, who actor) error {
+	err = a.withActor(r, false, func(tx pgx.Tx, who actor) error {
 		read, export, err := auditCapabilities(ctx, tx, who)
 		if err != nil {
 			return err
@@ -244,7 +244,7 @@ func (a *API) exportAudit(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx := r.Context()
 	var out []auditRow
-	err = a.auditActor(r, true, func(tx pgx.Tx, who actor) error {
+	err = a.withActor(r, true, func(tx pgx.Tx, who actor) error {
 		_, export, err := auditCapabilities(ctx, tx, who)
 		if err != nil {
 			return err

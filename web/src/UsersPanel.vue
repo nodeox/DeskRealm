@@ -8,11 +8,12 @@ type UserList = { users: ManagedUser[]; next?: string }
 type Action = 'enable' | 'disable' | 'archive' | 'recovery' | 'totp-reset' | 'transfer-platform-admin'
 type Form = 'direct' | 'invite' | 'import'
 type IssuedLink = { url: string; expires_at: string }
-type ImportEntry = { username: string; result: 'pending' | 'exists' }
+type ImportEntry = { username: string; result: 'pending' | 'exists' | 'import_failed' }
 
 const props = defineProps<{ csrf: string; admin: boolean }>()
 const emit = defineEmits<{ expired: [] }>()
 const statusLabel: Record<UserStatus, string> = { pending: '待激活', active: '已启用', disabled: '已停用', archived: '已归档' }
+const importLabels: Record<ImportEntry['result'], string> = { pending: '待激活', exists: '已存在', import_failed: '写入失败' }
 const actionLabel: Record<Action, string> = {
   enable: '启用', disable: '停用', archive: '归档', recovery: '恢复',
   'totp-reset': '重置验证', 'transfer-platform-admin': '移交管理员',
@@ -29,6 +30,7 @@ const password = ref('')
 const importNames = ref('')
 const importKey = ref('')
 const imported = ref<ImportEntry[]>([])
+const importTask = ref('')
 const issued = ref<IssuedLink>()
 const dialog = ref<HTMLDialogElement>()
 const pending = ref<{ action: Action; user: ManagedUser }>()
@@ -103,9 +105,10 @@ async function importUsers() {
   busy.value = true
   error.value = ''
   try {
-    const response = await api<{ entries: ImportEntry[] }>('/v1/admin/users/imports',
+    const response = await api<{ id: string; entries: ImportEntry[] }>('/v1/admin/users/imports',
       json({ idempotency_key: importKey.value, usernames }, props.csrf))
     imported.value = response.entries
+    importTask.value = response.id
     form.value = undefined
     importNames.value = ''
     importKey.value = ''
@@ -223,7 +226,8 @@ onMounted(() => refresh())
     </div>
     <details v-if="imported.length" class="import-results">
       <summary>本次导入结果（{{ imported.length }} 项）</summary>
-      <ul><li v-for="entry in imported" :key="entry.username">{{ entry.username }} · {{ entry.result === 'exists' ? '已存在' : '待激活' }}</li></ul>
+      <ul><li v-for="entry in imported" :key="entry.username">{{ entry.username }} · {{ importLabels[entry.result] }}</li></ul>
+      <a :href="'/tasks?task=' + encodeURIComponent(importTask)">查看导入任务</a>
     </details>
     <div class="table-wrap">
       <table>

@@ -139,7 +139,13 @@ func (a *API) decideDevice(w http.ResponseWriter, r *http.Request) {
 			return err
 		}
 		result.RegistrationState = target
-		return audit(ctx, tx, who.Organization, who.ID, "device."+target, id)
+		taskID, err := finishEnrollmentTask(ctx, tx, id, who.ID, target)
+		if err != nil {
+			return err
+		}
+		_, err = addAuditEvent(ctx, tx, auditEvent{OrganizationID: who.Organization, ActorID: who.ID, ResourceID: id,
+			TaskID: taskID, DeviceGroupID: result.GroupID, Action: "device." + target, Result: "success"})
+		return err
 	})
 	if err != nil {
 		failure(w, "decide device", err)

@@ -119,6 +119,7 @@ func (a *API) issueEnrollment(w http.ResponseWriter, r *http.Request) {
 
 type lockedEnrollment struct {
 	ID, Organization, GroupID, Platform string
+	Issuer                              string
 	Expires                             time.Time
 	Live, Consumed                      bool
 }
@@ -126,9 +127,9 @@ type lockedEnrollment struct {
 func lockEnrollment(ctx context.Context, tx pgx.Tx, credential string) (lockedEnrollment, error) {
 	var e lockedEnrollment
 	err := tx.QueryRow(ctx, `SELECT id,organization_id,group_id,platform,expires_at,
-		expires_at>clock_timestamp(),consumed_at IS NOT NULL
+		expires_at>clock_timestamp(),consumed_at IS NOT NULL,issued_by
 		FROM enrollment_credentials WHERE digest=$1 FOR UPDATE`, digest(credential)).
-		Scan(&e.ID, &e.Organization, &e.GroupID, &e.Platform, &e.Expires, &e.Live, &e.Consumed)
+		Scan(&e.ID, &e.Organization, &e.GroupID, &e.Platform, &e.Expires, &e.Live, &e.Consumed, &e.Issuer)
 	if errors.Is(err, pgx.ErrNoRows) {
 		err = errEnrollment
 	}
@@ -288,7 +289,13 @@ func (s Store) completeEnrollment(ctx context.Context, in enrollmentRequest, key
 				return err
 			}
 		}
-		return audit(ctx, tx, e.Organization, "", "device.enrollment_pending", out.DeviceID)
+		taskID, err := createEnrollmentTask(ctx, tx, e.Organization, e.Issuer, out.DeviceID, rustdeskID)
+		if err != nil {
+			return err
+		}
+		_, err = addAuditEvent(ctx, tx, auditEvent{OrganizationID: e.Organization, ResourceID: out.DeviceID,
+			TaskID: taskID, DeviceGroupID: e.GroupID, Action: "device.enrollment_pending", Result: "success"})
+		return err
 	})
 	return out, err
 }

@@ -142,6 +142,15 @@ func applyDeviceChange(ctx context.Context, tx pgx.Tx, who actor, d *device, act
 			ResourceID: d.ID, DeviceGroupID: originalGroup, Action: event, Result: "success", Reason: reason})
 		return err
 	}
+	if action == "retire" {
+		taskID, err := finishEnrollmentTask(ctx, tx, d.ID, who.ID, "retired")
+		if err != nil {
+			return err
+		}
+		_, err = addAuditEvent(ctx, tx, auditEvent{OrganizationID: who.Organization, ActorID: who.ID, ResourceID: d.ID,
+			TaskID: taskID, DeviceGroupID: d.GroupID, Action: event, Result: "success", Reason: reason})
+		return err
+	}
 	return auditWithReason(ctx, tx, who.Organization, who.ID, event, d.ID, reason)
 }
 

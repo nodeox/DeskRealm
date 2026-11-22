@@ -14,8 +14,9 @@ case "$mode" in
   device-lifecycle) tests=(TestDeviceLifecyclePostgres TestDeviceStateIsolationPostgres) ;;
   addressbooks) tests=(TestAddressBookScopesPostgres) ;;
   audit) tests=(TestAuditScopePostgres TestAuditReceiptsPostgres) ;;
+  tasks) tests=(TestTaskRetryPostgres TestTaskLeaseAndReceiptsPostgres TestTaskMigrationPostgres) ;;
   bootstrap-browser|resources-browser) ;;
-  *) echo "usage: $0 bootstrap-api|user-status|identity-lifecycle|identity-federation|authorization|enrollment|device-lifecycle|addressbooks|audit|bootstrap-browser|resources-browser" >&2; exit 2 ;;
+  *) echo "usage: $0 bootstrap-api|user-status|identity-lifecycle|identity-federation|authorization|enrollment|device-lifecycle|addressbooks|audit|tasks|bootstrap-browser|resources-browser" >&2; exit 2 ;;
 esac
 
 scratch=$(mktemp -d "${TMPDIR:-/tmp}/deskrealm-m1.XXXXXX")
@@ -99,6 +100,21 @@ export DESKREALM_BROWSER_BASE="$DESKREALM_PUBLIC_ORIGIN"
 npm --prefix web run build
 go build -o "$scratch/deskrealm" ./cmd/deskrealm
 "$scratch/deskrealm" migrate
+if [[ "$mode" == resources-browser ]]; then
+  docker exec -i "$container" psql -X --set ON_ERROR_STOP=1 --dbname deskrealm --username postgres >/dev/null <<'SQL'
+CREATE SEQUENCE browser_import_attempt;
+CREATE FUNCTION fail_first_browser_import() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF NEW.username = 'browser-retry-account' AND nextval('browser_import_attempt') = 1 THEN
+        RAISE check_violation USING MESSAGE = 'browser fixture: fail first account import';
+    END IF;
+    RETURN NEW;
+END
+$$;
+CREATE TRIGGER browser_import_fixture BEFORE INSERT ON users
+FOR EACH ROW EXECUTE FUNCTION fail_first_browser_import();
+SQL
+fi
 export DESKREALM_BROWSER_TICKET
 DESKREALM_BROWSER_TICKET=$("$scratch/deskrealm" bootstrap-ticket)
 "$scratch/deskrealm" serve >"$scratch/server.log" 2>&1 &

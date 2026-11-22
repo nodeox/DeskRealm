@@ -13,7 +13,7 @@ async function signIn(page: Page, username: string) {
   await expect(page.getByRole('heading', { name: '概览', exact: true })).toBeVisible()
 }
 
-test('共享通讯录和审计遵守范围并即时撤权', async ({ page, browser, baseURL }) => {
+test('共享通讯录、审计和任务中心按实际授权与结果运行', async ({ page, browser, baseURL }) => {
   const invitation = process.env.DESKREALM_BROWSER_TICKET
   if (!invitation || !baseURL) throw new Error('Run scripts/deskrealm-m1-test resources-browser')
   await page.goto(invitation)
@@ -66,11 +66,40 @@ test('共享通讯录和审计遵守范围并即时撤权', async ({ page, brows
   const firstID = await enroll(firstGroup.id, first)
   const hiddenID = await enroll(secondGroup.id, hidden)
 
+  await page.getByRole('link', { name: '任务中心' }).click()
+  const pendingTask = page.getByRole('row').filter({ hasText: '前台设备' })
+  await expect(pendingTask).toContainText('待审批 1')
+  await pendingTask.getByRole('button', { name: '详情' }).click()
+  await expect(page.getByRole('row').filter({ hasText: first })).toContainText('等待设备审批')
+
   await page.getByRole('link', { name: '设备管理', exact: true }).click()
   const row = page.getByRole('row').filter({ hasText: first })
   await row.getByRole('button', { name: '批准', exact: true }).click()
   await page.getByRole('dialog', { name: '批准设备登记' }).getByRole('button', { name: '确认批准' }).click()
   await expect(row).toContainText('已批准')
+
+  await page.getByRole('link', { name: '用户与权限', exact: true }).click()
+  await page.getByRole('button', { name: '导入账号' }).click()
+  await page.getByLabel('待导入账号').fill('browser-retry-account\nbrowser-stable-account')
+  await page.getByRole('button', { name: '导入', exact: true }).click()
+  await page.getByText('本次导入结果（2 项）').click()
+  await page.getByRole('link', { name: '查看导入任务' }).click()
+  const retryRow = page.getByRole('row').filter({ hasText: 'browser-retry-account' })
+  const stableRow = page.getByRole('row').filter({ hasText: 'browser-stable-account' })
+  await expect(retryRow).toContainText('账号写入失败')
+  await expect(stableRow).toContainText('成功')
+  await retryRow.getByRole('checkbox').check()
+  await page.getByRole('button', { name: '重试所选失败项' }).click()
+  const retryDialog = page.getByRole('dialog', { name: '确认重试' })
+  await expect(retryDialog).toContainText('browser-retry-account')
+  await expect(retryDialog).not.toContainText('browser-stable-account')
+  await retryDialog.getByRole('button', { name: '确认重试' }).click()
+  await expect(page.getByRole('status')).toContainText('已提交 1 项重试')
+  await expect(async () => {
+    await page.getByRole('button', { name: '刷新', exact: true }).click()
+    await expect(retryRow).toContainText('第 1 次重试 · 账号待激活', { timeout: 500 })
+  }).toPass({ timeout: 8000 })
+  await expect(stableRow).not.toContainText('第 1 次重试')
 
   await page.getByRole('link', { name: '通讯录', exact: true }).click()
   await page.getByRole('button', { name: '新建通讯录' }).click()
@@ -106,6 +135,14 @@ test('共享通讯录和审计遵守范围并即时撤权', async ({ page, brows
     await viewer.getByRole('link', { name: '设备管理', exact: true }).click()
     await expect(viewer.getByRole('row').filter({ hasText: first })).toBeVisible()
     await expect(viewer.getByRole('row').filter({ hasText: hidden })).toHaveCount(0)
+    await viewer.getByRole('link', { name: '任务中心' }).click()
+    await expect(viewer.getByRole('row').filter({ hasText: '机房设备' })).toHaveCount(0)
+    await expect(viewer.getByRole('row').filter({ hasText: '账号导入' })).toHaveCount(0)
+    const visibleTask = viewer.getByRole('row').filter({ hasText: '前台设备' })
+    await expect(visibleTask).toContainText('成功 1')
+    await visibleTask.getByRole('button', { name: '详情' }).click()
+    await expect(viewer.getByRole('row').filter({ hasText: first })).toContainText('设备已通过审批')
+    await expect(viewer.getByRole('button', { name: '重试所选失败项' })).toHaveCount(0)
     await viewer.getByRole('link', { name: '通讯录', exact: true }).click()
     const openBook = viewer.getByRole('button', { name: '打开 值班设备' })
     await openBook.click()

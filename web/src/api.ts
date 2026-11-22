@@ -50,6 +50,9 @@ const messages: Record<string, string> = {
   invalid_audit_request: '检查筛选条件、关联 ID、授权范围或保留期后重试。',
   audit_event_not_found: '事件不存在或已超出访问范围。',
   audit_export_limit: '导出最多包含 1,000 条事件。请缩小查询范围后重试。',
+  invalid_task_request: '请检查任务与重试对象。',
+  task_not_found: '任务不存在或当前账号无权查看。',
+  task_target_conflict: '所选对象的状态已变更。请关闭确认窗口并刷新任务。',
 }
 
 export class RequestError extends Error {

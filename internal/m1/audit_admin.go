@@ -56,7 +56,7 @@ func (a *API) saveAuditGrant(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := r.Context()
-	err := a.auditActor(r, true, func(tx pgx.Tx, who actor) error {
+	err := a.withActor(r, true, func(tx pgx.Tx, who actor) error {
 		if !who.PlatformAdmin {
 			return errForbidden
 		}
@@ -107,7 +107,7 @@ func (a *API) revokeAuditGrant(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := r.Context()
-	err := a.auditActor(r, true, func(tx pgx.Tx, who actor) error {
+	err := a.withActor(r, true, func(tx pgx.Tx, who actor) error {
 		if !who.PlatformAdmin {
 			return errForbidden
 		}
@@ -132,7 +132,7 @@ func (a *API) auditOptions(w http.ResponseWriter, r *http.Request) {
 		CanAdminister bool `json:"can_administer"`
 		RetentionDays int  `json:"retention_days,omitempty"`
 	}{}
-	err := a.auditActor(r, false, func(tx pgx.Tx, who actor) error {
+	err := a.withActor(r, false, func(tx pgx.Tx, who actor) error {
 		var err error
 		result.CanRead, result.CanExport, err = auditCapabilities(ctx, tx, who)
 		if err != nil {
@@ -167,7 +167,7 @@ func (a *API) saveAuditRetention(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := r.Context()
-	err := a.auditActor(r, true, func(tx pgx.Tx, who actor) error {
+	err := a.withActor(r, true, func(tx pgx.Tx, who actor) error {
 		if !who.PlatformAdmin {
 			return errForbidden
 		}
@@ -191,7 +191,7 @@ func (a *API) pruneAudit(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx := r.Context()
 	var removed int64
-	err := a.auditActor(r, true, func(tx pgx.Tx, who actor) error {
+	err := a.withActor(r, true, func(tx pgx.Tx, who actor) error {
 		if !who.PlatformAdmin {
 			return errForbidden
 		}

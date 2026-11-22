@@ -171,28 +171,34 @@ func (s Store) importUsers(ctx context.Context, actorToken, requestKey string, u
 		case !errors.Is(err, pgx.ErrNoRows):
 			return err
 		}
-		output.Entries = make([]importEntry, 0, len(usernames))
-		for _, name := range usernames {
-			var userID string
-			err := tx.QueryRow(ctx, `INSERT INTO users (organization_id,username,status)
-				VALUES ($1,$2,'pending') ON CONFLICT (organization_id,username) DO NOTHING RETURNING id`, orgID, name).Scan(&userID)
-			switch {
-			case errors.Is(err, pgx.ErrNoRows):
-				output.Entries = append(output.Entries, importEntry{name, "exists"})
-			case err != nil:
-				return err
-			default:
-				output.Entries = append(output.Entries, importEntry{name, "pending"})
-				if err := audit(ctx, tx, orgID, actorID, "user.imported", userID); err != nil {
-					return err
-				}
-			}
-		}
-		if err := tx.QueryRow(ctx, `INSERT INTO identity_imports (organization_id,idempotency_key,payload_digest,result,created_by)
-			VALUES ($1,$2,$3,$4,$5) RETURNING id`, orgID, requestKey, hash, output.Entries, actorID).Scan(&output.ID); err != nil {
+		if err := tx.QueryRow(ctx, `INSERT INTO tasks(organization_id,kind,owner_id)
+			VALUES($1,'user_import',$2) RETURNING id`, orgID, actorID).Scan(&output.ID); err != nil {
 			return err
 		}
-		return audit(ctx, tx, orgID, actorID, "user.import_batch", output.ID)
+		output.Entries = make([]importEntry, 0, len(usernames))
+		for _, name := range usernames {
+			result, err := importAccount(ctx, tx, orgID, actorID, output.ID, name)
+			if err != nil {
+				return err
+			}
+			output.Entries = append(output.Entries, importEntry{name, result})
+			failed := result == "import_failed"
+			if _, err := tx.Exec(ctx, `WITH target AS (
+				INSERT INTO task_targets(task_id,object_key,state,result_code,retryable)
+				VALUES($1,$2,CASE WHEN $4 THEN 'failed' ELSE 'succeeded' END,$3,$4) RETURNING id,version
+			)
+			INSERT INTO task_attempts(id,target_id,sequence,requested_by,result_code,final_version,finished_at)
+			SELECT gen_random_uuid(),id,0,$5,$3,version,clock_timestamp() FROM target`, output.ID, name, result, failed, actorID); err != nil {
+				return err
+			}
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO identity_imports (id,organization_id,idempotency_key,payload_digest,result,created_by)
+			VALUES ($1,$2,$3,$4,$5,$6)`, output.ID, orgID, requestKey, hash, output.Entries, actorID); err != nil {
+			return err
+		}
+		_, err = addAuditEvent(ctx, tx, auditEvent{OrganizationID: orgID, ActorID: actorID,
+			ResourceID: output.ID, TaskID: output.ID, Action: "user.import_batch", Result: "success"})
+		return err
 	})
 	return output, err
 }

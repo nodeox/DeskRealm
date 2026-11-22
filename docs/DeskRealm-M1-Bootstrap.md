@@ -15,6 +15,7 @@ bash scripts/deskrealm-m1-test enrollment
 bash scripts/deskrealm-m1-test device-lifecycle
 bash scripts/deskrealm-m1-test addressbooks
 bash scripts/deskrealm-m1-test audit
+bash scripts/deskrealm-m1-test tasks
 npm --prefix web ci --ignore-scripts
 npm --prefix web run typecheck
 PLAYWRIGHT_SKIP_BROWSER_GC=1 npm --prefix web exec -- playwright install chromium
@@ -107,6 +108,14 @@ deskrealm/device-key-rotation/v1
 
 保留期默认 90 天，可设为 1 至 3650 天。管理员确认后每批最多清理 250 条符合保留规则的事件。清理保留待回执事件和待投递记录，也保留接收或确认时间尚未超过保留期的事件。清理操作有单独的审计记录。
 
+## 任务中心
+
+账号导入和设备提交入网时生成任务。平台管理员可查阅组织任务，普通成员可查看本人发起的导入以及当前获准查看的设备组任务。设备待审批任务由设备管理中的批准、拒绝或退役操作更新。审批结果保留在任务详情。
+
+账号导入初次提交后返回每个账号的结果。用同一请求键和相同内容再次提交，仍返回首批回执。管理员可进入任务详情勾选失败项，核对对象后提交重试。任务详情展示当前状态、执行记录和回执 ID，可用任务 ID 在审计中查找关联事件。
+
+`deskrealm serve` 自带任务工作者，负责处理待执行的导入重试。多个实例使用 PostgreSQL 行锁领取不同对象。执行租约为 30 秒，进程退出后，其他工作者或重启的中心可接管过期租约。每个失败对象最多领取五次重试，过期接管也计入次数。版本和租约均有效时才可提交执行结果。账号写入、执行记录、审计与出站事件在同一事务提交。
+
 | 接口 | 返回 |
 | --- | --- |
 | `GET /v1/bootstrap/status` | 初始化状态 |
@@ -140,3 +149,5 @@ deskrealm/device-key-rotation/v1
 | `GET /v1/admin/audit-events`、`GET /v1/admin/audit-events/{id}`、`POST /v1/admin/audit-events/export` | 按授权范围查询、查看详情和导出 CSV |
 | `GET /v1/admin/audit-options`、`GET/POST /v1/admin/audit-grants`、`POST /v1/admin/audit-grants/{id}/revoke` | 查询审计能力并管理查询和导出授权 |
 | `POST /v1/admin/audit-retention`、`POST /v1/admin/audit-retention/prune` | 保存保留期并清理一批过期事件 |
+| `GET /v1/admin/tasks`、`GET /v1/admin/tasks/{id}` | 按当前授权查看任务、对象结果和执行回执 |
+| `POST /v1/admin/tasks/{id}/retry` | 提交失败对象 ID 和版本，返回 202 与排队数。任一对象版本或状态已变更则返回 409 |
