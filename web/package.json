@@ -1,0 +1,20 @@
+{
+  "name": "deskrealm-console",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "vue-tsc --noEmit",
+    "build": "vite build",
+    "test:bootstrap": "playwright test tests/bootstrap.spec.ts"
+  },
+  "dependencies": {
+    "vue": "3.5.46"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.65.1",
+    "@vitejs/plugin-vue": "6.0.11",
+    "typescript": "6.0.3",
+    "vite": "8.3.8",
+    "vue-tsc": "3.3.14"
+  }
+}
