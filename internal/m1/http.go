@@ -129,6 +129,15 @@ func NewHandler(store Store, origin *url.URL, web fs.FS, config ...AuthConfig) h
 	mux.HandleFunc("GET /v1/address-books/{book}/shares", api.listBookGrants)
 	mux.HandleFunc("POST /v1/address-books/{book}/shares", api.grantBook)
 	mux.HandleFunc("POST /v1/address-books/{book}/shares/{grant}/revoke", api.revokeBook)
+	mux.HandleFunc("GET /v1/admin/audit-events", api.readAudit)
+	mux.HandleFunc("GET /v1/admin/audit-events/{id}", api.readAudit)
+	mux.HandleFunc("POST /v1/admin/audit-events/export", api.exportAudit)
+	mux.HandleFunc("GET /v1/admin/audit-options", api.auditOptions)
+	mux.HandleFunc("GET /v1/admin/audit-grants", api.listAuditGrants)
+	mux.HandleFunc("POST /v1/admin/audit-grants", api.saveAuditGrant)
+	mux.HandleFunc("POST /v1/admin/audit-grants/{id}/revoke", api.revokeAuditGrant)
+	mux.HandleFunc("POST /v1/admin/audit-retention", api.saveAuditRetention)
+	mux.HandleFunc("POST /v1/admin/audit-retention/prune", api.pruneAudit)
 	apiNotFound := func(w http.ResponseWriter, _ *http.Request) {
 		writeError(w, http.StatusNotFound, "not_found")
 	}
@@ -157,7 +166,7 @@ func (a *API) frontend(w http.ResponseWriter, r *http.Request) {
 	}
 	p := strings.TrimPrefix(r.URL.Path, "/")
 	switch p {
-	case "", "initialize", "login", "overview", "users", "groups", "devices", "address-books", "api-tokens", "security", "accept-invitation", "recover":
+	case "", "initialize", "login", "overview", "users", "groups", "devices", "address-books", "audit", "api-tokens", "security", "accept-invitation", "recover":
 		w.Header().Set("Cache-Control", "no-store")
 		http.ServeFileFS(w, r, a.web, "index.html")
 	default:
@@ -210,7 +219,11 @@ func failure(w http.ResponseWriter, operation string, err error) {
 		writeError(w, http.StatusConflict, err.Error())
 	case errors.Is(err, errControlRoleConflict), errors.Is(err, errControlRoleVersion):
 		writeError(w, http.StatusConflict, err.Error())
-	case errors.Is(err, errDeviceMissing), errors.Is(err, errDeviceGroupMissing):
+	case errors.Is(err, errAuditInvalid):
+		writeError(w, http.StatusBadRequest, err.Error())
+	case errors.Is(err, errAuditExportLimit), errors.Is(err, errAuditConflict):
+		writeError(w, http.StatusConflict, err.Error())
+	case errors.Is(err, errDeviceMissing), errors.Is(err, errDeviceGroupMissing), errors.Is(err, errAuditMissing):
 		writeError(w, http.StatusNotFound, err.Error())
 	case errors.Is(err, errBookMissing), errors.Is(err, errEntryMissing), errors.Is(err, errGrantMissing):
 		writeError(w, http.StatusNotFound, err.Error())
@@ -396,12 +409,21 @@ func (a *API) overview(w http.ResponseWriter, r *http.Request) {
 			failure(w, "overview device scope", err)
 			return
 		}
+		canAudit := admin
+		if !admin {
+			err := a.store.DB.QueryRow(r.Context(), "SELECT EXISTS(SELECT 1 FROM audit_grants WHERE user_id=$1)", user.UserID).Scan(&canAudit)
+			if err != nil {
+				failure(w, "overview audit scope", err)
+				return
+			}
+		}
 		result := struct {
 			Organization   string `json:"organization"`
 			CanManage      bool   `json:"can_manage"`
 			CanReadUsers   bool   `json:"can_read_users"`
 			CanReadDevices bool   `json:"can_read_devices"`
-		}{user.Organization, admin, canRead, canDevices}
+			CanReadAudit   bool   `json:"can_read_audit"`
+		}{user.Organization, admin, canRead, canDevices, canAudit}
 		writeJSON(w, http.StatusOK, result)
 	}
 }

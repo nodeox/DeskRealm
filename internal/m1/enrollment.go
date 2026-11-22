@@ -104,7 +104,11 @@ func (a *API) issueEnrollment(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return err
 		}
-		return audit(ctx, tx, who.Organization, who.ID, "device.enrollment_issued", id)
+		_, err = addAuditEvent(ctx, tx, auditEvent{
+			OrganizationID: who.Organization, ActorID: who.ID, ResourceID: id,
+			DeviceGroupID: groupID, Action: "device.enrollment_issued", Result: "success",
+		})
+		return err
 	})
 	if err != nil {
 		failure(w, "issue enrollment", err)

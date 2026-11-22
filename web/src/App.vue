@@ -7,8 +7,9 @@ import GroupsPanel from './GroupsPanel.vue'
 import TokensPanel from './TokensPanel.vue'
 import DevicesPanel from './DevicesPanel.vue'
 import AddressBooksPanel from './AddressBooksPanel.vue'
+import AuditPanel from './AuditPanel.vue'
 
-type Screen = 'loading' | 'initialize' | 'login' | 'overview' | 'users' | 'groups' | 'devices' | 'address-books' | 'api-tokens' | 'security' | 'accept-invitation' | 'recover' | 'unavailable'
+type Screen = 'loading' | 'initialize' | 'login' | 'overview' | 'users' | 'groups' | 'devices' | 'address-books' | 'audit' | 'api-tokens' | 'security' | 'accept-invitation' | 'recover' | 'unavailable'
 type Session = {
   username: string
   organization: string
@@ -20,6 +21,7 @@ type Overview = {
   can_manage: boolean
   can_read_users: boolean
   can_read_devices: boolean
+  can_read_audit: boolean
 }
 
 const props = defineProps<{ ticket: string }>()
@@ -38,7 +40,7 @@ const verification = ref(false)
 const code = ref('')
 const workspaceTitles: Partial<Record<Screen, string>> = {
   overview: '概览', users: '用户与权限', groups: '用户组与委派', devices: '设备管理',
-  'address-books': '通讯录', 'api-tokens': 'API 令牌', security: '账号安全',
+  'address-books': '通讯录', audit: '会话与审计', 'api-tokens': 'API 令牌', security: '账号安全',
 }
 const workspaceTitle = computed(() => workspaceTitles[screen.value])
 const accountLink = computed(() => screen.value === 'accept-invitation' || screen.value === 'recover')
@@ -79,6 +81,7 @@ async function loadSignedIn(allowAnonymous: boolean) {
   overview.value = await api<Overview>('/v1/overview')
   const page = location.pathname === '/security' ? 'security' :
     location.pathname === '/address-books' ? 'address-books' :
+    overview.value.can_read_audit && location.pathname === '/audit' ? 'audit' :
     overview.value.can_read_devices && location.pathname === '/devices' ? 'devices' :
     overview.value.can_manage && location.pathname === '/groups' ? 'groups' :
     overview.value.can_manage && location.pathname === '/api-tokens' ? 'api-tokens' :
@@ -184,6 +187,7 @@ onMounted(load)
         <a class="nav-link" href="/overview" :aria-current="screen === 'overview' ? 'page' : undefined">概览</a>
         <a v-if="overview.can_read_devices" class="nav-link" href="/devices" :aria-current="screen === 'devices' ? 'page' : undefined">设备管理</a>
         <a class="nav-link" href="/address-books" :aria-current="screen === 'address-books' ? 'page' : undefined">通讯录</a>
+        <a v-if="overview.can_read_audit" class="nav-link" href="/audit" :aria-current="screen === 'audit' ? 'page' : undefined">会话与审计</a>
         <a v-if="overview.can_read_users" class="nav-link" href="/users" :aria-current="screen === 'users' ? 'page' : undefined">用户与权限</a>
         <a v-if="overview.can_manage" class="nav-link" href="/groups" :aria-current="screen === 'groups' ? 'page' : undefined">用户组与委派</a>
         <a v-if="overview.can_manage" class="nav-link" href="/api-tokens" :aria-current="screen === 'api-tokens' ? 'page' : undefined">API 令牌</a>
@@ -204,6 +208,7 @@ onMounted(load)
       <UsersPanel v-if="screen === 'users'" :csrf="session.csrf_token" :admin="overview.can_manage" @expired="load" />
       <DevicesPanel v-else-if="screen === 'devices'" :csrf="session.csrf_token" :admin="overview.can_manage" @expired="load" />
       <AddressBooksPanel v-else-if="screen === 'address-books'" :csrf="session.csrf_token" @expired="load" />
+      <AuditPanel v-else-if="screen === 'audit'" :csrf="session.csrf_token" :admin="overview.can_manage" @expired="load" />
       <GroupsPanel v-else-if="screen === 'groups'" :csrf="session.csrf_token" @expired="load" />
       <TokensPanel v-else-if="screen === 'api-tokens'" :csrf="session.csrf_token" @expired="load" />
       <SecurityPanel v-else-if="screen === 'security'" :csrf="session.csrf_token" @expired="load" />

@@ -71,6 +71,7 @@ func (a *API) changeDevice(w http.ResponseWriter, r *http.Request) {
 }
 
 func applyDeviceChange(ctx context.Context, tx pgx.Tx, who actor, d *device, action string, in deviceChange) error {
+	originalGroup := d.GroupID
 	already := (action == "move" && d.GroupID == in.GroupID) || (action == "rename-id" && d.RustDeskID == in.RustDeskID) ||
 		(action == "disable" && d.RegistrationState == "disabled") || (action == "retire" && d.RegistrationState == "retired")
 	if already && (d.Version == in.Version || d.Version-1 == in.Version) {
@@ -134,6 +135,11 @@ func applyDeviceChange(ctx context.Context, tx pgx.Tx, who actor, d *device, act
 		}
 	}
 	if err := revokePendingRotations(ctx, tx, d.ID); err != nil {
+		return err
+	}
+	if action == "move" {
+		_, err := addAuditEvent(ctx, tx, auditEvent{OrganizationID: who.Organization, ActorID: who.ID,
+			ResourceID: d.ID, DeviceGroupID: originalGroup, Action: event, Result: "success", Reason: reason})
 		return err
 	}
 	return auditWithReason(ctx, tx, who.Organization, who.ID, event, d.ID, reason)

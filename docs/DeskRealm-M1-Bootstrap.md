@@ -14,6 +14,7 @@ bash scripts/deskrealm-m1-test authorization
 bash scripts/deskrealm-m1-test enrollment
 bash scripts/deskrealm-m1-test device-lifecycle
 bash scripts/deskrealm-m1-test addressbooks
+bash scripts/deskrealm-m1-test audit
 npm --prefix web ci --ignore-scripts
 npm --prefix web run typecheck
 PLAYWRIGHT_SKIP_BROWSER_GC=1 npm --prefix web exec -- playwright install chromium
@@ -98,6 +99,14 @@ deskrealm/device-key-rotation/v1
 
 获取条目时，中心同时核对通讯录权限和该设备的当前查看权限。组成员变更和共享撤销会影响下一次请求。分享和撤销写入审计。中心内部的 `ResolveAddressBookDevice` 在连接入口可重新检查当前授权和设备登记状态，并返回设备 UUID。M2 会话入口还需判定连接 ACL 后才能放行。
 
+## 审计检索、导出与保留
+
+「会话与审计」按事件名称、发生时间、回执状态及会话、任务或资源 ID 筛选。详情保留发生、接收和确认时间，区分待回执、已确认和重复回执。控制面管理操作在业务事务内追加审计和待投递记录。内部结果处理可按可信来源和稳定事件键确认回执，重复回执计数，冲突拒绝。实际终端会话回执由 M2 接入。
+
+平台管理员可在「审计设置」按全组织、本人事件、用户组或设备组授权。本人范围按事件操作者判定。组范围使用事件创建时保存的组，设备移组后旧事件仍属于原范围。迁移前缺少可靠组快照的事件保留组织及本人查询能力。筛选和单条详情应用同一权限。CSV 导出独立授权且每次最多 1,000 条，导出行为进入审计。操作者自由文本与内部幂等键不进入查询、详情和 CSV。
+
+保留期默认 90 天，可设为 1 至 3650 天。管理员确认后每批最多清理 250 条符合保留规则的事件。清理保留待回执事件和待投递记录，也保留接收或确认时间尚未超过保留期的事件。清理操作有单独的审计记录。
+
 | 接口 | 返回 |
 | --- | --- |
 | `GET /v1/bootstrap/status` | 初始化状态 |
@@ -128,3 +137,6 @@ deskrealm/device-key-rotation/v1
 | `GET/POST /v1/address-books`、`GET/POST /v1/address-books/{book}` | 查看、创建和修改通讯录名称 |
 | `GET/POST /v1/address-books/{book}/entries` 及条目子路径 | 读取、添加、编辑和移除设备条目。编辑与移除使用条目版本 |
 | `GET/POST /v1/address-books/{book}/shares`、`POST /v1/address-books/{book}/shares/{grant}/revoke` | 查看、设置及撤销用户或用户组共享 |
+| `GET /v1/admin/audit-events`、`GET /v1/admin/audit-events/{id}`、`POST /v1/admin/audit-events/export` | 按授权范围查询、查看详情和导出 CSV |
+| `GET /v1/admin/audit-options`、`GET/POST /v1/admin/audit-grants`、`POST /v1/admin/audit-grants/{id}/revoke` | 查询审计能力并管理查询和导出授权 |
+| `POST /v1/admin/audit-retention`、`POST /v1/admin/audit-retention/prune` | 保存保留期并清理一批过期事件 |

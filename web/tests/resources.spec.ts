@@ -1,6 +1,7 @@
 import { expect, test } from '@playwright/test'
 import type { Page } from '@playwright/test'
 import { generateKeyPairSync, sign } from 'node:crypto'
+import { readFile } from 'node:fs/promises'
 
 const password = 'deskrealm-browser-test-passphrase'
 
@@ -12,7 +13,7 @@ async function signIn(page: Page, username: string) {
   await expect(page.getByRole('heading', { name: '概览', exact: true })).toBeVisible()
 }
 
-test('按用户组共享通讯录并保持设备范围，撤销后无法访问', async ({ page, browser, baseURL }) => {
+test('共享通讯录和审计遵守范围并即时撤权', async ({ page, browser, baseURL }) => {
   const invitation = process.env.DESKREALM_BROWSER_TICKET
   if (!invitation || !baseURL) throw new Error('Run scripts/deskrealm-m1-test resources-browser')
   await page.goto(invitation)
@@ -134,6 +135,47 @@ test('按用户组共享通讯录并保持设备范围，撤销后无法访问',
     await expect(openBook).toHaveCount(0)
     await expect(viewer.getByRole('alert')).toContainText('无权访问')
     expect((await viewer.request.get('/v1/address-books/' + book.id + '/entries')).status()).toBe(404)
+
+    await expect(viewer.getByRole('link', { name: '会话与审计' })).toHaveCount(0)
+    await page.getByRole('link', { name: '会话与审计' }).click()
+    await page.getByRole('button', { name: '审计设置' }).click()
+    await page.getByLabel('审计员账号').fill(member)
+    await page.getByLabel('设备组名称').fill('前台设备')
+    await page.getByLabel('允许导出该范围').check()
+    await page.getByRole('button', { name: '保存审计授权' }).click()
+    await expect(page.getByRole('status').filter({ hasText: '审计授权已保存' })).toBeVisible()
+    await page.getByLabel('保留期（天）').fill('120')
+    await page.getByRole('button', { name: '保存保留期' }).click()
+    await expect(page.getByRole('status').filter({ hasText: '保留期已保存' })).toBeVisible()
+
+    await viewer.reload()
+    await viewer.getByRole('link', { name: '会话与审计' }).click()
+    await expect(viewer.getByRole('button', { name: '审计设置' })).toHaveCount(0)
+    await viewer.getByLabel('事件名称').fill('device.approved')
+    await viewer.getByRole('button', { name: '查询', exact: true }).click()
+    const audited = viewer.getByRole('row').filter({ hasText: 'device.approved' })
+    await expect(audited).toHaveCount(1)
+    await audited.getByRole('button', { name: '详情' }).click()
+    const eventDetail = viewer.getByRole('dialog', { name: '事件详情' })
+    await expect(eventDetail).toContainText(firstID)
+    await expect(eventDetail).toContainText('已确认')
+    await eventDetail.getByRole('button', { name: '关闭' }).click()
+
+    const download = viewer.waitForEvent('download')
+    await viewer.getByRole('button', { name: '导出 CSV' }).click()
+    const csv = await download
+    expect(csv.suggestedFilename()).toBe('deskrealm-audit.csv')
+    const downloadedPath = await csv.path()
+    if (!downloadedPath) throw new Error('CSV download path missing')
+    const csvText = await readFile(downloadedPath, 'utf8')
+    expect(csvText).toContain(firstID)
+    expect(csvText).not.toContain(hiddenID)
+
+    const auditor = page.getByRole('listitem').filter({ hasText: member })
+    await auditor.getByRole('button', { name: '撤销审计授权' }).click()
+    await page.getByRole('dialog', { name: '确认撤销审计授权' }).getByRole('button', { name: '确认', exact: true }).click()
+    await expect(auditor).toHaveCount(0)
+    expect((await viewer.request.get('/v1/admin/audit-events')).status()).toBe(403)
   } finally {
     await viewer.close()
   }

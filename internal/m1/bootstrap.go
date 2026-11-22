@@ -171,12 +171,10 @@ func audit(ctx context.Context, tx pgx.Tx, organizationID, actorID, action, reso
 }
 
 func auditWithReason(ctx context.Context, tx pgx.Tx, organizationID, actorID, action, resourceID, reason string) error {
-	_, err := tx.Exec(ctx, `
-		WITH event AS (
-			INSERT INTO audit_events (organization_id, actor_id, action, result, resource_id, reason)
-			VALUES ($1, NULLIF($2, '')::uuid, $3, 'success', $4, NULLIF($5, '')) RETURNING id
-		)
-		INSERT INTO outbox (event_id) SELECT id FROM event`, organizationID, actorID, action, resourceID, reason)
+	_, err := addAuditEvent(ctx, tx, auditEvent{
+		OrganizationID: organizationID, ActorID: actorID, ResourceID: resourceID,
+		Action: action, Result: "success", Reason: reason,
+	})
 	return err
 }
 

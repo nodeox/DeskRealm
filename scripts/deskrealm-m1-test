@@ -13,8 +13,9 @@ case "$mode" in
   enrollment) tests=(TestDeviceEnrollmentPostgres TestDeviceApprovalPostgres) ;;
   device-lifecycle) tests=(TestDeviceLifecyclePostgres TestDeviceStateIsolationPostgres) ;;
   addressbooks) tests=(TestAddressBookScopesPostgres) ;;
+  audit) tests=(TestAuditScopePostgres TestAuditReceiptsPostgres) ;;
   bootstrap-browser|resources-browser) ;;
-  *) echo "usage: $0 bootstrap-api|user-status|identity-lifecycle|identity-federation|authorization|enrollment|device-lifecycle|addressbooks|bootstrap-browser|resources-browser" >&2; exit 2 ;;
+  *) echo "usage: $0 bootstrap-api|user-status|identity-lifecycle|identity-federation|authorization|enrollment|device-lifecycle|addressbooks|audit|bootstrap-browser|resources-browser" >&2; exit 2 ;;
 esac
 
 scratch=$(mktemp -d "${TMPDIR:-/tmp}/deskrealm-m1.XXXXXX")

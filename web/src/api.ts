@@ -47,6 +47,9 @@ const messages: Record<string, string> = {
   address_book_device_exists: '该设备已在当前通讯录内。',
   address_book_entry_stale: '条目已变更，请刷新通讯录后重试。',
   address_book_owner_share: '通讯录所有者已具有管理权限。',
+  invalid_audit_request: '检查筛选条件、关联 ID、授权范围或保留期后重试。',
+  audit_event_not_found: '事件不存在或已超出访问范围。',
+  audit_export_limit: '导出最多包含 1,000 条事件。请缩小查询范围后重试。',
 }
 
 export class RequestError extends Error {

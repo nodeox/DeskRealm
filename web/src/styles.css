@@ -127,6 +127,16 @@ dialog::backdrop { background: rgb(25 32 51 / .35); }
 .device-detail-actions { margin: 14px 0; }
 .address-book-detail { margin-top: 16px; min-width: 0; }
 .address-book-note { min-width: 120px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.audit-filters { display: grid; grid-template-columns: repeat(auto-fit, minmax(145px, 1fr)); align-items: end; gap: 12px; margin: 16px 0; }
+.audit-filters .field { margin: 0; }
+.audit-filters .primary { min-height: 44px; }
+.audit-detail { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 10px; font-size: 14px; }
+.audit-detail dt { color: #526078; }
+.audit-detail dd { margin: 0; overflow-wrap: anywhere; }
+.audit-settings { margin: 16px 0; padding: 16px; border: 1px solid var(--line); border-radius: 12px; }
+.audit-check { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; font-size: 14px; }
+.audit-check input { width: 16px; min-height: 16px; }
+.audit-grants { margin-top: 16px; }
 
 @media (max-width: 680px) {
   .workspace { grid-template-columns: 1fr; grid-template-rows: auto auto 1fr; }
