@@ -11,6 +11,7 @@ bash scripts/deskrealm-m1-test bootstrap-api
 bash scripts/deskrealm-m1-test identity-lifecycle
 bash scripts/deskrealm-m1-test identity-federation
 bash scripts/deskrealm-m1-test authorization
+bash scripts/deskrealm-m1-test enrollment
 npm --prefix web ci --ignore-scripts
 npm --prefix web run typecheck
 PLAYWRIGHT_SKIP_BROWSER_GC=1 npm --prefix web exec -- playwright install chromium
@@ -54,6 +55,24 @@ go run ./cmd/deskrealm serve
 
 控制角色可维护允许的画面、键鼠、音频、剪贴板和文件传输动作。控制角色独立于后台管理授权，其配置版本供 M2 的会话准入和终端约束使用。
 
+## 设备登记与审批
+
+在「设备管理」创建设备组，并按成员授予查看或审批权限。审批人员可为授权组发放一次性入网凭据，指定 Windows 架构、用途和 1 至 1440 分钟的有效期。通过组织渠道交付凭据。设备提交登记后，在台账中查看或处理待审批记录。登记状态、在线状态、策略期望版本和实际回执分别展示。
+
+终端先在本机生成 Ed25519 设备密钥。向 `POST /v1/enrollment/challenge` 提交 `credential`、`group_id`、`platform`（`windows-amd64` 或 `windows-arm64`）、`rustdesk_id` 和标准 Base64 格式的 32 字节 `public_key`。中心返回 `attempt_id`、`nonce` 和挑战到期时间。将以下各项用单个换行符连接，末尾无需换行，并用设备私钥对所得 UTF-8 字节签名。
+
+```text
+deskrealm/device-enrollment/v1
+<attempt_id>
+<nonce>
+<group_id>
+<platform>
+<rustdesk_id>
+<public_key>
+```
+
+向 `POST /v1/enrollment/complete` 提交原始字段、`attempt_id` 和标准 Base64 的 64 字节 `signature`。成功返回稳定的 `device_id` 和初始登记状态。已经完成的请求可使用相同输入复取原回执。后续审批结果通过设备台账查询。开发测试用签名夹具模拟终端，原生 Windows 接入与实机验收按路线图进行。
+
 | 接口 | 返回 |
 | --- | --- |
 | `GET /v1/bootstrap/status` | 初始化状态 |
@@ -75,3 +94,6 @@ go run ./cmd/deskrealm serve
 | `POST /v1/admin/users/{id}/transfer-platform-admin` | 移交管理员权限，原子撤销双方凭据 |
 | `GET/POST /v1/admin/api-tokens`、`POST /v1/admin/api-tokens/{id}/revoke` | 签发、查询及撤销账号读取令牌 |
 | `GET/POST /v1/admin/control-roles`、`POST /v1/admin/control-roles/{id}` | 创建、查询及按版本编辑控制角色 |
+| `GET/POST /v1/admin/device-groups`、`GET/POST /v1/admin/device-groups/{id}/grants` | 维护设备组及查看或审批委派 |
+| `POST /v1/admin/enrollment-credentials` | 为授权的组和平台发放一次性登记凭据 |
+| `GET /v1/admin/devices`、`GET /v1/admin/devices/{id}`、`POST /v1/admin/devices/{id}/{approve,reject}` | 查询和处理授权范围内的设备登记 |

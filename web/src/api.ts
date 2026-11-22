@@ -29,6 +29,11 @@ const messages: Record<string, string> = {
   invalid_control_role: '请检查角色名称和允许的操作。',
   control_role_name_in_use: '该控制角色名称已使用。',
   control_role_stale: '该角色已变更，请查看最新版本后编辑。',
+  device_group_name_in_use: '该设备组名称已使用。',
+  device_group_not_found: '设备组不存在或当前账号无权操作。',
+  device_not_found: '设备不存在或当前账号无权操作。',
+  invalid_enrollment_request: '请检查设备组、设备平台、凭据用途和有效期。',
+  device_decision_conflict: '设备已处理，请刷新列表。',
 }
 
 export class RequestError extends Error {

@@ -103,6 +103,16 @@ func NewHandler(store Store, origin *url.URL, web fs.FS, config ...AuthConfig) h
 	mux.HandleFunc("GET /v1/admin/control-roles", api.listControlRoles)
 	mux.HandleFunc("POST /v1/admin/control-roles", api.saveControlRole)
 	mux.HandleFunc("POST /v1/admin/control-roles/{id}", api.saveControlRole)
+	mux.HandleFunc("GET /v1/admin/device-groups", api.listDeviceGroups)
+	mux.HandleFunc("POST /v1/admin/device-groups", api.createDeviceGroup)
+	mux.HandleFunc("GET /v1/admin/device-groups/{id}/grants", api.deviceGroupGrants)
+	mux.HandleFunc("POST /v1/admin/device-groups/{id}/grants", api.setDeviceGroupGrant)
+	mux.HandleFunc("POST /v1/admin/enrollment-credentials", api.issueEnrollment)
+	mux.HandleFunc("GET /v1/admin/devices", api.listOrGetDevices)
+	mux.HandleFunc("GET /v1/admin/devices/{id}", api.listOrGetDevices)
+	mux.HandleFunc("POST /v1/admin/devices/{id}/{action}", api.decideDevice)
+	mux.HandleFunc("POST /v1/enrollment/challenge", api.enrollDevice)
+	mux.HandleFunc("POST /v1/enrollment/complete", api.enrollDevice)
 	apiNotFound := func(w http.ResponseWriter, _ *http.Request) {
 		writeError(w, http.StatusNotFound, "not_found")
 	}
@@ -115,7 +125,7 @@ func NewHandler(store Store, origin *url.URL, web fs.FS, config ...AuthConfig) h
 		w.Header().Set("Content-Security-Policy", "default-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'")
 		if r.URL.Path == "/v1" || strings.HasPrefix(r.URL.Path, "/v1/") {
 			w.Header().Set("Cache-Control", "no-store")
-			if r.Method == http.MethodPost && r.Header.Get("Origin") != api.origin {
+			if r.Method == http.MethodPost && !isDeviceEnrollmentRequest(r) && r.Header.Get("Origin") != api.origin {
 				writeError(w, http.StatusForbidden, "origin_denied")
 				return
 			}
@@ -131,7 +141,7 @@ func (a *API) frontend(w http.ResponseWriter, r *http.Request) {
 	}
 	p := strings.TrimPrefix(r.URL.Path, "/")
 	switch p {
-	case "", "initialize", "login", "overview", "users", "groups", "api-tokens", "security", "accept-invitation", "recover":
+	case "", "initialize", "login", "overview", "users", "groups", "devices", "api-tokens", "security", "accept-invitation", "recover":
 		w.Header().Set("Cache-Control", "no-store")
 		http.ServeFileFS(w, r, a.web, "index.html")
 	default:
@@ -166,6 +176,8 @@ func failure(w http.ResponseWriter, operation string, err error) {
 		writeError(w, http.StatusUnauthorized, errAPIToken.Error())
 	case errors.Is(err, errCredentials):
 		writeError(w, http.StatusUnauthorized, errCredentials.Error())
+	case errors.Is(err, errEnrollment):
+		writeError(w, http.StatusUnauthorized, err.Error())
 	case errors.Is(err, errIdentityGrant):
 		writeError(w, http.StatusUnauthorized, errIdentityGrant.Error())
 	case errors.Is(err, errTOTPCode):
@@ -181,6 +193,10 @@ func failure(w http.ResponseWriter, operation string, err error) {
 	case errors.Is(err, errUserExists), errors.Is(err, errLastAdmin), errors.Is(err, errUserTransition), errors.Is(err, errImportConflict), errors.Is(err, errGroupConflict), errors.Is(err, errAdminTransfer):
 		writeError(w, http.StatusConflict, err.Error())
 	case errors.Is(err, errControlRoleConflict), errors.Is(err, errControlRoleVersion):
+		writeError(w, http.StatusConflict, err.Error())
+	case errors.Is(err, errDeviceMissing), errors.Is(err, errDeviceGroupMissing):
+		writeError(w, http.StatusNotFound, err.Error())
+	case errors.Is(err, errEnrollmentConflict), errors.Is(err, errDeviceConflict), errors.Is(err, errDeviceGroupConflict), errors.Is(err, errDeviceDecision):
 		writeError(w, http.StatusConflict, err.Error())
 	default:
 		// PostgreSQL errors can contain argument data. Only the operation is logged.
@@ -353,11 +369,17 @@ func (a *API) overview(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+		canDevices, err := canManageDevices(r.Context(), a.store, user)
+		if err != nil {
+			failure(w, "overview device scope", err)
+			return
+		}
 		result := struct {
-			Organization string `json:"organization"`
-			CanManage    bool   `json:"can_manage"`
-			CanReadUsers bool   `json:"can_read_users"`
-		}{user.Organization, admin, canRead}
+			Organization   string `json:"organization"`
+			CanManage      bool   `json:"can_manage"`
+			CanReadUsers   bool   `json:"can_read_users"`
+			CanReadDevices bool   `json:"can_read_devices"`
+		}{user.Organization, admin, canRead, canDevices}
 		writeJSON(w, http.StatusOK, result)
 	}
 }

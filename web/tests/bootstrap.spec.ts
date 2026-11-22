@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test'
-import { createHmac } from 'node:crypto'
+import { createHmac, generateKeyPairSync, sign } from 'node:crypto'
 
 function verificationCode(secret: string, step: number): string {
   const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567'
@@ -126,6 +126,50 @@ test('首次管理员初始化、成员停用、刷新和退出', async ({ page,
   await tokenRow.getByRole('button', { name: '撤销令牌' }).click()
   await page.getByRole('dialog', { name: '撤销 API 令牌' }).getByRole('button', { name: '确认撤销' }).click()
   await expect(tokenRow).toContainText('已撤销')
+
+  await page.getByRole('link', { name: '设备管理' }).click()
+  await page.getByRole('button', { name: '新建设备组' }).click()
+  await page.getByLabel('设备组名称').fill('试点终端组')
+  const groupResponse = page.waitForResponse(response =>
+    response.url().endsWith('/v1/admin/device-groups') && response.request().method() === 'POST')
+  await page.getByRole('button', { name: '创建设备组' }).click()
+  const deviceGroup = await (await groupResponse).json() as { id: string }
+  await expect(page.getByLabel('目标设备组')).toHaveValue(deviceGroup.id)
+  await page.getByRole('button', { name: '发放入网凭据' }).click()
+  await page.getByLabel('凭据用途').fill('浏览器纳管验证')
+  await page.getByRole('button', { name: '生成入网凭据' }).click()
+  const receipt = page.getByLabel('一次性入网凭据')
+  await expect(receipt).toHaveValue(/^[A-Za-z0-9_-]{43}$/)
+
+  const keys = generateKeyPairSync('ed25519')
+  const publicKey = keys.publicKey.export({ format: 'jwk' }).x
+  if (!publicKey) throw new Error('Missing Ed25519 public key')
+  const enrollment = {
+    credential: await receipt.inputValue(),
+    group_id: deviceGroup.id,
+    platform: 'windows-amd64',
+    rustdesk_id: '10101011',
+    public_key: Buffer.from(publicKey, 'base64url').toString('base64'),
+  }
+  const challengeResponse = await page.request.post('/v1/enrollment/challenge', { data: enrollment })
+  expect(challengeResponse.ok()).toBeTruthy()
+  const challenge = await challengeResponse.json() as { attempt_id: string; nonce: string }
+  const message = Buffer.from([
+    'deskrealm/device-enrollment/v1', challenge.attempt_id, challenge.nonce, enrollment.group_id,
+    enrollment.platform, enrollment.rustdesk_id, enrollment.public_key,
+  ].join('\n'))
+  const completion = await page.request.post('/v1/enrollment/complete', {
+    data: { ...enrollment, attempt_id: challenge.attempt_id, signature: sign(null, message, keys.privateKey).toString('base64') },
+  })
+  expect(completion.ok()).toBeTruthy()
+  await page.reload()
+  const enrolled = page.getByRole('row').filter({ hasText: enrollment.rustdesk_id })
+  await expect(enrolled).toContainText('待审批')
+  await expect(enrolled).toContainText('未知')
+  await expect(enrolled).toContainText('未下发')
+  await enrolled.getByRole('button', { name: '批准', exact: true }).click()
+  await page.getByRole('dialog', { name: '批准设备登记' }).getByRole('button', { name: '确认批准' }).click()
+  await expect(enrolled).toContainText('已批准')
 
   await page.getByRole('link', { name: '概览', exact: true }).click()
   await page.setViewportSize({ width: 375, height: 800 })
