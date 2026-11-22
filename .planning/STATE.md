@@ -3,15 +3,15 @@ gsd_state_version: "1.0"
 current_phase: 3
 current_phase_name: M2 受管连接与策略
 status: executing
-last_updated: "2026-11-22T22:37:23Z"
+last_updated: "2026-11-22T22:53:26Z"
 last_activity: 2026-11-22
-last_activity_desc: 03-01 Task 1 固定源码和 Go／Rust 签名向量已验证
-state_head: 49d62b7740a88b5c573a78762cfff62cbb0c974e
+last_activity_desc: 03-01 设备运行身份、主控绑定及可信心跳已验证
+state_head: 9cca7a7d34edf6cc9cffae5e3ed0415b94fca9f2
 progress:
   total_phases: 5
   completed_phases: 2
   total_plans: 10
-  completed_plans: 5
+  completed_plans: 6
   percent: 40
 ---
 
@@ -27,9 +27,9 @@ See: .planning/PROJECT.md (updated 2026-11-22)
 ## Current Position
 
 Phase: 3 — M2 受管连接与策略
-Plan: 03-01 of 5，Task 1 已验证，接续 Task 2 设备运行身份与可信心跳。
+Plan: 03-02 of 5，03-01 已完成，接续连接 ACL、版本策略与设备回执。
 Status: In progress
-Last activity: 2026-11-22 — 源码检出和 Go／Rust 签名向量通过开发门禁。
+Last activity: 2026-11-22 — 设备持钥认证、凭据隔离、可信心跳和公钥重启复用通过开发验证。
 
 ## Accumulated Context
 
