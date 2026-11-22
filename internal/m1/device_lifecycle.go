@@ -129,6 +129,9 @@ func applyDeviceChange(ctx context.Context, tx pgx.Tx, who actor, d *device, act
 		}
 	}
 	if action == "disable" || action == "retire" {
+		if d.ConnectionState == "online" {
+			d.ConnectionState = "offline"
+		}
 		if _, err := tx.Exec(ctx, `UPDATE device_key_history SET revoked_at=now()
 			WHERE device_id=$1 AND revoked_at IS NULL`, d.ID); err != nil {
 			return err

@@ -22,8 +22,14 @@ type device struct {
 	Version           int64  `json:"version"`
 }
 
-const deviceProjection = `d.id,d.group_id,dg.name,d.platform,d.rustdesk_id,d.registration_state,
-	d.connection_state,d.expected_policy_version,d.applied_policy_version,` + deviceGroupApprove + `,d.version`
+const deviceConnectionState = `CASE
+	WHEN d.managed_heartbeat_at IS NULL THEN CASE WHEN d.connection_state='offline' THEN 'offline' ELSE 'unknown' END
+	WHEN d.registration_state='approved' AND d.managed_heartbeat_epoch=d.device_key_epoch
+		AND d.managed_heartbeat_at>statement_timestamp()-interval '45 seconds' THEN 'online'
+	ELSE 'offline' END`
+
+const deviceProjection = `d.id,d.group_id,dg.name,d.platform,d.rustdesk_id,d.registration_state,` +
+	deviceConnectionState + `,d.expected_policy_version,d.applied_policy_version,` + deviceGroupApprove + `,d.version`
 
 func lockManagedDevice(ctx context.Context, tx pgx.Tx, who actor, id string) (device, error) {
 	rows, err := tx.Query(ctx, `SELECT `+deviceProjection+` FROM devices d JOIN device_groups dg ON dg.id=d.group_id

@@ -177,7 +177,8 @@ func (s Store) completeDeviceRotation(ctx context.Context, in rotationRequest, k
 			in.DeviceID, oldKey); err != nil {
 			return err
 		}
-		err = tx.QueryRow(ctx, `UPDATE devices SET public_key=$2,registration_state='approved',version=version+1
+		err = tx.QueryRow(ctx, `UPDATE devices SET public_key=$2,registration_state='approved',version=version+1,
+			device_key_epoch=device_key_epoch+1
 			WHERE id=$1 RETURNING version`, in.DeviceID, key).Scan(&version)
 		if uniqueViolation(err) {
 			return errDeviceConflict

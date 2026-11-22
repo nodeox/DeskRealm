@@ -38,10 +38,28 @@ bash scripts/deskrealm-m2-test sources
 | 无效帧 | 格式、版本或字段非法，拒绝当前请求。 |
 | 认证失败 | 缺少有效身份、密钥或签名，返回对外一致的认证错误。 |
 | 权限拒绝 | 当前主体或连接条件未获准，范围外资源按不可见处理。 |
-| 状态冲突 | 已消费挑战或授权、同键异载荷或过期版本，要求按入口重取。 |
+| 状态冲突 | 授权同键异载荷或版本已变更，要求按入口重取。身份挑战的重放返回统一认证失败。 |
 | 中心不可用 | 无法安全签发、核销或续租，保持拒绝新会话及现有租约的截止时间。 |
 
 协议夹具 [vectors.json](../managed/tests/vectors.json) 包含设备挑战、用户绑定、中心授权、直连主控证明和中继受控证明的签名，以及无效格式用例。所有测试种子仅供夹具使用。Go 使用标准库 Ed25519，Rust 测试使用与上游同版本的 `sodiumoxide`，测试和环境均通过锁文件或镜像摘要固定。运行 `bash scripts/deskrealm-m2-test vectors` 可单独复跑。端点实际加密通道、准入、操作执行与租约回执将在后续计划取证。
+
+## 设备运行身份与主控绑定
+
+在中心部署配置中设置 `DESKREALM_SESSION_SIGNING_KEY_FILE` 和 `DESKREALM_SESSION_SIGNING_KID`。密钥文件存放由安全随机数生成的 32 字节 Ed25519 种子，使用无填充的 Base64url，一行表示。用部署用户权限保护并备份同一份文件，重建时复用文件和 ID。两个设置均为空时，身份签发入口和签名公钥入口返回 503。配置不完整或密钥格式非法时启动报错，错误不包含文件路径和内容。
+
+以下写入使用 JSON。公钥、签名、随机数及 `flow` 使用无填充 Base64url。`02` 帧的登录流程摘要取 `flow` 解码后的原始 32 字节。认证返回中的 `expires_at` 为 RFC 3339 时间，签名输入使用挑战返回的整数 `expires_ms`。
+
+| API | 请求、验证及结果 |
+| --- | --- |
+| `GET /v1/managed/signing-key` | 通过预配置的 HTTPS 中心返回 `kid`、`public_key`。中心的会话授权签发及轮换链路由后续计划接入。 |
+| `POST /v1/managed/devices/challenge` | 提交 `device_id`、`protocol_version`。当前支持版本 1，仅已批准设备取得 60 秒挑战。相同在途挑战的重试返回同一结果。 |
+| `POST /v1/managed/devices/complete` | 提交 `device_id`、`challenge_id`、`signature`，使用当前已注册设备密钥签种类 `01`。一次核销后返回 `credential`、`expires_at`，运行凭据前缀为 `drd_`，有效期 15 分钟。签发结果丢失时重新申请挑战。 |
+| `POST /v1/managed/users/challenge` | 使用已有登录 Cookie、同源 Origin 和 CSRF 值，提交 `device_id`、`device_credential`。返回额外的 `user_id` 和 `flow`，绑定同一设备凭据和该次登录。 |
+| `POST /v1/managed/users/complete` | 使用同一次登录及 CSRF，提交 `device_id`、`challenge_id`、`signature`，签种类 `02`。返回 `dru_` 主控凭据，有效期最长 15 分钟，且不超过设备凭据或登录会话的截止时间。 |
+| `GET /v1/managed/users/session` | 以 `Authorization: Bearer <dru_凭据>` 验证用户、设备、组织与协议版本。退出登录、账号停用或设备失效后拒绝。 |
+| `POST /v1/managed/devices/heartbeat` | 以 `Authorization: Bearer <drd_凭据>` 提交同一 `device_id`、`reported_build`。成功返回 204。中心以自身接收时间记录在线，45 秒无合格心跳后台账和概览显示离线。 |
+
+设备写入入口使用无 Cookie 的原生请求。设备凭据和主控凭据仅存摘要，并在请求时重查设备批准状态、密钥版本和有效期。主控身份同时重查原登录会话及账号状态。管理 API Token 保持原有用途。心跳中的构建字段是经过设备身份认证的自报值，未来由受信发布来源参与会话准入。
 
 ## 原生构建入口与证据
 

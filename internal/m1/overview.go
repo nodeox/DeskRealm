@@ -68,7 +68,7 @@ func (a *API) overview(w http.ResponseWriter, r *http.Request) {
 		}
 		if result.CanReadDevices {
 			var pending int64
-			err = tx.QueryRow(ctx, `SELECT count(*) FILTER (WHERE d.connection_state='online'),
+			err = tx.QueryRow(ctx, `SELECT count(*) FILTER (WHERE (`+deviceConnectionState+`)='online'),
 				count(*) FILTER (WHERE d.registration_state='pending' AND `+deviceGroupApprove+`)
 				FROM devices d JOIN device_groups dg ON dg.id=d.group_id WHERE d.organization_id=$1 AND `+deviceGroupRead,
 				who.Organization, who.ID, who.PlatformAdmin).Scan(&result.Metrics.OnlineDevices, &pending)

@@ -13,7 +13,8 @@ func TestOverviewScopesPostgres(t *testing.T) {
 	hidden := deviceGroupFixture(t, h, admin, csrf, "概览其他组")
 	in, _ := approvedDevice(t, h, admin, csrf, visible.ID, "10004025")
 	out, _ := approvedDevice(t, h, admin, csrf, hidden.ID, "10004026")
-	if _, err := store.DB.Exec(ctx, "UPDATE devices SET connection_state='online' WHERE id IN ($1,$2)", in.ID, out.ID); err != nil {
+	if _, err := store.DB.Exec(ctx, `UPDATE devices SET managed_heartbeat_at=clock_timestamp(),
+		managed_heartbeat_epoch=device_key_epoch,managed_reported_build='overview-fixture' WHERE id IN ($1,$2)`, in.ID, out.ID); err != nil {
 		t.Fatal(err)
 	}
 	grantPath := "/v1/admin/device-groups/" + visible.ID + "/grants"
