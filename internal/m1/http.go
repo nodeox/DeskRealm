@@ -73,6 +73,7 @@ func NewHandler(store Store, origin *url.URL, web fs.FS, config ...AuthConfig) h
 	mux.HandleFunc("POST /v1/auth/logout", api.logout)
 	mux.HandleFunc("GET /v1/overview", api.overview)
 	mux.HandleFunc("GET /v1/admin/users", api.listUsers)
+	mux.HandleFunc("GET /v1/admin/users/{id}", api.getUser)
 	mux.HandleFunc("POST /v1/admin/users", api.createUser)
 	mux.HandleFunc("POST /v1/admin/users/{id}/{action}", api.changeUser)
 	mux.HandleFunc("POST /v1/admin/user-invitations", api.inviteUser)
@@ -88,6 +89,20 @@ func NewHandler(store Store, origin *url.URL, web fs.FS, config ...AuthConfig) h
 	mux.HandleFunc("POST /v1/auth/totp/confirm", api.changeTOTP)
 	mux.HandleFunc("POST /v1/auth/totp/verify", api.verifyLoginTOTP)
 	mux.HandleFunc("POST /v1/admin/users/{id}/totp-reset", api.resetTOTP)
+	mux.HandleFunc("POST /v1/admin/users/{id}/transfer-platform-admin", api.transferAdmin)
+	mux.HandleFunc("GET /v1/admin/groups", api.groupList)
+	mux.HandleFunc("POST /v1/admin/groups", api.createGroup)
+	mux.HandleFunc("GET /v1/admin/groups/{id}/members", api.groupMembers)
+	mux.HandleFunc("POST /v1/admin/groups/{id}/members", api.groupMember)
+	mux.HandleFunc("GET /v1/admin/role-grants", api.grantList)
+	mux.HandleFunc("POST /v1/admin/role-grants", api.grantRole)
+	mux.HandleFunc("POST /v1/admin/role-grants/{id}/revoke", api.revokeRole)
+	mux.HandleFunc("GET /v1/admin/api-tokens", api.listTokens)
+	mux.HandleFunc("POST /v1/admin/api-tokens", api.issueToken)
+	mux.HandleFunc("POST /v1/admin/api-tokens/{id}/revoke", api.revokeToken)
+	mux.HandleFunc("GET /v1/admin/control-roles", api.listControlRoles)
+	mux.HandleFunc("POST /v1/admin/control-roles", api.saveControlRole)
+	mux.HandleFunc("POST /v1/admin/control-roles/{id}", api.saveControlRole)
 	apiNotFound := func(w http.ResponseWriter, _ *http.Request) {
 		writeError(w, http.StatusNotFound, "not_found")
 	}
@@ -116,7 +131,7 @@ func (a *API) frontend(w http.ResponseWriter, r *http.Request) {
 	}
 	p := strings.TrimPrefix(r.URL.Path, "/")
 	switch p {
-	case "", "initialize", "login", "overview", "users", "security", "accept-invitation", "recover":
+	case "", "initialize", "login", "overview", "users", "groups", "api-tokens", "security", "accept-invitation", "recover":
 		w.Header().Set("Cache-Control", "no-store")
 		http.ServeFileFS(w, r, a.web, "index.html")
 	default:
@@ -146,6 +161,9 @@ func failure(w http.ResponseWriter, operation string, err error) {
 		writeError(w, http.StatusConflict, errInitialized.Error())
 	case errors.Is(err, errSession):
 		writeError(w, http.StatusUnauthorized, errSession.Error())
+	case errors.Is(err, errAPIToken):
+		w.Header().Set("WWW-Authenticate", "Bearer")
+		writeError(w, http.StatusUnauthorized, errAPIToken.Error())
 	case errors.Is(err, errCredentials):
 		writeError(w, http.StatusUnauthorized, errCredentials.Error())
 	case errors.Is(err, errIdentityGrant):
@@ -158,9 +176,11 @@ func failure(w http.ResponseWriter, operation string, err error) {
 		writeError(w, http.StatusServiceUnavailable, errTOTPUnavailable.Error())
 	case errors.Is(err, errForbidden):
 		writeError(w, http.StatusForbidden, errForbidden.Error())
-	case errors.Is(err, errUserMissing):
-		writeError(w, http.StatusNotFound, errUserMissing.Error())
-	case errors.Is(err, errUserExists), errors.Is(err, errLastAdmin), errors.Is(err, errUserTransition), errors.Is(err, errImportConflict):
+	case errors.Is(err, errUserMissing), errors.Is(err, errGroupMissing), errors.Is(err, errControlRoleMissing):
+		writeError(w, http.StatusNotFound, err.Error())
+	case errors.Is(err, errUserExists), errors.Is(err, errLastAdmin), errors.Is(err, errUserTransition), errors.Is(err, errImportConflict), errors.Is(err, errGroupConflict), errors.Is(err, errAdminTransfer):
+		writeError(w, http.StatusConflict, err.Error())
+	case errors.Is(err, errControlRoleConflict), errors.Is(err, errControlRoleVersion):
 		writeError(w, http.StatusConflict, err.Error())
 	default:
 		// PostgreSQL errors can contain argument data. Only the operation is logged.
@@ -292,6 +312,9 @@ func (a *API) cookieName() string {
 }
 
 func (a *API) cookieValue(r *http.Request) string {
+	if len(r.Header.Values("Authorization")) != 0 {
+		return ""
+	}
 	cookie, err := r.Cookie(a.cookieName())
 	if err != nil {
 		return ""
@@ -320,10 +343,21 @@ func (a *API) session(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) overview(w http.ResponseWriter, r *http.Request) {
 	if user, ok := a.requireSession(w, r); ok {
+		admin := user.Role == adminRole
+		canRead := admin
+		if !admin {
+			var err error
+			canRead, err = canReadUsers(r.Context(), a.store.DB, user.UserID)
+			if err != nil {
+				failure(w, "overview scope", err)
+				return
+			}
+		}
 		result := struct {
 			Organization string `json:"organization"`
 			CanManage    bool   `json:"can_manage"`
-		}{user.Organization, user.Role == adminRole}
+			CanReadUsers bool   `json:"can_read_users"`
+		}{user.Organization, admin, canRead}
 		writeJSON(w, http.StatusOK, result)
 	}
 }

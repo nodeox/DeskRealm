@@ -14,11 +14,14 @@ func revokeUserLogins(ctx context.Context, tx pgx.Tx, id string) error {
 	if _, err := tx.Exec(ctx, "DELETE FROM totp_challenges WHERE user_id=$1", id); err != nil {
 		return err
 	}
+	if _, err := tx.Exec(ctx, "UPDATE api_tokens SET revoked_at=now() WHERE user_id=$1 AND revoked_at IS NULL", id); err != nil {
+		return err
+	}
 	_, err := tx.Exec(ctx, "UPDATE browser_sessions SET revoked_at=now() WHERE user_id=$1 AND revoked_at IS NULL", id)
 	return err
 }
 
-func (s Store) resetUserTOTP(ctx context.Context, session, target, password, reason string) error {
+func (s Store) confirmAdminPassword(ctx context.Context, session, password string, action func(pgx.Tx, string, string) error) error {
 	var hash string
 	err := s.DB.QueryRow(ctx, `SELECT COALESCE(u.password_hash,'') FROM browser_sessions s JOIN users u ON u.id=s.user_id
 		WHERE s.token_digest=$1 AND s.revoked_at IS NULL AND s.expires_at>clock_timestamp() AND u.status='active'`,
@@ -34,14 +37,21 @@ func (s Store) resetUserTOTP(ctx context.Context, session, target, password, rea
 		if err != nil {
 			return err
 		}
-		var currentHash, userID string
+		var currentHash string
 		if err := tx.QueryRow(ctx, "SELECT COALESCE(password_hash,'') FROM users WHERE id=$1", actor).Scan(&currentHash); err != nil {
 			return err
 		}
 		if hash != currentHash {
 			return errCredentials
 		}
-		err = tx.QueryRow(ctx, "SELECT id FROM users WHERE id=$1 AND organization_id=$2 FOR NO KEY UPDATE", target, org).Scan(&userID)
+		return action(tx, actor, org)
+	})
+}
+
+func (s Store) resetUserTOTP(ctx context.Context, session, target, password, reason string) error {
+	return s.confirmAdminPassword(ctx, session, password, func(tx pgx.Tx, actor, org string) error {
+		var userID string
+		err := tx.QueryRow(ctx, "SELECT id FROM users WHERE id=$1 AND organization_id=$2 FOR NO KEY UPDATE", target, org).Scan(&userID)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return errUserMissing
 		}
@@ -68,24 +78,8 @@ func (a *API) resetTOTP(w http.ResponseWriter, r *http.Request) {
 		failure(w, "reset verification", errUserMissing)
 		return
 	}
-	var in struct {
-		Password string `json:"password"`
-		Reason   string `json:"reason"`
-	}
-	if !readJSON(w, r, &in) {
-		return
-	}
-	in.Reason = strings.TrimSpace(in.Reason)
-	if in.Reason == "" || utf8.RuneCountInString(in.Reason) > 200 {
-		writeError(w, http.StatusBadRequest, "invalid_reason")
-		return
-	}
-	if len(in.Password) == 0 || len(in.Password) > 256 {
-		failure(w, "reset verification", errCredentials)
-		return
-	}
-	if !a.admit(r) {
-		writeError(w, http.StatusTooManyRequests, "try_again_later")
+	in, ok := a.recoveryInput(w, r)
+	if !ok {
 		return
 	}
 	defer func() { <-a.hashSlots }()
@@ -94,4 +88,30 @@ func (a *API) resetTOTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+type passwordConfirmation struct {
+	Password string `json:"password"`
+	Reason   string `json:"reason"`
+}
+
+func (a *API) recoveryInput(w http.ResponseWriter, r *http.Request) (passwordConfirmation, bool) {
+	var in passwordConfirmation
+	if !readJSON(w, r, &in) {
+		return in, false
+	}
+	in.Reason = strings.TrimSpace(in.Reason)
+	if in.Reason == "" || utf8.RuneCountInString(in.Reason) > 200 {
+		writeError(w, http.StatusBadRequest, "invalid_reason")
+		return in, false
+	}
+	if len(in.Password) == 0 || len(in.Password) > 256 {
+		failure(w, "reset verification", errCredentials)
+		return in, false
+	}
+	if !a.admit(r) {
+		writeError(w, http.StatusTooManyRequests, "try_again_later")
+		return in, false
+	}
+	return in, true
 }

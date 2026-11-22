@@ -3,17 +3,20 @@ import { nextTick, onMounted, ref } from 'vue'
 import { api, json, RequestError } from './api'
 
 type UserStatus = 'pending' | 'active' | 'disabled' | 'archived'
-type ManagedUser = { id: string; username: string; status: UserStatus; platform_admin: boolean }
+type ManagedUser = { id: string; username: string; status: UserStatus; platform_admin: boolean; can_change: boolean }
 type UserList = { users: ManagedUser[]; next?: string }
-type Action = 'enable' | 'disable' | 'archive' | 'recovery' | 'totp-reset'
+type Action = 'enable' | 'disable' | 'archive' | 'recovery' | 'totp-reset' | 'transfer-platform-admin'
 type Form = 'direct' | 'invite' | 'import'
 type IssuedLink = { url: string; expires_at: string }
 type ImportEntry = { username: string; result: 'pending' | 'exists' }
 
-const props = defineProps<{ csrf: string }>()
+const props = defineProps<{ csrf: string; admin: boolean }>()
 const emit = defineEmits<{ expired: [] }>()
 const statusLabel: Record<UserStatus, string> = { pending: '待激活', active: '已启用', disabled: '已停用', archived: '已归档' }
-const actionLabel: Record<Action, string> = { enable: '启用', disable: '停用', archive: '归档', recovery: '恢复', 'totp-reset': '重置验证' }
+const actionLabel: Record<Action, string> = {
+  enable: '启用', disable: '停用', archive: '归档', recovery: '恢复',
+  'totp-reset': '重置验证', 'transfer-platform-admin': '移交管理员',
+}
 
 const data = ref<ManagedUser[]>([])
 const next = ref('')
@@ -153,6 +156,11 @@ async function change() {
       await api(path, json({ reason: reason.value, password: adminPassword.value }, props.csrf))
       result.value = selected.user.username + ' 的两步验证已重置。'
       await refresh()
+    } else if (selected.action === 'transfer-platform-admin') {
+      await api(path, json({ reason: reason.value, password: adminPassword.value }, props.csrf))
+      dialog.value?.close()
+      emit('expired')
+      return
     } else {
       const user = await api<ManagedUser>(path, json({ reason: reason.value }, props.csrf))
       data.value = data.value.map(row => row.id === user.id ? user : row)
@@ -174,7 +182,7 @@ onMounted(() => refresh())
   <section class="users-surface" aria-labelledby="users-title">
     <div class="section-heading">
       <div><h2 id="users-title">用户列表</h2><p class="muted">管理组织账号和登录状态。</p></div>
-      <div class="user-tools">
+      <div v-if="admin" class="user-tools">
         <button class="secondary" type="button" :aria-expanded="form === 'import'" @click="toggle('import')">导入账号</button>
         <button class="secondary" type="button" :aria-expanded="form === 'invite'" @click="toggle('invite')">邀请成员</button>
         <button class="primary" type="button" :aria-expanded="form === 'direct'" @click="toggle('direct')">添加成员</button>
@@ -226,12 +234,13 @@ onMounted(() => refresh())
             <td>{{ user.platform_admin ? '平台管理员' : '成员' }}</td>
             <td><span class="user-status" :data-state="user.status">{{ statusLabel[user.status] }}</span></td>
             <td class="row-actions">
-              <button v-if="user.status === 'disabled'" class="secondary" type="button" @click="select('enable', user)">启用</button>
-              <button v-if="user.status === 'active'" class="secondary" type="button" @click="select('disable', user)">停用</button>
-              <button v-if="user.status !== 'archived'" class="secondary" type="button" @click="select('archive', user)">归档</button>
-              <button v-if="user.status === 'pending'" class="secondary" type="button" :disabled="busy" @click="invite(user.username)">补发邀请</button>
-              <button v-else class="secondary" type="button" @click="select('recovery', user)">恢复账号</button>
-              <button v-if="user.status === 'active'" class="secondary" type="button" @click="select('totp-reset', user)">重置验证</button>
+              <button v-if="user.can_change && user.status === 'disabled'" class="secondary" type="button" @click="select('enable', user)">启用</button>
+              <button v-if="user.can_change && user.status === 'active'" class="secondary" type="button" @click="select('disable', user)">停用</button>
+              <button v-if="user.can_change && user.status !== 'archived'" class="secondary" type="button" @click="select('archive', user)">归档</button>
+              <button v-if="admin && user.status === 'pending'" class="secondary" type="button" :disabled="busy" @click="invite(user.username)">补发邀请</button>
+              <button v-else-if="admin" class="secondary" type="button" @click="select('recovery', user)">恢复账号</button>
+              <button v-if="admin && user.status === 'active'" class="secondary" type="button" @click="select('totp-reset', user)">重置验证</button>
+              <button v-if="admin && user.status === 'active' && !user.platform_admin" class="secondary" type="button" @click="select('transfer-platform-admin', user)">移交管理员</button>
             </td>
           </tr>
           <tr v-if="!data.length">
@@ -248,13 +257,14 @@ onMounted(() => refresh())
         <p class="muted dialog-copy">
           将{{ actionLabel[pending.action] }} {{ pending.user.username }}。
           <span v-if="pending.action === 'recovery'">链接兑换后，旧登录会话将失效。</span>
+          <span v-else-if="pending.action === 'transfer-platform-admin'">双方的登录会话都会失效。重新登录后，该成员将获得平台管理员权限。</span>
           <span v-else-if="pending.action !== 'enable'">该账号的现有登录会话将失效。</span>
         </p>
         <div v-if="pending.action !== 'recovery'" class="field">
           <label for="user-action-reason">操作原因</label>
           <input id="user-action-reason" v-model="reason" maxlength="200" autofocus required>
         </div>
-        <div v-if="pending.action === 'totp-reset'" class="field">
+        <div v-if="pending.action === 'totp-reset' || pending.action === 'transfer-platform-admin'" class="field">
           <label for="admin-password">管理员当前密码</label>
           <input id="admin-password" v-model="adminPassword" type="password" autocomplete="current-password" maxlength="256" required>
         </div>

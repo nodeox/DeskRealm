@@ -22,4 +22,4 @@ created: "2026-11-22"
 
 每个计划列出快速验证命令及必须失败的分支。阶段收口运行完整单元、集成、构建与浏览器检查。
 
-2026-11-22 通过 `bootstrap-api`、`identity-lifecycle`、`identity-federation`（含竞态检查）和 `bootstrap-browser`。验证覆盖真实 PostgreSQL 并发初始化、成员停用与登录竞争、邀请重放、恢复后旧会话失效、幂等导入、验证码一次性消费、受控本地 OIDC 签发与中文两步登录。作用域授权及其他 M1 模块仍待验证。
+2026-11-22 通过 `bootstrap-api`、`identity-lifecycle`、`identity-federation`、`authorization` 和 `bootstrap-browser`。认证与授权数据库测试包含竞态检查。验证覆盖并发初始化和成员停用、邀请重放、密码及验证器恢复、幂等导入、验证码一次性消费、本地 OIDC 提供方、用户组与本人授权、管理员移交、令牌范围及撤销、控制角色乐观版本和中文浏览器流程。设备组与设备纳管、通讯录、审计查询和任务仍待对应计划验证。

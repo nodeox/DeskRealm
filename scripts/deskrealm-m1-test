@@ -8,8 +8,10 @@ case "$mode" in
   user-status) tests=(TestUserStatusPostgres TestAccountRevocationPostgres) ;;
   identity-lifecycle) tests=(TestUserStatusPostgres TestAccountRevocationPostgres TestIdentityLifecyclePostgres) ;;
   identity-federation) tests=(TestTOTPReplayPostgres TestOIDCBindingPostgres) ;;
+  management-scopes) tests=(TestManagementScopesPostgres) ;;
+  authorization) tests=(TestManagementScopesPostgres TestAPITokenScopesPostgres TestPlatformAdminTransferPostgres TestControlRolesPostgres) ;;
   bootstrap-browser) ;;
-  *) echo "usage: $0 bootstrap-api|user-status|identity-lifecycle|identity-federation|bootstrap-browser" >&2; exit 2 ;;
+  *) echo "usage: $0 bootstrap-api|user-status|identity-lifecycle|identity-federation|authorization|bootstrap-browser" >&2; exit 2 ;;
 esac
 
 scratch=$(mktemp -d "${TMPDIR:-/tmp}/deskrealm-m1.XXXXXX")

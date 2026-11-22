@@ -1,6 +1,6 @@
 # DeskRealm M1 首次初始化与登录
 
-当前可运行的控制面包括 PostgreSQL 迁移、一次性首管初始化、本地账号与外部身份登录、中文概览和成员管理。平台管理员可创建、邀请、导入、启用、停用、归档及恢复账号。初始化、成功登录、注销和成员变更均进入审计。后续计划接入作用域授权、设备和任务。
+当前可运行的控制面包括 PostgreSQL 迁移、一次性首管初始化、本地账号与外部身份登录、中文概览、成员管理、用户组委派和 API 令牌。平台管理员可创建、邀请、导入、启用、停用、归档及恢复账号，也可向已启用的本地账号移交完整管理员角色。成员与权限变更均进入审计。
 
 ## 本地开发检查
 
@@ -10,6 +10,7 @@
 bash scripts/deskrealm-m1-test bootstrap-api
 bash scripts/deskrealm-m1-test identity-lifecycle
 bash scripts/deskrealm-m1-test identity-federation
+bash scripts/deskrealm-m1-test authorization
 npm --prefix web ci --ignore-scripts
 npm --prefix web run typecheck
 PLAYWRIGHT_SKIP_BROWSER_GC=1 npm --prefix web exec -- playwright install chromium
@@ -45,6 +46,14 @@ go run ./cmd/deskrealm serve
 
 配置 `DESKREALM_OIDC_ISSUER`、`DESKREALM_OIDC_CLIENT_ID` 和 `DESKREALM_OIDC_CLIENT_SECRET`。在身份提供方登记回调 `<DESKREALM_PUBLIC_ORIGIN>/v1/auth/oidc/callback`。中心主机运行 `deskrealm oidc-bind USERNAME SUBJECT`，将提供方给出的稳定 subject 绑定至已有启用账号。邮箱用于显示场景，登录身份以签发方和 subject 为准。身份提供方变更时重新核对绑定。成功配置后登录页面显示「使用组织身份登录」。
 
+## 用户组、角色与令牌
+
+在「用户组与委派」建立用户组、维护成员，并为指定账号分配用户查看员或用户管理员角色。作用域可为组织、指定用户组或本人。用户管理员在获准范围更改普通账号状态，平台管理员管理成员关系、发放委派及移交完整管理员角色。移交后双方须重新登录。
+
+「API 令牌」签发 `users.read` 权限，用于可访问账号的列表和详情，有效期 1 分钟至 7 天。调用方以 `Authorization: Bearer <token>` 发送凭据。令牌创建时显示一次，签发者当前权限始终参与服务器判定，撤销和到期后立即失效。
+
+控制角色可维护允许的画面、键鼠、音频、剪贴板和文件传输动作。控制角色独立于后台管理授权，其配置版本供 M2 的会话准入和终端约束使用。
+
 | 接口 | 返回 |
 | --- | --- |
 | `GET /v1/bootstrap/status` | 初始化状态 |
@@ -61,3 +70,8 @@ go run ./cmd/deskrealm serve
 | `POST /v1/admin/users/imports` | 使用请求键重复查询同一批导入结果 |
 | `GET /v1/auth/totp`、`POST /v1/auth/totp/{setup,confirm}` | 查询及配置当前账号的验证器 |
 | `POST /v1/auth/totp/verify`、`POST /v1/admin/users/{id}/totp-reset` | 完成两步登录或由管理员重置验证器 |
+| `GET/POST /v1/admin/groups`、`GET/POST /v1/admin/groups/{id}/members` | 查看与管理用户组和成员 |
+| `GET/POST /v1/admin/role-grants`、`POST /v1/admin/role-grants/{id}/revoke` | 授予及撤销管理委派 |
+| `POST /v1/admin/users/{id}/transfer-platform-admin` | 移交管理员权限，原子撤销双方凭据 |
+| `GET/POST /v1/admin/api-tokens`、`POST /v1/admin/api-tokens/{id}/revoke` | 签发、查询及撤销账号读取令牌 |
+| `GET/POST /v1/admin/control-roles`、`POST /v1/admin/control-roles/{id}` | 创建、查询及按版本编辑控制角色 |

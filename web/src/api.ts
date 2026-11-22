@@ -20,6 +20,15 @@ const messages: Record<string, string> = {
   invalid_verification_code: '验证码错误、已使用或登录请求已过期。',
   totp_enrollment_unavailable: '当前验证器状态不允许此操作。',
   totp_unavailable: '中心暂时无法验证两步验证码。',
+  invalid_group: '请填写 1 到 80 个字符的用户组名称。',
+  group_name_in_use: '这个用户组名称已存在。',
+  group_not_found: '用户组不存在，请刷新页面。',
+  invalid_grant: '请检查账号、角色和授权范围。',
+  invalid_api_token_request: '请检查用途、作用域和有效期。',
+  invalid_admin_transfer: '请选择已启用并设置本地密码的其他账号。',
+  invalid_control_role: '请检查角色名称和允许的操作。',
+  control_role_name_in_use: '该控制角色名称已使用。',
+  control_role_stale: '该角色已变更，请查看最新版本后编辑。',
 }
 
 export class RequestError extends Error {

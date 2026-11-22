@@ -3,8 +3,10 @@ import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { api, json, RequestError } from './api'
 import UsersPanel from './UsersPanel.vue'
 import SecurityPanel from './SecurityPanel.vue'
+import GroupsPanel from './GroupsPanel.vue'
+import TokensPanel from './TokensPanel.vue'
 
-type Screen = 'loading' | 'initialize' | 'login' | 'overview' | 'users' | 'security' | 'accept-invitation' | 'recover' | 'unavailable'
+type Screen = 'loading' | 'initialize' | 'login' | 'overview' | 'users' | 'groups' | 'api-tokens' | 'security' | 'accept-invitation' | 'recover' | 'unavailable'
 type Session = {
   username: string
   organization: string
@@ -14,6 +16,7 @@ type Session = {
 type Overview = {
   organization: string
   can_manage: boolean
+  can_read_users: boolean
 }
 
 const props = defineProps<{ ticket: string }>()
@@ -30,6 +33,10 @@ const overview = ref<Overview>()
 const oidcAvailable = ref(false)
 const verification = ref(false)
 const code = ref('')
+const workspaceTitles: Partial<Record<Screen, string>> = {
+  overview: '概览', users: '用户与权限', groups: '用户组与委派', 'api-tokens': 'API 令牌', security: '账号安全',
+}
+const workspaceTitle = computed(() => workspaceTitles[screen.value])
 const accountLink = computed(() => screen.value === 'accept-invitation' || screen.value === 'recover')
 const needsTicket = computed(() => accountLink.value || screen.value === 'initialize')
 const formTitle = computed(() => {
@@ -67,7 +74,9 @@ async function loadSignedIn(allowAnonymous: boolean) {
   }
   overview.value = await api<Overview>('/v1/overview')
   const page = location.pathname === '/security' ? 'security' :
-    overview.value.can_manage && location.pathname === '/users' ? 'users' : 'overview'
+    overview.value.can_manage && location.pathname === '/groups' ? 'groups' :
+    overview.value.can_manage && location.pathname === '/api-tokens' ? 'api-tokens' :
+    overview.value.can_read_users && location.pathname === '/users' ? 'users' : 'overview'
   await show(page)
   return true
 }
@@ -161,28 +170,32 @@ onMounted(load)
 </script>
 
 <template>
-  <div v-if="(screen === 'overview' || screen === 'users' || screen === 'security') && session && overview" class="workspace">
+  <div v-if="workspaceTitle && session && overview" class="workspace">
     <aside class="sidebar" aria-label="工作台导航">
       <div class="brand"><span class="brand-icon" aria-hidden="true"></span><span><strong>端域</strong><small>DeskRealm</small></span></div>
       <p class="nav-heading">工作台</p>
       <nav class="nav-links">
         <a class="nav-link" href="/overview" :aria-current="screen === 'overview' ? 'page' : undefined">概览</a>
-        <a v-if="overview.can_manage" class="nav-link" href="/users" :aria-current="screen === 'users' ? 'page' : undefined">用户与权限</a>
+        <a v-if="overview.can_read_users" class="nav-link" href="/users" :aria-current="screen === 'users' ? 'page' : undefined">用户与权限</a>
+        <a v-if="overview.can_manage" class="nav-link" href="/groups" :aria-current="screen === 'groups' ? 'page' : undefined">用户组与委派</a>
+        <a v-if="overview.can_manage" class="nav-link" href="/api-tokens" :aria-current="screen === 'api-tokens' ? 'page' : undefined">API 令牌</a>
         <a class="nav-link" href="/security" :aria-current="screen === 'security' ? 'page' : undefined">账号安全</a>
       </nav>
     </aside>
     <header class="topbar">
-      <span class="breadcrumb">工作台 / {{ screen === 'users' ? '用户与权限' : screen === 'security' ? '账号安全' : '概览' }}</span>
+      <span class="breadcrumb">工作台 / {{ workspaceTitle }}</span>
       <div class="account">
         <div><strong>{{ session.username }}</strong><small>{{ overview.can_manage ? '平台管理员' : '成员' }}</small></div>
         <button class="secondary" :disabled="submitting" @click="logout">退出登录</button>
       </div>
     </header>
     <main class="content">
-      <h1 ref="heading" tabindex="-1">{{ screen === 'users' ? '用户与权限' : screen === 'security' ? '账号安全' : '概览' }}</h1>
+      <h1 ref="heading" tabindex="-1">{{ workspaceTitle }}</h1>
       <p class="muted">{{ overview.organization }}</p>
       <p v-if="error" class="error" role="alert">{{ error }}</p>
-      <UsersPanel v-if="screen === 'users'" :csrf="session.csrf_token" @expired="load" />
+      <UsersPanel v-if="screen === 'users'" :csrf="session.csrf_token" :admin="overview.can_manage" @expired="load" />
+      <GroupsPanel v-else-if="screen === 'groups'" :csrf="session.csrf_token" @expired="load" />
+      <TokensPanel v-else-if="screen === 'api-tokens'" :csrf="session.csrf_token" @expired="load" />
       <SecurityPanel v-else-if="screen === 'security'" :csrf="session.csrf_token" @expired="load" />
       <section v-else class="panel" aria-labelledby="organization-title">
         <h2 id="organization-title">当前组织</h2>

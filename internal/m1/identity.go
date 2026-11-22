@@ -27,6 +27,7 @@ type managedUser struct {
 	Username      string `json:"username"`
 	Status        string `json:"status"`
 	PlatformAdmin bool   `json:"platform_admin"`
+	CanChange     bool   `json:"can_change"`
 }
 
 type userList struct {
@@ -40,51 +41,40 @@ const adminBinding = `EXISTS (
 )`
 
 func managementActor(ctx context.Context, tx pgx.Tx, value string, write bool) (string, string, error) {
-	if !validToken(value) {
-		return "", "", errSession
+	current, err := actorSession(ctx, tx, value, write)
+	if err == nil && !current.PlatformAdmin {
+		err = errForbidden
 	}
-	if write {
-		// Serialize changes that can remove the final administrator. Key-share operations
-		// for audit and other foreign keys can still run while this lock is held.
-		if _, err := tx.Exec(ctx, "SELECT singleton FROM organizations WHERE singleton FOR NO KEY UPDATE"); err != nil {
-			return "", "", err
-		}
-	}
-	query := `SELECT u.id, u.organization_id, ` + adminBinding + `
-		FROM browser_sessions s JOIN users u ON s.user_id=u.id
-		WHERE s.token_digest=$1 AND s.revoked_at IS NULL AND s.expires_at>clock_timestamp()
-		  AND u.status='active'`
-	if write {
-		query += " FOR SHARE OF u, s"
-	}
-	var actorID, orgID string
-	var admin bool
-	err := tx.QueryRow(ctx, query, digest(value)).Scan(&actorID, &orgID, &admin)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return "", "", errSession
-	}
-	if err == nil && !admin {
-		return "", "", errForbidden
-	}
-	return actorID, orgID, err
+	return current.ID, current.Organization, err
 }
 
-func (s Store) listUsers(ctx context.Context, value, after string) (userList, error) {
+func (s Store) listUsers(ctx context.Context, credentials userReadCredentials, after string) (userList, error) {
 	result := userList{Users: make([]managedUser, 0)}
 	err := pgx.BeginTxFunc(ctx, s.DB, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly}, func(tx pgx.Tx) error {
-		_, orgID, err := managementActor(ctx, tx, value, false)
+		current, scope, groupID, err := credentials.authenticate(ctx, tx)
 		if err != nil {
 			return err
 		}
-		rows, err := tx.Query(ctx, `SELECT u.id, u.username, u.status, `+adminBinding+`
-			FROM users u WHERE u.organization_id=$1 AND u.username>$2 ORDER BY u.username LIMIT 101`, orgID, after)
+		if !current.PlatformAdmin {
+			allowed, err := canReadUsers(ctx, tx, current.ID)
+			if err != nil {
+				return err
+			}
+			if !allowed {
+				return errForbidden
+			}
+		}
+		rows, err := tx.Query(ctx, `SELECT u.id, u.username, u.status, `+adminBinding+`, (NOT $8 AND `+userWriteAllowed+`)
+			FROM users u WHERE u.organization_id=$1 AND `+userAllowed+` AND u.username>$5 AND `+tokenAllowed+`
+			ORDER BY u.username LIMIT 101`, current.Organization, current.ID, "users.read", current.PlatformAdmin,
+			after, scope, groupID, credentials.fromAPI)
 		if err != nil {
 			return err
 		}
 		defer rows.Close()
 		for rows.Next() {
 			var u managedUser
-			if err := rows.Scan(&u.ID, &u.Username, &u.Status, &u.PlatformAdmin); err != nil {
+			if err := rows.Scan(&u.ID, &u.Username, &u.Status, &u.PlatformAdmin, &u.CanChange); err != nil {
 				return err
 			}
 			result.Users = append(result.Users, u)
@@ -127,13 +117,16 @@ func (s Store) createUser(ctx context.Context, value, username, password string)
 func (s Store) changeUser(ctx context.Context, value, userID, targetStatus, reason string) (managedUser, error) {
 	var result managedUser
 	err := pgx.BeginFunc(ctx, s.DB, func(tx pgx.Tx) error {
-		actorID, orgID, err := managementActor(ctx, tx, value, true)
+		current, err := actorSession(ctx, tx, value, true)
 		if err != nil {
 			return err
 		}
+		actorID, orgID := current.ID, current.Organization
 		err = tx.QueryRow(ctx, `SELECT u.id,u.username,u.status,`+adminBinding+`
-			FROM users u WHERE u.id=$1 AND u.organization_id=$2 FOR NO KEY UPDATE`, userID, orgID).
+			FROM users u WHERE u.organization_id=$1 AND `+userAllowed+` AND u.id=$5 FOR NO KEY UPDATE`,
+			orgID, actorID, "users.state", current.PlatformAdmin, userID).
 			Scan(&result.ID, &result.Username, &result.Status, &result.PlatformAdmin)
+		result.CanChange = err == nil
 		if errors.Is(err, pgx.ErrNoRows) {
 			return errUserMissing
 		}
@@ -175,7 +168,7 @@ func (a *API) listUsers(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_cursor")
 		return
 	}
-	result, err := a.store.listUsers(r.Context(), a.cookieValue(r), after)
+	result, err := a.store.listUsers(r.Context(), a.readCredentials(r), after)
 	if err != nil {
 		failure(w, "list users", err)
 		return
@@ -234,7 +227,7 @@ func (a *API) createUser(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) changeUser(w http.ResponseWriter, r *http.Request) {
-	if !a.authorizeUserWrite(w, r) {
+	if _, ok := a.sessionWrite(w, r); !ok {
 		return
 	}
 	id := r.PathValue("id")
