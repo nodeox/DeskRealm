@@ -35,7 +35,20 @@
 1. 首个管理员可初始化并登录。授权者可创建用户、委派角色和审批设备。
 2. 用户只看到获准的组范围。API 单对象、列表与控制台执行一致的授权。
 3. 设备历史、审批、通讯录共享和操作审计可追溯。
-**Plans**: TBD
+**Plans**: 4 plans
+
+Plans:
+**Wave 1**
+- [ ] 02-01: 首次初始化、本地会话和中文概览
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [ ] 02-02: 账号生命周期、身份源与作用域授权
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [ ] 02-03: 设备登记审批与通讯录
+
+**Wave 4** *(blocked on Wave 3 completion)*
+- [ ] 02-04: 审计、任务和角色入口
 
 ### Phase 3: M2 受管连接与策略
 
@@ -76,7 +89,7 @@
 | Phase | Plans Complete | Status | Completed |
 | --- | --- | --- | --- |
 | 1. M0 安装与传输基线 | 1/1 | Complete    | 2026-11-22 |
-| 2. M1 用户、设备与管理面 | 0/TBD | Not started | - |
+| 2. M1 用户、设备与管理面 | 0/4 | In progress | - |
 | 3. M2 受管连接与策略 | 0/TBD | Not started | - |
 | 4. M3 部署与自动化交付 | 0/TBD | Not started | - |
 | 5. 首版目标环境验收 | 0/TBD | Not started | - |
