@@ -1,35 +1,12 @@
 import { expect, test } from '@playwright/test'
-import type { Page } from '@playwright/test'
-import { generateKeyPairSync, sign } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
-
-const password = 'deskrealm-browser-test-passphrase'
-
-async function signIn(page: Page, username: string) {
-  await page.goto('/login')
-  await page.getByLabel('账号').fill(username)
-  await page.getByLabel('密码', { exact: true }).fill(password)
-  await page.getByRole('button', { name: '登录', exact: true }).click()
-  await expect(page.getByRole('heading', { name: '概览', exact: true })).toBeVisible()
-}
+import { enroll, initialize, password, requestAs, signIn } from './resource-fixtures'
 
 test('共享通讯录、审计和任务中心按实际授权与结果运行', async ({ page, browser, baseURL }) => {
   const invitation = process.env.DESKREALM_BROWSER_TICKET
   if (!invitation || !baseURL) throw new Error('Run scripts/deskrealm-m1-test resources-browser')
-  await page.goto(invitation)
-  await page.getByLabel('组织名称').fill('通讯录开发验证')
-  await page.getByLabel('账号').fill('admin')
-  await page.getByLabel('密码', { exact: true }).fill(password)
-  await page.getByRole('button', { name: '初始化中心' }).click()
-  await expect(page.getByRole('heading', { name: '登录端域控制台' })).toBeVisible()
-  await signIn(page, 'admin')
-  const session = await (await page.request.get('/v1/auth/session')).json() as { csrf_token: string }
-
-  async function post(path: string, data: object, status: number) {
-    const response = await page.request.post(path, { data, headers: { Origin: baseURL!, 'X-CSRF-Token': session.csrf_token } })
-    expect(response.status(), path).toBe(status)
-    if (status !== 204) return response.json()
-  }
+  await initialize(page, invitation, '通讯录开发验证')
+  const post = await requestAs(page, baseURL)
 
   const member = 'field-member'
   await post('/v1/admin/users', { username: member, password }, 201)
@@ -39,32 +16,10 @@ test('共享通讯录、审计和任务中心按实际授权与结果运行', as
   const secondGroup = await post('/v1/admin/device-groups', { name: '机房设备' }, 201) as { id: string }
   await post('/v1/admin/device-groups/' + firstGroup.id + '/grants', { username: member, can_approve: false }, 204)
 
-  async function enroll(groupID: string, id: string) {
-    const grant = await post('/v1/admin/enrollment-credentials', {
-      group_id: groupID, platform: 'windows-amd64', purpose: '自动化验证', lifetime_minutes: 10,
-    }, 201) as { credential: string }
-    const keys = generateKeyPairSync('ed25519')
-    const point = keys.publicKey.export({ format: 'jwk' }).x
-    if (!point) throw new Error('Ed25519 public key missing')
-    const input = {
-      credential: grant.credential, group_id: groupID, platform: 'windows-amd64', rustdesk_id: id,
-      public_key: Buffer.from(point, 'base64url').toString('base64'),
-    }
-    const challenge = await post('/v1/enrollment/challenge', input, 200) as { attempt_id: string; nonce: string }
-    const message = Buffer.from([
-      'deskrealm/device-enrollment/v1', challenge.attempt_id, challenge.nonce, groupID,
-      input.platform, id, input.public_key,
-    ].join('\n'))
-    const result = await post('/v1/enrollment/complete', {
-      ...input, attempt_id: challenge.attempt_id, signature: sign(null, message, keys.privateKey).toString('base64'),
-    }, 200) as { device_id: string }
-    return result.device_id
-  }
-
   const first = '30105223'
   const hidden = '30105224'
-  const firstID = await enroll(firstGroup.id, first)
-  const hiddenID = await enroll(secondGroup.id, hidden)
+  const firstID = await enroll(post, firstGroup.id, first)
+  const hiddenID = await enroll(post, secondGroup.id, hidden)
 
   await page.getByRole('link', { name: '任务中心' }).click()
   const pendingTask = page.getByRole('row').filter({ hasText: '前台设备' })

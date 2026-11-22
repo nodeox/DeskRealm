@@ -395,51 +395,6 @@ func (a *API) session(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (a *API) overview(w http.ResponseWriter, r *http.Request) {
-	if user, ok := a.requireSession(w, r); ok {
-		admin := user.Role == adminRole
-		canRead := admin
-		if !admin {
-			var err error
-			canRead, err = canReadUsers(r.Context(), a.store.DB, user.UserID)
-			if err != nil {
-				failure(w, "overview scope", err)
-				return
-			}
-		}
-		canDevices, err := canManageDevices(r.Context(), a.store, user)
-		if err != nil {
-			failure(w, "overview device scope", err)
-			return
-		}
-		canAudit := admin
-		if !admin {
-			err := a.store.DB.QueryRow(r.Context(), "SELECT EXISTS(SELECT 1 FROM audit_grants WHERE user_id=$1)", user.UserID).Scan(&canAudit)
-			if err != nil {
-				failure(w, "overview audit scope", err)
-				return
-			}
-		}
-		canTasks := canDevices
-		if !canTasks {
-			err := a.store.DB.QueryRow(r.Context(), "SELECT EXISTS(SELECT 1 FROM tasks WHERE kind='user_import' AND owner_id=$1)", user.UserID).Scan(&canTasks)
-			if err != nil {
-				failure(w, "overview task scope", err)
-				return
-			}
-		}
-		result := struct {
-			Organization   string `json:"organization"`
-			CanManage      bool   `json:"can_manage"`
-			CanReadUsers   bool   `json:"can_read_users"`
-			CanReadDevices bool   `json:"can_read_devices"`
-			CanReadAudit   bool   `json:"can_read_audit"`
-			CanReadTasks   bool   `json:"can_read_tasks"`
-		}{user.Organization, admin, canRead, canDevices, canAudit, canTasks}
-		writeJSON(w, http.StatusOK, result)
-	}
-}
-
 func (a *API) sessionWrite(w http.ResponseWriter, r *http.Request) (principal, bool) {
 	user, ok := a.requireSession(w, r)
 	if !ok {

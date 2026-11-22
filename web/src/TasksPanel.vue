@@ -2,29 +2,22 @@
 import { computed, nextTick, onMounted, ref } from 'vue'
 import { api, json, RequestError } from './api'
 
-type State = 'waiting' | 'queued' | 'running' | 'succeeded' | 'failed'
-type Summary = Record<State, number> & {
-  id: string
-  kind: 'user_import' | 'device_enrollment'
-  created_at: string
-  device_id?: string
-  group?: string
-}
-type Target = { id: string; object_key: string; state: State; result_code: string; can_retry: boolean; version: number }
+import { taskKinds as kinds, taskProgress as progress, taskStates as states, type TaskState, type TaskSummary } from './overview'
+
+type Target = { id: string; object_key: string; state: TaskState; result_code: string; can_retry: boolean; version: number }
 type Attempt = { id?: string; target_id: string; sequence: number; result_code?: string; started_at: string; finished_at?: string }
-type Task = Summary & { targets: Target[]; attempts: Attempt[] }
+type Task = TaskSummary & { targets: Target[]; attempts: Attempt[] }
 
 const props = defineProps<{ csrf: string }>()
 const emit = defineEmits<{ expired: [] }>()
-const states: Record<State, string> = { waiting: '待审批', queued: '待执行', running: '执行中', succeeded: '成功', failed: '失败' }
 const results: Record<string, string> = {
   pending: '账号待激活', exists: '账号已存在', import_failed: '账号写入失败', pending_approval: '等待设备审批',
   approved: '设备已通过审批', rejected: '设备已被拒绝', retired: '待审批设备已退役',
   lease_expired: '执行租约已过期', authorization_changed: '重试申请人的管理员权限已变更',
 }
-const kinds = { user_import: '账号导入', device_enrollment: '设备入网' }
 const base = '/v1/admin/tasks'
-const tasks = ref<Summary[]>([])
+const retryOnly = new URLSearchParams(location.search).get('retry') === 'available'
+const tasks = ref<TaskSummary[]>([])
 const next = ref('')
 const task = ref<Task>()
 const selected = ref<string[]>([])
@@ -41,16 +34,15 @@ function message(cause: unknown) {
   return cause instanceof RequestError ? cause.message : '无法连接中心，请重试。'
 }
 
-function progress(item: Summary) {
-  return (Object.keys(states) as State[]).filter(key => item[key] > 0).map(key => `${states[key]} ${item[key]}`).join(' · ')
-}
-
 function formatTime(value: string) {
   return new Date(value).toLocaleString('zh-CN')
 }
 
 async function readList(after = '') {
-  const response = await api<{ tasks: Summary[]; next_cursor?: string }>(base + (after ? '?before=' + encodeURIComponent(after) : ''))
+  const filters = new URLSearchParams()
+  if (retryOnly) filters.set('retry', 'available')
+  if (after) filters.set('before', after)
+  const response = await api<{ tasks: TaskSummary[]; next_cursor?: string }>(base + (filters.size ? '?' + filters : ''))
   tasks.value = after ? [...tasks.value, ...response.tasks] : response.tasks
   next.value = response.next_cursor ?? ''
 }
@@ -126,6 +118,7 @@ onMounted(async () => {
       <h2 id="tasks-heading">任务列表</h2>
       <button class="secondary" :disabled="busy" @click="refresh()">刷新</button>
     </div>
+    <p v-if="retryOnly" class="muted active-filter">仅显示含可重试失败对象的任务。<a href="/tasks">显示全部任务</a></p>
     <p v-if="error" class="error" role="alert">{{ error }}</p>
     <p v-if="notice" class="muted" role="status">{{ notice }}</p>
     <div v-if="tasks.length" class="table-wrap">
@@ -140,7 +133,7 @@ onMounted(async () => {
         </tbody>
       </table>
     </div>
-    <p v-else-if="!busy && !error" class="muted">暂无任务。</p>
+    <p v-else-if="!busy && !error" class="muted">{{ retryOnly ? '暂无可重试的任务。' : '暂无任务。' }}</p>
     <button v-if="next" class="secondary" :disabled="busy" @click="refresh(next)">加载更多</button>
   </section>
   <section v-if="task" class="users-surface" aria-labelledby="task-detail-heading">

@@ -20,6 +20,7 @@ type History = {
 
 const props = defineProps<{ csrf: string; admin: boolean }>()
 const emit = defineEmits<{ expired: [] }>()
+const pendingOnly = new URLSearchParams(location.search).get('review') === 'pending'
 const groups = ref<Group[]>([])
 const devices = ref<Device[]>([])
 const grants = ref<Grant[]>([])
@@ -43,6 +44,7 @@ const rotation = ref<Rotation>()
 const details = ref<Device>()
 const history = ref<History>()
 const historyDialog = ref<HTMLDialogElement>()
+let detailTrigger: HTMLButtonElement | undefined
 const actions: Record<Decision, string> = {
   approve: '批准设备登记', reject: '拒绝设备登记', move: '移组', 'rename-id': '修改 RustDesk ID',
   rotate: '轮换密钥', disable: '禁用设备', restore: '恢复设备', retire: '退役设备',
@@ -73,7 +75,10 @@ async function execute(fn: () => Promise<void>) {
 }
 
 async function loadList(cursor = '') {
-  const result = await api<DevicePage>('/v1/admin/devices' + (cursor ? '?after=' + cursor : ''))
+  const filters = new URLSearchParams()
+  if (pendingOnly) filters.set('review', 'pending')
+  if (cursor) filters.set('after', cursor)
+  const result = await api<DevicePage>('/v1/admin/devices' + (filters.size ? '?' + filters : ''))
   devices.value = cursor ? [...devices.value, ...result.devices] : result.devices
   next.value = result.next ?? ''
 }
@@ -133,15 +138,22 @@ async function ask(device: Device, action: Decision) {
   dialog.value?.showModal()
 }
 
-async function showDetails(device: Device) {
+async function showDetails(device: Device, event: MouseEvent) {
+  const trigger = event.currentTarget as HTMLButtonElement
   await execute(async () => {
     const path = '/v1/admin/devices/' + device.id
     const [current, records] = await Promise.all([api<Device>(path), api<History>(path + '/history')])
     details.value = current
     history.value = records
+    detailTrigger = trigger
     await nextTick()
     historyDialog.value?.showModal()
   })
+}
+
+function restoreDetailFocus() {
+  if (!dialog.value?.open) detailTrigger?.focus()
+  detailTrigger = undefined
 }
 
 function decide() {
@@ -162,7 +174,8 @@ function decide() {
         ...(action === 'move' ? { group_id: destination.value } : {}),
         ...(action === 'rename-id' ? { rustdesk_id: newID.value } : {}),
       }, props.csrf))
-      devices.value = devices.value.map(row => result.id === row.id ? result : row)
+      if (pendingOnly && result.registration_state !== 'pending') await loadList()
+      else devices.value = devices.value.map(row => result.id === row.id ? result : row)
     }
     dialog.value?.close()
   })
@@ -186,6 +199,7 @@ onMounted(() => execute(async () => {
       </div>
     </div>
 
+    <p v-if="pendingOnly" class="muted active-filter">仅显示可审批的待登记设备。<a href="/devices">显示全部设备</a></p>
     <p v-if="error" class="error" role="alert">{{ error }}</p>
     <form v-if="mode === 'group'" class="link-form" @submit.prevent="createGroup">
       <div class="field"><label for="device-group-name">设备组名称</label><input id="device-group-name" v-model="name" maxlength="80" required></div>
@@ -253,21 +267,21 @@ onMounted(() => execute(async () => {
             <td v-if="device.expected_policy_version === null">未下发</td>
             <td v-else>期望 {{ device.expected_policy_version }} · {{ device.applied_policy_version === null ? '待回执' : '已应用 ' + device.applied_policy_version }}</td>
             <td class="row-actions">
-              <button type="button" class="secondary" :disabled="busy" @click="showDetails(device)">详情</button>
+              <button type="button" class="secondary" :disabled="busy" @click="showDetails(device, $event)">详情</button>
               <template v-if="device.can_approve && device.registration_state === 'pending'">
                 <button type="button" class="secondary" @click="ask(device, 'approve')">批准</button>
                 <button type="button" class="secondary" @click="ask(device, 'reject')">拒绝</button>
               </template>
             </td>
           </tr>
-          <tr v-if="!devices.length"><td colspan="6">{{ busy ? '正在加载设备…' : '暂无可查看的设备。' }}</td></tr>
+          <tr v-if="!devices.length"><td colspan="6">{{ busy ? '正在加载设备…' : pendingOnly ? '暂无待审批设备。' : '暂无可查看的设备。' }}</td></tr>
         </tbody>
       </table>
     </div>
     <button v-if="next" class="secondary load-more" type="button" :disabled="busy" @click="execute(() => loadList(next))">加载更多</button>
   </section>
 
-  <dialog ref="historyDialog" aria-labelledby="device-detail-title">
+  <dialog ref="historyDialog" aria-labelledby="device-detail-title" @close="restoreDetailFocus">
     <div v-if="details && history">
       <h2 id="device-detail-title">设备详情</h2>
       <p class="muted dialog-copy">{{ details.rustdesk_id }} · {{ details.group_name }} · {{ states[details.registration_state] }}

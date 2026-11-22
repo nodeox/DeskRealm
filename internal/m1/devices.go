@@ -42,12 +42,17 @@ func lockManagedDevice(ctx context.Context, tx pgx.Tx, who actor, id string) (de
 func (a *API) listOrGetDevices(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	after := r.URL.Query().Get("after")
+	review := r.URL.Query().Get("review")
 	if id != "" && !userIDPattern.MatchString(id) {
 		failure(w, "read device", errDeviceMissing)
 		return
 	}
 	if after != "" && !userIDPattern.MatchString(after) {
 		writeError(w, 400, "invalid_cursor")
+		return
+	}
+	if review != "" && (review != "pending" || id != "") {
+		writeError(w, 400, "invalid_device_filter")
 		return
 	}
 	ctx := r.Context()
@@ -63,7 +68,8 @@ func (a *API) listOrGetDevices(w http.ResponseWriter, r *http.Request) {
 		rows, err := tx.Query(ctx, `SELECT `+deviceProjection+` FROM devices d JOIN device_groups dg ON dg.id=d.group_id
 			WHERE d.organization_id=$1 AND `+deviceGroupRead+`
 			AND ($4='' OR d.id=NULLIF($4,'')::uuid) AND ($5='' OR d.id>NULLIF($5,'')::uuid)
-			ORDER BY d.id LIMIT 101`, who.Organization, who.ID, who.PlatformAdmin, id, after)
+			AND (NOT $6 OR (d.registration_state='pending' AND `+deviceGroupApprove+`))
+			ORDER BY d.id LIMIT 101`, who.Organization, who.ID, who.PlatformAdmin, id, after, review == "pending")
 		if err != nil {
 			return err
 		}

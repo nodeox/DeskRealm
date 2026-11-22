@@ -87,6 +87,17 @@ input, textarea, select {
 .panel dl > div { display: grid; grid-template-columns: minmax(72px, 1fr) 2fr; gap: 12px; font-size: 14px; }
 .panel dt { color: var(--muted); }
 .panel dd { margin: 0; overflow-wrap: anywhere; }
+.overview-metrics, .overview-recent { display: grid; gap: 16px; }
+.overview-metrics { grid-template-columns: repeat(auto-fit, minmax(132px, 1fr)); list-style: none; padding: 0; margin: 0 0 20px; }
+.overview-metrics a { display: grid; gap: 8px; padding: 16px; border: 1px solid var(--line); border-radius: 12px; color: inherit; background: var(--white); text-decoration: none; }
+.overview-metrics a:hover { border-color: var(--accent); }
+.overview-metrics span { color: var(--muted); font-size: 14px; }
+.overview-metrics strong { font-size: 28px; font-variant-numeric: tabular-nums; }
+.overview-recent { grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr)); align-items: start; }
+.overview-recent .section-heading a, .overview-recent li a { color: var(--accent); font-size: 14px; overflow-wrap: anywhere; }
+.overview-recent time { color: var(--muted); font-size: 12px; text-align: right; }
+.overview-integrations, .active-filter { margin: 16px 0; }
+.active-filter a { margin-inline-start: 8px; }
 
 .users-surface { padding: 20px; border: 1px solid var(--line); border-radius: 12px; background: var(--white); }
 .section-heading { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; margin-bottom: 18px; }

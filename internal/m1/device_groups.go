@@ -32,15 +32,6 @@ const deviceGroupApprove = `( $3 OR EXISTS (
 	SELECT 1 FROM device_group_grants g WHERE g.group_id=dg.id AND g.user_id=$2 AND g.can_approve
 ))`
 
-func canManageDevices(ctx context.Context, store Store, user principal) (bool, error) {
-	if user.Role == adminRole {
-		return true, nil
-	}
-	var available bool
-	err := store.DB.QueryRow(ctx, "SELECT EXISTS (SELECT 1 FROM device_group_grants WHERE user_id=$1)", user.UserID).Scan(&available)
-	return available, err
-}
-
 func (a *API) listDeviceGroups(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	result := make([]deviceGroup, 0)

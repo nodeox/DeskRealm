@@ -2,6 +2,7 @@
 import { nextTick, onMounted, ref } from 'vue'
 import { api, json, RequestError } from './api'
 import AuditSettings from './AuditSettings.vue'
+import { auditLabels } from './auditLabels'
 
 type Event = {
   id: string; actor_id?: string; actor_name?: string; action: string; result: string; source: string
@@ -23,15 +24,6 @@ const selection = ref<Event>()
 const details = ref<HTMLDialogElement>()
 const busy = ref(false)
 const error = ref('')
-const labels: Record<string, string> = {
-  'organization.initialized': '初始化组织', 'user.login': '登录', 'user.logout': '退出登录',
-  'user.created': '创建账号', 'user.disabled': '停用账号', 'user.active': '启用账号',
-  'device.approved': '批准设备', 'device.rejected': '拒绝设备',
-  'device.enrollment_pending': '登记设备', 'device.enrollment_issued': '签发入网凭据',
-  'device.moved': '设备移组', 'address_book.shared': '共享通讯录', 'address_book.share_revoked': '撤销通讯录共享',
-  'audit.exported': '导出审计', 'audit.granted': '授予审计权限', 'audit.grant_revoked': '撤销审计权限',
-  'audit.retention_changed': '更新保留期', 'audit.retention_pruned': '清理过期审计',
-}
 
 function status(event: Event) {
   if (event.receipt_state === 'pending') return '待回执'
@@ -102,13 +94,17 @@ function exportCSV() {
 
 function showDetail(id: string) {
   return run(async () => {
-    selection.value = await api<Event>(base + '/' + id)
+    selection.value = await api<Event>(base + '/' + encodeURIComponent(id))
     await nextTick()
     details.value?.showModal()
   })
 }
 
-onMounted(() => run(() => load('')))
+onMounted(async () => {
+  await run(() => load(''))
+  const id = new URLSearchParams(location.search).get('event')
+  if (id) await showDetail(id)
+})
 </script>
 
 <template>
@@ -140,7 +136,7 @@ onMounted(() => run(() => load('')))
         <thead><tr><th scope="col">事件</th><th scope="col">操作者</th><th scope="col">发生时间</th><th scope="col">回执</th><th scope="col">详情</th></tr></thead>
         <tbody>
           <tr v-for="event in events" :key="event.id">
-            <th scope="row">{{ labels[event.action] || event.action }}<small>{{ event.action }}</small></th>
+            <th scope="row">{{ auditLabels[event.action] || event.action }}<small>{{ event.action }}</small></th>
             <td>{{ event.actor_name || '服务' }}</td>
             <td>{{ date(event.occurred_at) }}</td>
             <td>{{ status(event) }}</td>
@@ -156,7 +152,7 @@ onMounted(() => run(() => load('')))
     <div v-if="selection">
       <h2 id="audit-detail-title">事件详情</h2>
       <dl class="audit-detail">
-        <dt>事件</dt><dd>{{ labels[selection.action] || selection.action }}</dd>
+        <dt>事件</dt><dd>{{ auditLabels[selection.action] || selection.action }}</dd>
         <dt>事件 ID</dt><dd>{{ selection.id }}</dd>
         <dt>操作者</dt><dd>{{ selection.actor_name || '服务' }}</dd>
         <dt>来源</dt><dd>{{ selection.source }}</dd>

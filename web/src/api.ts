@@ -32,6 +32,7 @@ const messages: Record<string, string> = {
   device_group_name_in_use: '该设备组名称已使用。',
   device_group_not_found: '设备组不存在或当前账号无权操作。',
   device_not_found: '设备不存在或当前账号无权操作。',
+  invalid_device_filter: '设备筛选条件无效。',
   invalid_enrollment_request: '请检查设备组、设备平台、凭据用途和有效期。',
   device_decision_conflict: '设备已处理，请刷新列表。',
   invalid_device_change: '请检查设备版本和所填字段。',

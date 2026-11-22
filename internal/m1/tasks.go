@@ -62,6 +62,11 @@ const taskSummaryGroup = ` GROUP BY t.id,d.id,dg.name `
 
 func (a *API) listTasks(w http.ResponseWriter, r *http.Request) {
 	const limit = 50
+	retry := r.URL.Query().Get("retry")
+	if retry != "" && retry != "available" {
+		failure(w, "list tasks", errTaskInvalid)
+		return
+	}
 	var before *time.Time
 	var beforeID string
 	if cursor := r.URL.Query().Get("before"); cursor != "" {
@@ -79,8 +84,14 @@ func (a *API) listTasks(w http.ResponseWriter, r *http.Request) {
 		NextCursor string        `json:"next_cursor,omitempty"`
 	}{}
 	err := a.withActor(r, false, func(tx pgx.Tx, who actor) error {
+		if retry == "available" && !who.PlatformAdmin {
+			return errForbidden
+		}
 		rows, err := tx.Query(ctx, taskSummaries+` AND ($4::timestamptz IS NULL OR (t.created_at,t.id)<($4,NULLIF($5,'')::uuid))`+
-			taskSummaryGroup+` ORDER BY t.created_at DESC,t.id DESC LIMIT $6`, who.Organization, who.ID, who.PlatformAdmin, before, beforeID, limit+1)
+			` AND (NOT $7 OR (t.kind='user_import' AND EXISTS (
+				SELECT 1 FROM task_targets target WHERE target.task_id=t.id AND target.retryable AND target.attempt_count<$8
+			)))`+taskSummaryGroup+` ORDER BY t.created_at DESC,t.id DESC LIMIT $6`,
+			who.Organization, who.ID, who.PlatformAdmin, before, beforeID, limit+1, retry == "available", maxTaskAttempts)
 		if err != nil {
 			return err
 		}

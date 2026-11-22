@@ -38,8 +38,8 @@ test('首次管理员初始化、成员停用、刷新和退出', async ({ page,
   await expect(page.getByRole('alert')).toContainText('账号或密码有误')
   await page.getByLabel('密码', { exact: true }).fill('test-passphrase-for-deskrealm')
   await page.getByLabel('密码', { exact: true }).press('Enter')
-  await expect(page.getByRole('heading', { name: '当前组织' })).toBeVisible()
-  await expect(page.getByRole('definition').filter({ hasText: '开发验收组织' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: '资源与待办' })).toBeVisible()
+  await expect(page.getByRole('main').getByText('开发验收组织', { exact: true })).toBeVisible()
 
   await page.getByRole('link', { name: '用户与权限' }).click()
   await expect(page.getByRole('heading', { name: '用户与权限', exact: true })).toBeVisible()

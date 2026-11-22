@@ -9,22 +9,25 @@ import DevicesPanel from './DevicesPanel.vue'
 import AddressBooksPanel from './AddressBooksPanel.vue'
 import AuditPanel from './AuditPanel.vue'
 import TasksPanel from './TasksPanel.vue'
+import OverviewPanel from './OverviewPanel.vue'
+import type { Overview } from './overview'
 
-type Screen = 'loading' | 'initialize' | 'login' | 'overview' | 'users' | 'groups' | 'devices' | 'address-books' | 'audit' | 'tasks' | 'api-tokens' | 'security' | 'accept-invitation' | 'recover' | 'unavailable'
-type Session = {
-  username: string
-  organization: string
-  role: string
-  csrf_token: string
-}
-type Overview = {
-  organization: string
-  can_manage: boolean
-  can_read_users: boolean
-  can_read_devices: boolean
-  can_read_audit: boolean
-  can_read_tasks: boolean
-}
+type WorkspacePage = 'overview' | 'users' | 'groups' | 'devices' | 'address-books' | 'audit' | 'tasks' | 'api-tokens' | 'security'
+type Screen = WorkspacePage | 'loading' | 'initialize' | 'login' | 'accept-invitation' | 'recover' | 'unavailable'
+type Session = { username: string; csrf_token: string }
+type Capability = 'can_manage' | 'can_read_users' | 'can_read_devices' | 'can_read_audit' | 'can_read_tasks'
+
+const navigation: { page: WorkspacePage; title: string; capability?: Capability }[] = [
+  { page: 'overview', title: '概览' },
+  { page: 'devices', title: '设备管理', capability: 'can_read_devices' },
+  { page: 'address-books', title: '通讯录' },
+  { page: 'audit', title: '会话与审计', capability: 'can_read_audit' },
+  { page: 'tasks', title: '任务中心', capability: 'can_read_tasks' },
+  { page: 'users', title: '用户与权限', capability: 'can_read_users' },
+  { page: 'groups', title: '用户组与委派', capability: 'can_manage' },
+  { page: 'api-tokens', title: 'API 令牌', capability: 'can_manage' },
+  { page: 'security', title: '账号安全' },
+]
 
 const props = defineProps<{ ticket: string }>()
 const ticket = ref(props.ticket)
@@ -40,11 +43,9 @@ const overview = ref<Overview>()
 const oidcAvailable = ref(false)
 const verification = ref(false)
 const code = ref('')
-const workspaceTitles: Partial<Record<Screen, string>> = {
-  overview: '概览', users: '用户与权限', groups: '用户组与委派', devices: '设备管理',
-  'address-books': '通讯录', audit: '会话与审计', tasks: '任务中心', 'api-tokens': 'API 令牌', security: '账号安全',
-}
-const workspaceTitle = computed(() => workspaceTitles[screen.value])
+const refreshing = ref(false)
+const workspaceTitle = computed(() => navigation.find(item => item.page === screen.value)?.title)
+const availablePages = computed(() => navigation.filter(item => !item.capability || overview.value?.[item.capability]))
 const accountLink = computed(() => screen.value === 'accept-invitation' || screen.value === 'recover')
 const needsTicket = computed(() => accountLink.value || screen.value === 'initialize')
 const formTitle = computed(() => {
@@ -81,15 +82,10 @@ async function loadSignedIn(allowAnonymous: boolean) {
     throw cause
   }
   overview.value = await api<Overview>('/v1/overview')
-  const page = location.pathname === '/security' ? 'security' :
-    location.pathname === '/address-books' ? 'address-books' :
-    overview.value.can_read_audit && location.pathname === '/audit' ? 'audit' :
-    overview.value.can_read_tasks && location.pathname === '/tasks' ? 'tasks' :
-    overview.value.can_read_devices && location.pathname === '/devices' ? 'devices' :
-    overview.value.can_manage && location.pathname === '/groups' ? 'groups' :
-    overview.value.can_manage && location.pathname === '/api-tokens' ? 'api-tokens' :
-    overview.value.can_read_users && location.pathname === '/users' ? 'users' : 'overview'
-  await show(page)
+  const requested = navigation.find(item => location.pathname === '/' + item.page)
+  const allowed = requested && availablePages.value.includes(requested)
+  if (requested && !allowed) error.value = '当前账号无权访问「' + requested.title + '」。'
+  await show(allowed ? requested.page : 'overview')
   return true
 }
 
@@ -157,6 +153,20 @@ async function submit() {
   }
 }
 
+async function refreshOverview() {
+  if (refreshing.value) return
+  refreshing.value = true
+  error.value = ''
+  try {
+    overview.value = await api<Overview>('/v1/overview')
+  } catch (cause) {
+    if (cause instanceof RequestError && cause.status === 401) await load()
+    else error.value = '无法刷新概览。当前显示上次读取的数据。'
+  } finally {
+    refreshing.value = false
+  }
+}
+
 async function logout() {
   if (!session.value || submitting.value) return
   submitting.value = true
@@ -186,16 +196,9 @@ onMounted(load)
     <aside class="sidebar" aria-label="工作台导航">
       <div class="brand"><span class="brand-icon" aria-hidden="true"></span><span><strong>端域</strong><small>DeskRealm</small></span></div>
       <p class="nav-heading">工作台</p>
-      <nav class="nav-links">
-        <a class="nav-link" href="/overview" :aria-current="screen === 'overview' ? 'page' : undefined">概览</a>
-        <a v-if="overview.can_read_devices" class="nav-link" href="/devices" :aria-current="screen === 'devices' ? 'page' : undefined">设备管理</a>
-        <a class="nav-link" href="/address-books" :aria-current="screen === 'address-books' ? 'page' : undefined">通讯录</a>
-        <a v-if="overview.can_read_audit" class="nav-link" href="/audit" :aria-current="screen === 'audit' ? 'page' : undefined">会话与审计</a>
-        <a v-if="overview.can_read_tasks" class="nav-link" href="/tasks" :aria-current="screen === 'tasks' ? 'page' : undefined">任务中心</a>
-        <a v-if="overview.can_read_users" class="nav-link" href="/users" :aria-current="screen === 'users' ? 'page' : undefined">用户与权限</a>
-        <a v-if="overview.can_manage" class="nav-link" href="/groups" :aria-current="screen === 'groups' ? 'page' : undefined">用户组与委派</a>
-        <a v-if="overview.can_manage" class="nav-link" href="/api-tokens" :aria-current="screen === 'api-tokens' ? 'page' : undefined">API 令牌</a>
-        <a class="nav-link" href="/security" :aria-current="screen === 'security' ? 'page' : undefined">账号安全</a>
+      <nav class="nav-links" aria-label="工作台导航">
+        <a v-for="item in availablePages" :key="item.page" class="nav-link" :href="'/' + item.page"
+          :aria-current="screen === item.page ? 'page' : undefined">{{ item.title }}</a>
       </nav>
     </aside>
     <header class="topbar">
@@ -217,14 +220,7 @@ onMounted(load)
       <GroupsPanel v-else-if="screen === 'groups'" :csrf="session.csrf_token" @expired="load" />
       <TokensPanel v-else-if="screen === 'api-tokens'" :csrf="session.csrf_token" @expired="load" />
       <SecurityPanel v-else-if="screen === 'security'" :csrf="session.csrf_token" @expired="load" />
-      <section v-else class="panel" aria-labelledby="organization-title">
-        <h2 id="organization-title">当前组织</h2>
-        <dl>
-          <div><dt>组织</dt><dd>{{ overview.organization }}</dd></div>
-          <div><dt>账号</dt><dd>{{ session.username }}</dd></div>
-          <div><dt>管理角色</dt><dd>{{ overview.can_manage ? '平台管理员' : '成员' }}</dd></div>
-        </dl>
-      </section>
+      <OverviewPanel v-else :overview="overview" :refreshing="refreshing" @refresh="refreshOverview" />
     </main>
   </div>
 
