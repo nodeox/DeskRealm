@@ -56,20 +56,25 @@ func (s Store) ResolveAddressBookDevice(ctx context.Context, session, bookID, en
 		if err != nil {
 			return err
 		}
-		if _, err := bookFor(ctx, tx, who, bookID, bookView); err != nil {
-			return err
-		}
-		entry, err := addressEntryFor(ctx, tx, who, bookID, entryID)
-		if err != nil {
-			return err
-		}
-		if entry.State != "approved" {
-			return errEntryInactive
-		}
-		deviceID = entry.DeviceID
-		return nil
+		deviceID, err = resolveAddressBookDevice(ctx, tx, who, bookID, entryID)
+		return err
 	})
 	return deviceID, err
+}
+
+// resolveAddressBookDevice can run inside the same transaction as admission.
+func resolveAddressBookDevice(ctx context.Context, tx pgx.Tx, who actor, bookID, entryID string) (string, error) {
+	if _, err := bookFor(ctx, tx, who, bookID, bookView); err != nil {
+		return "", err
+	}
+	entry, err := addressEntryFor(ctx, tx, who, bookID, entryID)
+	if err != nil {
+		return "", err
+	}
+	if entry.State != "approved" {
+		return "", errEntryInactive
+	}
+	return entry.DeviceID, nil
 }
 
 func (a *API) readBookEntries(w http.ResponseWriter, r *http.Request) {

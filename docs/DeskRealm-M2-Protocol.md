@@ -61,6 +61,25 @@ bash scripts/deskrealm-m2-test sources
 
 设备写入入口使用无 Cookie 的原生请求。设备凭据和主控凭据仅存摘要，并在请求时重查设备批准状态、密钥版本和有效期。主控身份同时重查原登录会话及账号状态。管理 API Token 保持原有用途。心跳中的构建字段是经过设备身份认证的自报值，未来由受信发布来源参与会话准入。
 
+## 连接规则和预览
+
+平台管理员可通过下列入口管理 ACL。写入及预览需现有登录 Cookie、同源 Origin 和 CSRF 值。编辑产生新版本，显式发布后才用于判定。归档退出判定和活动清单，版本及审计继续保存。
+
+| API | 请求与结果 |
+| --- | --- |
+| `GET /v1/admin/access-rules` | 返回当前规则的最新草稿、`latest_version` 和 `published_version`。可使用返回的 `next` 作为 `after` 分页。 |
+| `GET /v1/admin/access-rules/{id}` | 返回最新版本，可用 `?version=N` 查询该活动规则的历史版本。 |
+| `POST /v1/admin/access-rules` | 创建第 1 版草稿。 |
+| `POST /v1/admin/access-rules/{id}` | 提交完整规则与当前 `version`，产生下一版草稿。 |
+| `POST /v1/admin/access-rules/{id}/publish` 或 `/archive` | 提交当前 `version` 并发布或归档。版本冲突返回 409，同版重复发布保留一个发布事件。 |
+| `POST /v1/admin/access-rules/preview` | 提交 `user_id`、`controller_device_id`、`purpose`、`requested_actions` 和一个目标选择方式。响应包含 `allowed`、原因及可用的规则版本。 |
+
+规则包含 `name`、一个来源 `source_user_id` 或 `source_group_id`、一个目标 `target_device_id` 或 `target_group_id`、可选 `controller_device_id`、`purpose` 和 `effect`。允许规则需要 `control_role_id`、`control_role_version` 和 `allowed_actions`，且所选操作均在该版本角色内。拒绝规则匹配来源、目标、主控限制及用途。角色变更后，旧版本引用的允许规则停止授予能力，管理员可编辑并发布引用新角色版本的规则。
+
+预览目标可选 `target_device_id`、`target_rustdesk_id` 或 `book_id` 与 `entry_id`。通讯录入口按被模拟用户实时复查册权限和目标设备可见性。连接判定还检查用户活跃、两端已批准、当前密钥认证心跳及协议版本。任一匹配拒绝优先。允许时须有一条已发布规则和它引用的同版角色完整覆盖所申请动作，后台管理员身份不会跳过 ACL。预览及规则变更写入审计。
+
+当前预览只计算 ACL 结果。后续会话签发以已认证主控主体调用同一个事务评估函数，并结合设备实际应用策略、可信发布和本地确认。
+
 ## 原生构建入口与证据
 
 受管 Windows 构建沿用固定客户端工作流的原生 MSVC 环境。先按工作流生成对应版本的 Flutter bridge 并安装锁定的 vcpkg 依赖。上游配置为 Rust 1.75、vcpkg `9e593bb18ea69cc5095e012465dcd675a822ed0d`，ARM64 用对应版本的原生 Dart 和 Windows engine，并将 `SODIUM_LIB_DIR` 指向 ARM64 vcpkg 库。 [固定 Windows 工作流](https://github.com/rustdesk/rustdesk/blob/95cca3f661f635b3cc85c04935fe8d96d8f432ef/.github/workflows/flutter-build.yml#L157-L339)

@@ -411,13 +411,14 @@ func (a *API) managedHeartbeat(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return err
 		}
-		_, expires, err := d.credential(ctx, tx, hash)
+		protocol, expires, err := d.credential(ctx, tx, hash)
 		if err != nil {
 			return err
 		}
 		tag, err := tx.Exec(ctx, `UPDATE devices SET managed_heartbeat_at=clock_timestamp(),
-			managed_heartbeat_epoch=$2,managed_reported_build=$3 WHERE id=$1 AND $4::timestamptz>clock_timestamp()`,
-			d.ID, d.Epoch, in.Build, expires)
+			managed_heartbeat_epoch=$2,managed_reported_build=$3,managed_heartbeat_protocol=$5
+			WHERE id=$1 AND $4::timestamptz>clock_timestamp()`,
+			d.ID, d.Epoch, in.Build, expires, protocol)
 		if err == nil && tag.RowsAffected() != 1 {
 			return errManagedIdentity
 		}

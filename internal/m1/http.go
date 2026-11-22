@@ -105,6 +105,12 @@ func NewHandler(store Store, origin *url.URL, web fs.FS, config ...AuthConfig) h
 	mux.HandleFunc("GET /v1/admin/control-roles", api.listControlRoles)
 	mux.HandleFunc("POST /v1/admin/control-roles", api.saveControlRole)
 	mux.HandleFunc("POST /v1/admin/control-roles/{id}", api.saveControlRole)
+	mux.HandleFunc("GET /v1/admin/access-rules", api.readConnectionRules)
+	mux.HandleFunc("GET /v1/admin/access-rules/{id}", api.readConnectionRules)
+	mux.HandleFunc("POST /v1/admin/access-rules", api.saveConnectionRule)
+	mux.HandleFunc("POST /v1/admin/access-rules/preview", api.previewConnectionRule)
+	mux.HandleFunc("POST /v1/admin/access-rules/{id}", api.saveConnectionRule)
+	mux.HandleFunc("POST /v1/admin/access-rules/{id}/{change}", api.changeConnectionRule)
 	mux.HandleFunc("GET /v1/admin/device-groups", api.listDeviceGroups)
 	mux.HandleFunc("POST /v1/admin/device-groups", api.createDeviceGroup)
 	mux.HandleFunc("GET /v1/admin/device-groups/{id}/grants", api.deviceGroupGrants)
@@ -245,6 +251,12 @@ func failure(w http.ResponseWriter, operation string, err error) {
 	case errors.Is(err, errUserExists), errors.Is(err, errLastAdmin), errors.Is(err, errUserTransition), errors.Is(err, errImportConflict), errors.Is(err, errGroupConflict), errors.Is(err, errAdminTransfer):
 		writeError(w, http.StatusConflict, err.Error())
 	case errors.Is(err, errControlRoleConflict), errors.Is(err, errControlRoleVersion):
+		writeError(w, http.StatusConflict, err.Error())
+	case errors.Is(err, errConnectionInput):
+		writeError(w, http.StatusBadRequest, err.Error())
+	case errors.Is(err, errConnectionMissing):
+		writeError(w, http.StatusNotFound, err.Error())
+	case errors.Is(err, errConnectionStale):
 		writeError(w, http.StatusConflict, err.Error())
 	case errors.Is(err, errAuditInvalid), errors.Is(err, errTaskInvalid):
 		writeError(w, http.StatusBadRequest, err.Error())

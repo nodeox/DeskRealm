@@ -22,10 +22,12 @@ type device struct {
 	Version           int64  `json:"version"`
 }
 
+const managedDeviceOnline = `d.registration_state='approved' AND d.managed_heartbeat_epoch=d.device_key_epoch
+	AND d.managed_heartbeat_at>statement_timestamp()-interval '45 seconds'`
+
 const deviceConnectionState = `CASE
 	WHEN d.managed_heartbeat_at IS NULL THEN CASE WHEN d.connection_state='offline' THEN 'offline' ELSE 'unknown' END
-	WHEN d.registration_state='approved' AND d.managed_heartbeat_epoch=d.device_key_epoch
-		AND d.managed_heartbeat_at>statement_timestamp()-interval '45 seconds' THEN 'online'
+	WHEN ` + managedDeviceOnline + ` THEN 'online'
 	ELSE 'offline' END`
 
 const deviceProjection = `d.id,d.group_id,dg.name,d.platform,d.rustdesk_id,d.registration_state,` +

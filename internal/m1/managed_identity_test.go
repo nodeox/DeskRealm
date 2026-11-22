@@ -14,7 +14,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"deskrealm/internal/managedproto"
 
@@ -207,13 +206,15 @@ func TestManagedDeviceIdentityPostgres(t *testing.T) {
 			checkCode(t, reply, 401, errManagedIdentity.Error())
 		}
 	}
-	if issued != 1 || managedDigest(credential.Value, managedDevicePrefix) == nil || time.Until(credential.ExpiresAt) > 15*time.Minute {
-		t.Fatal("one bounded device credential must win the challenge")
+	if issued != 1 || managedDigest(credential.Value, managedDevicePrefix) == nil {
+		t.Fatalf("expected one device credential, got %d", issued)
 	}
 	var count int
-	if err := store.DB.QueryRow(ctx, `SELECT count(*) FROM managed_device_credentials WHERE device_id=$1 AND digest=$2`,
-		first, digest(credential.Value)).Scan(&count); err != nil || count != 1 {
-		t.Fatalf("credential digest missing: count %d error %v", count, err)
+	if err := store.DB.QueryRow(ctx, `SELECT count(*) FROM managed_device_credentials
+		WHERE device_id=$1 AND digest=$2 AND expires_at=$3
+		AND expires_at BETWEEN clock_timestamp()+interval '14 minutes' AND clock_timestamp()+interval '15 minutes'`,
+		first, digest(credential.Value), credential.ExpiresAt).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("credential digest or bounded lifetime missing: count %d error %v", count, err)
 	}
 	expired := managedChallengeFixture(t, h, first)
 	runSQL(`UPDATE managed_identity_challenges SET expires_at=clock_timestamp()-interval '1 second' WHERE id=$1`, expired.ID)
@@ -347,7 +348,13 @@ func TestManagedControllerBindingPostgres(t *testing.T) {
 		reply := request(h, "POST", userCompleteURL, testOrigin, proof, user, csrf)
 		checkCode(t, reply, 201, managedUserPrefix)
 		got := responseValue[managedCredential](t, reply.Body.Bytes())
-		if !strings.HasPrefix(got.Value, managedUserPrefix) || time.Until(got.ExpiresAt) > 3*time.Minute {
+		var bounded bool
+		err := store.DB.QueryRow(ctx, `SELECT EXISTS(
+			SELECT 1 FROM managed_controller_credentials c JOIN browser_sessions s ON s.token_digest=c.browser_digest
+			JOIN managed_device_credentials k ON k.digest=c.device_digest
+			WHERE c.digest=$1 AND c.expires_at=$2 AND c.expires_at<=least(s.expires_at,k.expires_at)
+			AND c.expires_at>clock_timestamp())`, digest(got.Value), got.ExpiresAt).Scan(&bounded)
+		if !strings.HasPrefix(got.Value, managedUserPrefix) || err != nil || !bounded {
 			t.Fatal("controller credential escaped the parent login deadline")
 		}
 		return got.Value
