@@ -1,9 +1,9 @@
 ---
 phase: "2"
 slug: m1
-status: draft
-nyquist_compliant: false
-wave_0_complete: false
+status: passed
+nyquist_compliant: true
+wave_0_complete: true
 created: "2026-11-22"
 ---
 
@@ -30,4 +30,6 @@ created: "2026-11-22"
 
 `audit` 通过 PostgreSQL 竞态检查，覆盖真实业务事件、历史范围、查询与导出权限、分页、可信回执去重与冲突、清理和在途保护。`resources-browser` 增加审计授权与撤销、保留期设置、范围筛选、详情和 CSV 下载验证。实际终端回执随 M2 验证。
 
-`tasks` 通过 PostgreSQL 竞态检查，覆盖真实导入部分失败、按对象重试、成功项保留、并发领取、租约过期接管、尝试上限、回执幂等、事务回滚、组外拒绝和旧数据回填。Chromium 通过临时 PostgreSQL 的单次写入失败夹具，验证页面确认、中心工作者执行和回执展示，并核对设备审批结果与组范围。四角色综合验证和 M1 收口由 02-04 Task 3 完成。
+`tasks` 通过 PostgreSQL 竞态检查，覆盖真实导入部分失败、按对象重试、成功项保留、并发领取、租约过期接管、尝试上限、回执幂等、事务回滚、组外拒绝和旧数据回填。Chromium 通过临时 PostgreSQL 的单次写入失败夹具，验证页面确认、中心工作者执行和回执展示，并核对设备审批结果与组范围。四角色入口、作用域、键盘及窄屏已完成综合回归。
+
+`all` 在提交 `e7e2c46` 通过。22 个固定命名 PostgreSQL 回归在竞态检测下执行，`bootstrap-browser`、`resources-browser` 和 `roles-browser` 各有一个必须通过的 Chromium 用例。`TestOverviewScopesPostgres` 验证在线设备计数与近期任务的授权范围和即时撤权。各需求的 M1 证据与后续验收范围见 [M1 开发验证](02-VERIFICATION.md)。

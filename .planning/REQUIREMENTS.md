@@ -67,12 +67,12 @@ M4 包括浏览器主控、原生 LDAP、邮件验证和恢复、更多平台、
 | BASE-01 | Phase 1 | Complete |
 | BASE-02 | Phase 1 | Complete |
 | BASE-03 | Phase 1 | Complete |
-| FR-02 | Phase 2 | In Progress |
+| FR-02 | Phase 2 | Deferred (M1 已验证，Phase 3 验证续租拒绝) |
 | FR-03 | Phase 2 | Complete |
 | FR-04 | Phase 2 | Complete |
-| FR-07 | Phase 2 | In Progress |
-| FR-13 | Phase 2 | Pending |
-| FR-18 | Phase 2 | Pending |
+| FR-07 | Phase 2 | Deferred (M1 已验证，Phase 3 验证连接 ACL) |
+| FR-13 | Phase 2 | Deferred (M1 已验证，Phase 3 验证终端会话回执) |
+| FR-18 | Phase 2 | Deferred (M1 已验证，Phase 3 与 4 验证 Windows 入口与分发) |
 | FR-08 | Phase 3 | Pending |
 | FR-09 | Phase 3 | Pending |
 | FR-10 | Phase 3 | Pending |

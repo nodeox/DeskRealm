@@ -1,18 +1,18 @@
 ---
 gsd_state_version: "1.0"
-current_phase: 2
-current_phase_name: M1 用户、设备与管理面
-status: executing
-last_updated: "2026-11-22T17:56:51Z"
+current_phase: 3
+current_phase_name: M2 受管连接与策略
+status: planning
+last_updated: "2026-11-22T18:12:14.416Z"
 last_activity: 2026-11-22
-last_activity_desc: M1 02-04 Task 2 任务中心、按对象重试及租约恢复通过开发验证
-state_head: d6e8540eab6c0ac0705d53bf5363fbbc562a28d8
+last_activity_desc: M1 完成四个计划并通过全套开发回归，接续 M2 规划
+state_head: e7e2c469094592cc5b4fe93c2be45dbc7e6e3c7a
 progress:
   total_phases: 5
-  completed_phases: 1
+  completed_phases: 2
   total_plans: 5
-  completed_plans: 4
-  percent: 80
+  completed_plans: 5
+  percent: 40
 ---
 
 # Project State
@@ -26,10 +26,10 @@ See: .planning/PROJECT.md (updated 2026-11-22)
 
 ## Current Position
 
-Phase: 2 (M1 用户、设备与管理面)
-Plan: 02-04 of 4，Task 1 和 Task 2 已验证，接续 Task 3 角色工作台与 M1 收口。
-Status: In progress
-Last activity: 2026-11-22 — 导入及入网任务、失败项重试、租约接管和回执通过开发验证。
+Phase: 3 — M2 受管连接与策略
+Plan: Not started
+Status: Ready to plan
+Last activity: 2026-11-22 — M1 完成开发验证，下一步规划 M2 受管连接与策略。
 
 ## Accumulated Context
 
@@ -39,4 +39,4 @@ M0–M3 开发完成后进入目标环境验收。先 Linux 中心和一台中�
 
 获取当前阶段计划和证据时使用本仓库的 `.planning/phases/`。
 
-由当前会话继续执行。M0 完成开发验证。M1 已完成 02-01 至 02-03，以及 02-04 的 Task 1 和 Task 2。后续完成四个角色的浏览器验证、概览指标和 M1 收口。实际会话回执及通讯录连接 ACL 集成仍待 M2。
+由当前会话继续执行。M0 与 M1 已完成开发验证。M2 先确定直连与中继共用的连接准入、受控端确认、租约和撤销，再接入版本化策略。M1 交接包括账号停用后的续租拒绝、通讯录连接 ACL、实际会话回执和 Windows 受管入口。详见 `02-VERIFICATION.md`。
