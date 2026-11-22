@@ -3,10 +3,10 @@ gsd_state_version: "1.0"
 current_phase: 3
 current_phase_name: M2 受管连接与策略
 status: executing
-last_updated: "2026-11-22T22:53:26Z"
+last_updated: "2026-11-22T23:24:43Z"
 last_activity: 2026-11-22
-last_activity_desc: 03-01 设备运行身份、主控绑定及可信心跳已验证
-state_head: 9cca7a7d34edf6cc9cffae5e3ed0415b94fca9f2
+last_activity_desc: 03-02 Task 1 连接 ACL、规则发布和同事务权限复查已验证
+state_head: c9122ee3d3f83b28e6961028e4b081797fe23846
 progress:
   total_phases: 5
   completed_phases: 2
@@ -27,9 +27,9 @@ See: .planning/PROJECT.md (updated 2026-11-22)
 ## Current Position
 
 Phase: 3 — M2 受管连接与策略
-Plan: 03-02 of 5，03-01 已完成，接续连接 ACL、版本策略与设备回执。
+Plan: 03-02 of 5，Task 1 已验证，接续 Task 2 版本化策略和设备应用回执。
 Status: In progress
-Last activity: 2026-11-22 — 设备持钥认证、凭据隔离、可信心跳和公钥重启复用通过开发验证。
+Last activity: 2026-11-22 — 连接规则、预览、组范围和通讯录撤权通过开发验证。
 
 ## Accumulated Context
 
