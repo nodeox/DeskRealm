@@ -13,10 +13,12 @@ bash scripts/deskrealm-m1-test identity-federation
 bash scripts/deskrealm-m1-test authorization
 bash scripts/deskrealm-m1-test enrollment
 bash scripts/deskrealm-m1-test device-lifecycle
+bash scripts/deskrealm-m1-test addressbooks
 npm --prefix web ci --ignore-scripts
 npm --prefix web run typecheck
 PLAYWRIGHT_SKIP_BROWSER_GC=1 npm --prefix web exec -- playwright install chromium
 bash scripts/deskrealm-m1-test bootstrap-browser
+bash scripts/deskrealm-m1-test resources-browser
 ```
 
 两个测试入口使用独立 PostgreSQL 容器和本机临时端口，退出时清理。目标环境的 Linux 中心、中继和双 Windows 验收在首版开发完成后的 Phase 5 执行。
@@ -90,6 +92,12 @@ deskrealm/device-key-rotation/v1
 
 向 `POST /v1/enrollment/rotate` 提交 `device_id`、整数 `version`、`credential`、`public_key` 和标准 Base64 的 64 字节 `signature`。受理后原密钥失效，设备 UUID 保持不变，回执包含新版本和已批准状态。终端在新密钥仍有效期间可以安全重提交相同证明。
 
+## 个人与共享通讯录
+
+用户在「通讯录」创建自己的通讯录，并为已获查看权限的设备保存别名、标签和备注。条目引用设备 UUID，设备改名或变更 RustDesk ID 后仍指向该设备。共享可使用账号名或用户组名称。查看者可读取可见条目，编辑者还可添加、修改或移除条目，管理者可改册名并授予或撤销共享权限。
+
+获取条目时，中心同时核对通讯录权限和该设备的当前查看权限。组成员变更和共享撤销会影响下一次请求。分享和撤销写入审计。中心内部的 `ResolveAddressBookDevice` 在连接入口可重新检查当前授权和设备登记状态，并返回设备 UUID。M2 会话入口还需判定连接 ACL 后才能放行。
+
 | 接口 | 返回 |
 | --- | --- |
 | `GET /v1/bootstrap/status` | 初始化状态 |
@@ -117,3 +125,6 @@ deskrealm/device-key-rotation/v1
 | `GET /v1/admin/devices/{id}/history` | 查看设备原有 RustDesk ID 和密钥指纹历史 |
 | `POST /v1/admin/devices/{id}/lifecycle/{move,rename-id,disable,retire}` | 按设备版本和作用域变更设备 |
 | `POST /v1/admin/devices/{id}/key-rotation`、`POST /v1/enrollment/rotate` | 签发轮换或恢复凭据并验证新密钥 |
+| `GET/POST /v1/address-books`、`GET/POST /v1/address-books/{book}` | 查看、创建和修改通讯录名称 |
+| `GET/POST /v1/address-books/{book}/entries` 及条目子路径 | 读取、添加、编辑和移除设备条目。编辑与移除使用条目版本 |
+| `GET/POST /v1/address-books/{book}/shares`、`POST /v1/address-books/{book}/shares/{grant}/revoke` | 查看、设置及撤销用户或用户组共享 |

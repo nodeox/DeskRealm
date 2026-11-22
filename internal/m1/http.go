@@ -117,6 +117,18 @@ func NewHandler(store Store, origin *url.URL, web fs.FS, config ...AuthConfig) h
 	mux.HandleFunc("POST /v1/enrollment/challenge", api.enrollDevice)
 	mux.HandleFunc("POST /v1/enrollment/complete", api.enrollDevice)
 	mux.HandleFunc("POST /v1/enrollment/rotate", api.rotateDevice)
+	mux.HandleFunc("GET /v1/address-books", api.listBooks)
+	mux.HandleFunc("POST /v1/address-books", api.saveBook)
+	mux.HandleFunc("GET /v1/address-books/{book}", api.readBook)
+	mux.HandleFunc("POST /v1/address-books/{book}", api.saveBook)
+	mux.HandleFunc("GET /v1/address-books/{book}/entries", api.readBookEntries)
+	mux.HandleFunc("POST /v1/address-books/{book}/entries", api.saveEntry)
+	mux.HandleFunc("GET /v1/address-books/{book}/entries/{entry}", api.readBookEntries)
+	mux.HandleFunc("POST /v1/address-books/{book}/entries/{entry}", api.saveEntry)
+	mux.HandleFunc("POST /v1/address-books/{book}/entries/{entry}/remove", api.removeEntry)
+	mux.HandleFunc("GET /v1/address-books/{book}/shares", api.listBookGrants)
+	mux.HandleFunc("POST /v1/address-books/{book}/shares", api.grantBook)
+	mux.HandleFunc("POST /v1/address-books/{book}/shares/{grant}/revoke", api.revokeBook)
 	apiNotFound := func(w http.ResponseWriter, _ *http.Request) {
 		writeError(w, http.StatusNotFound, "not_found")
 	}
@@ -145,7 +157,7 @@ func (a *API) frontend(w http.ResponseWriter, r *http.Request) {
 	}
 	p := strings.TrimPrefix(r.URL.Path, "/")
 	switch p {
-	case "", "initialize", "login", "overview", "users", "groups", "devices", "api-tokens", "security", "accept-invitation", "recover":
+	case "", "initialize", "login", "overview", "users", "groups", "devices", "address-books", "api-tokens", "security", "accept-invitation", "recover":
 		w.Header().Set("Cache-Control", "no-store")
 		http.ServeFileFS(w, r, a.web, "index.html")
 	default:
@@ -200,6 +212,11 @@ func failure(w http.ResponseWriter, operation string, err error) {
 		writeError(w, http.StatusConflict, err.Error())
 	case errors.Is(err, errDeviceMissing), errors.Is(err, errDeviceGroupMissing):
 		writeError(w, http.StatusNotFound, err.Error())
+	case errors.Is(err, errBookMissing), errors.Is(err, errEntryMissing), errors.Is(err, errGrantMissing):
+		writeError(w, http.StatusNotFound, err.Error())
+	case errors.Is(err, errBookConflict), errors.Is(err, errEntryConflict), errors.Is(err, errEntryStale),
+		errors.Is(err, errEntryInactive), errors.Is(err, errBookShareOwner):
+		writeError(w, http.StatusConflict, err.Error())
 	case errors.Is(err, errEnrollmentConflict), errors.Is(err, errDeviceConflict), errors.Is(err, errDeviceGroupConflict), errors.Is(err, errDeviceDecision),
 		errors.Is(err, errDeviceVersion), errors.Is(err, errDeviceLifecycle):
 		writeError(w, http.StatusConflict, err.Error())

@@ -125,6 +125,8 @@ dialog::backdrop { background: rgb(25 32 51 / .35); }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; }
 .device-identifier { overflow-wrap: anywhere; font-family: ui-monospace, monospace; }
 .device-detail-actions { margin: 14px 0; }
+.address-book-detail { margin-top: 16px; min-width: 0; }
+.address-book-note { min-width: 120px; white-space: pre-wrap; overflow-wrap: anywhere; }
 
 @media (max-width: 680px) {
   .workspace { grid-template-columns: 1fr; grid-template-rows: auto auto 1fr; }

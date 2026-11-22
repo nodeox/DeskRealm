@@ -38,6 +38,15 @@ const messages: Record<string, string> = {
   device_conflict: '该 RustDesk ID 或设备密钥已使用。',
   device_version_conflict: '设备已更新，请关闭此窗口并重新打开详情。',
   device_lifecycle_conflict: '当前登记状态不允许此操作。',
+  invalid_address_book: '请填写 1 到 80 个字符的通讯录名称。',
+  invalid_address_book_entry: '请检查所选设备、别名、标签和备注。',
+  invalid_address_book_share: '请检查共享对象和权限。',
+  address_book_not_found: '通讯录已不存在或当前账号无权访问。',
+  address_book_entry_not_found: '设备条目已移除或当前账号无权访问。',
+  address_book_name_in_use: '你的通讯录中已使用该名称。',
+  address_book_device_exists: '该设备已在当前通讯录内。',
+  address_book_entry_stale: '条目已变更，请刷新通讯录后重试。',
+  address_book_owner_share: '通讯录所有者已具有管理权限。',
 }
 
 export class RequestError extends Error {

@@ -12,8 +12,9 @@ case "$mode" in
   authorization) tests=(TestManagementScopesPostgres TestAPITokenScopesPostgres TestPlatformAdminTransferPostgres TestControlRolesPostgres) ;;
   enrollment) tests=(TestDeviceEnrollmentPostgres TestDeviceApprovalPostgres) ;;
   device-lifecycle) tests=(TestDeviceLifecyclePostgres TestDeviceStateIsolationPostgres) ;;
-  bootstrap-browser) ;;
-  *) echo "usage: $0 bootstrap-api|user-status|identity-lifecycle|identity-federation|authorization|enrollment|device-lifecycle|bootstrap-browser" >&2; exit 2 ;;
+  addressbooks) tests=(TestAddressBookScopesPostgres) ;;
+  bootstrap-browser|resources-browser) ;;
+  *) echo "usage: $0 bootstrap-api|user-status|identity-lifecycle|identity-federation|authorization|enrollment|device-lifecycle|addressbooks|bootstrap-browser|resources-browser" >&2; exit 2 ;;
 esac
 
 scratch=$(mktemp -d "${TMPDIR:-/tmp}/deskrealm-m1.XXXXXX")
@@ -56,7 +57,7 @@ mapping=$(docker port "$container" 5432/tcp)
 port="${mapping##*:}"
 export DESKREALM_TEST_DATABASE_URL="postgres://postgres:$test_password@127.0.0.1:$port/deskrealm?sslmode=disable"
 
-if [[ "$mode" != bootstrap-browser ]]; then
+if [[ "$mode" != *-browser ]]; then
   export DESKREALM_REQUIRE_DB_TESTS=1
   pattern=$(IFS='|'; echo "${tests[*]}")
   if ! go test -json -count=1 ./internal/m1 -run "^($pattern)$" >"$scratch/results.json"; then
@@ -114,4 +115,8 @@ if [[ -z "$ready" ]]; then
   exit 1
 fi
 export DESKREALM_BROWSER_OUTPUT="$scratch/playwright"
-npm --prefix web run test:bootstrap
+if [[ "$mode" == resources-browser ]]; then
+  npm --prefix web run test:resources
+else
+  npm --prefix web run test:bootstrap
+fi

@@ -24,4 +24,6 @@ created: "2026-11-22"
 
 2026-11-22 通过 `bootstrap-api`、`identity-lifecycle`、`identity-federation`、`authorization` 和 `bootstrap-browser`。认证与授权数据库测试包含竞态检查。验证覆盖并发初始化和成员停用、邀请重放、密码及验证器恢复、幂等导入、验证码一次性消费、本地 OIDC 提供方、用户组与本人授权、管理员移交、令牌范围及撤销、控制角色乐观版本和中文浏览器流程。
 
-`enrollment` 和 `device-lifecycle` 通过 PostgreSQL 回归与竞态检查。设备生命周期覆盖来源组和目标组授权、并发版本冲突、稳定 UUID、ID 和密钥历史、旧凭据失效、恢复与退役。Chromium 从实际台账发放凭据，使用 Ed25519 夹具提交并批准设备，再修改 ID、禁用、用新密钥恢复。通讯录、审计查询和任务仍待验证。
+`enrollment` 和 `device-lifecycle` 通过 PostgreSQL 回归与竞态检查。设备生命周期覆盖来源组和目标组授权、并发版本冲突、稳定 UUID、ID 和密钥历史、旧凭据失效、恢复与退役。Chromium 从实际台账发放凭据，使用 Ed25519 夹具提交并批准设备，再修改 ID、禁用、用新密钥恢复。
+
+`addressbooks` 通过 PostgreSQL 竞态检查，覆盖个人册、用户和组共享、三种权限、条目设备范围、审计事务回滚、版本冲突和即时撤权。`resources-browser` 在 375 像素宽的 Chromium 中复跑组共享、编辑和撤销，并核对未获授权设备与字段不可见。连接入口联合 ACL 的验证随 M2 进行。M1 审计查询和任务仍待对应计划。
