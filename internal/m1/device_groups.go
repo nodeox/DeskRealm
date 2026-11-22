@@ -189,6 +189,13 @@ func (a *API) setDeviceGroupGrant(w http.ResponseWriter, r *http.Request) {
 		if err != nil || tag.RowsAffected() == 0 {
 			return err
 		}
+		if in.Revoke || !in.Approve {
+			if _, err := tx.Exec(ctx, `UPDATE device_key_rotations k SET revoked_at=now() FROM devices d
+				WHERE k.device_id=d.id AND d.group_id=$1 AND k.issued_by=$2
+				AND k.completed_key IS NULL AND k.revoked_at IS NULL`, id, target); err != nil {
+				return err
+			}
+		}
 		return auditWithReason(ctx, tx, org, who, action, id, target)
 	})
 	if err != nil {

@@ -1,6 +1,7 @@
 package m1
 
 import (
+	"context"
 	"errors"
 	"net/http"
 
@@ -18,10 +19,25 @@ type device struct {
 	ExpectedPolicy    *int64 `json:"expected_policy_version"`
 	AppliedPolicy     *int64 `json:"applied_policy_version"`
 	CanApprove        bool   `json:"can_approve"`
+	Version           int64  `json:"version"`
 }
 
 const deviceProjection = `d.id,d.group_id,dg.name,d.platform,d.rustdesk_id,d.registration_state,
-	d.connection_state,d.expected_policy_version,d.applied_policy_version,` + deviceGroupApprove
+	d.connection_state,d.expected_policy_version,d.applied_policy_version,` + deviceGroupApprove + `,d.version`
+
+func lockManagedDevice(ctx context.Context, tx pgx.Tx, who actor, id string) (device, error) {
+	rows, err := tx.Query(ctx, `SELECT `+deviceProjection+` FROM devices d JOIN device_groups dg ON dg.id=d.group_id
+		WHERE d.organization_id=$1 AND `+deviceGroupApprove+` AND d.id=$4 FOR NO KEY UPDATE OF d`,
+		who.Organization, who.ID, who.PlatformAdmin, id)
+	if err != nil {
+		return device{}, err
+	}
+	result, err := pgx.CollectExactlyOneRow(rows, pgx.RowToStructByPos[device])
+	if errors.Is(err, pgx.ErrNoRows) {
+		err = errDeviceMissing
+	}
+	return result, err
+}
 
 func (a *API) listOrGetDevices(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
@@ -103,16 +119,7 @@ func (a *API) decideDevice(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return err
 		}
-		rows, err := tx.Query(ctx, `SELECT `+deviceProjection+` FROM devices d JOIN device_groups dg ON dg.id=d.group_id
-			WHERE d.organization_id=$1 AND `+deviceGroupApprove+` AND d.id=$4 FOR NO KEY UPDATE OF d`,
-			who.Organization, who.ID, who.PlatformAdmin, id)
-		if err != nil {
-			return err
-		}
-		result, err = pgx.CollectExactlyOneRow(rows, pgx.RowToStructByPos[device])
-		if errors.Is(err, pgx.ErrNoRows) {
-			return errDeviceMissing
-		}
+		result, err = lockManagedDevice(ctx, tx, who, id)
 		if err != nil || result.RegistrationState == target {
 			return err
 		}
@@ -127,7 +134,8 @@ func (a *API) decideDevice(w http.ResponseWriter, r *http.Request) {
 		if tag.RowsAffected() != 1 {
 			return errDeviceDecision
 		}
-		if _, err := tx.Exec(ctx, "UPDATE devices SET registration_state=$2 WHERE id=$1", id, target); err != nil {
+		if err := tx.QueryRow(ctx, `UPDATE devices SET registration_state=$2,version=version+1 WHERE id=$1 RETURNING version`, id, target).
+			Scan(&result.Version); err != nil {
 			return err
 		}
 		result.RegistrationState = target
@@ -141,5 +149,10 @@ func (a *API) decideDevice(w http.ResponseWriter, r *http.Request) {
 }
 
 func isDeviceEnrollmentRequest(r *http.Request) bool {
-	return r.URL.Path == "/v1/enrollment/challenge" || r.URL.Path == "/v1/enrollment/complete"
+	switch r.URL.Path {
+	case "/v1/enrollment/challenge", "/v1/enrollment/complete", "/v1/enrollment/rotate":
+		return true
+	default:
+		return false
+	}
 }

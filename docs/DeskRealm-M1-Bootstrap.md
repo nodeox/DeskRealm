@@ -12,6 +12,7 @@ bash scripts/deskrealm-m1-test identity-lifecycle
 bash scripts/deskrealm-m1-test identity-federation
 bash scripts/deskrealm-m1-test authorization
 bash scripts/deskrealm-m1-test enrollment
+bash scripts/deskrealm-m1-test device-lifecycle
 npm --prefix web ci --ignore-scripts
 npm --prefix web run typecheck
 PLAYWRIGHT_SKIP_BROWSER_GC=1 npm --prefix web exec -- playwright install chromium
@@ -73,6 +74,22 @@ deskrealm/device-enrollment/v1
 
 向 `POST /v1/enrollment/complete` 提交原始字段、`attempt_id` 和标准 Base64 的 64 字节 `signature`。成功返回稳定的 `device_id` 和初始登记状态。已经完成的请求可使用相同输入复取原回执。后续审批结果通过设备台账查询。开发测试用签名夹具模拟终端，原生 Windows 接入与实机验收按路线图进行。
 
+### 设备维护和密钥轮换
+
+设备详情展示固定 UUID、RustDesk ID 历史和密钥 SHA-256 指纹。移组需要来源组和目标组的设备管理权限。修改 RustDesk ID、移组、禁用和退役请求使用详情中的 `version`。若版本冲突，重新获取详情再操作。禁用或退役撤销密钥及未使用的轮换凭据，并保留审批和审计记录。连接观测和策略回执保留原值。退役是终态。
+
+对已批准设备选择「轮换密钥」，或对已禁用设备选择「恢复设备」。控制台返回与设备 UUID 和当前版本绑定的 15 分钟凭据。重新签发会使此前未使用的凭据失效。将凭据通过组织渠道交给目标终端。终端生成新的 Ed25519 密钥，并用新私钥签署以下 UTF-8 字段。字段用单个换行符连接，末尾无需换行。
+
+```text
+deskrealm/device-key-rotation/v1
+<device_id>
+<version 的十进制值>
+<nonce>
+<标准 Base64 的 32 字节新 public_key>
+```
+
+向 `POST /v1/enrollment/rotate` 提交 `device_id`、整数 `version`、`credential`、`public_key` 和标准 Base64 的 64 字节 `signature`。受理后原密钥失效，设备 UUID 保持不变，回执包含新版本和已批准状态。终端在新密钥仍有效期间可以安全重提交相同证明。
+
 | 接口 | 返回 |
 | --- | --- |
 | `GET /v1/bootstrap/status` | 初始化状态 |
@@ -97,3 +114,6 @@ deskrealm/device-enrollment/v1
 | `GET/POST /v1/admin/device-groups`、`GET/POST /v1/admin/device-groups/{id}/grants` | 维护设备组及查看或审批委派 |
 | `POST /v1/admin/enrollment-credentials` | 为授权的组和平台发放一次性登记凭据 |
 | `GET /v1/admin/devices`、`GET /v1/admin/devices/{id}`、`POST /v1/admin/devices/{id}/{approve,reject}` | 查询和处理授权范围内的设备登记 |
+| `GET /v1/admin/devices/{id}/history` | 查看设备原有 RustDesk ID 和密钥指纹历史 |
+| `POST /v1/admin/devices/{id}/lifecycle/{move,rename-id,disable,retire}` | 按设备版本和作用域变更设备 |
+| `POST /v1/admin/devices/{id}/key-rotation`、`POST /v1/enrollment/rotate` | 签发轮换或恢复凭据并验证新密钥 |

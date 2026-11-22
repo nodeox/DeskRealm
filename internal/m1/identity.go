@@ -155,6 +155,9 @@ func (s Store) changeUser(ctx context.Context, value, userID, targetStatus, reas
 			if err := revokeUserLogins(ctx, tx, userID); err != nil {
 				return err
 			}
+			if err := revokeUserRotations(ctx, tx, userID); err != nil {
+				return err
+			}
 		}
 		result.Status = targetStatus
 		return auditWithReason(ctx, tx, orgID, actorID, "user."+targetStatus, userID, reason)

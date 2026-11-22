@@ -40,6 +40,9 @@ func (s Store) transferPlatformAdmin(ctx context.Context, session, target, passw
 				return err
 			}
 		}
+		if err := revokeUserRotations(ctx, tx, actor); err != nil {
+			return err
+		}
 		return auditWithReason(ctx, tx, org, actor, "authorization.platform_admin_transferred", target, reason)
 	})
 }

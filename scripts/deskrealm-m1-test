@@ -11,8 +11,9 @@ case "$mode" in
   management-scopes) tests=(TestManagementScopesPostgres) ;;
   authorization) tests=(TestManagementScopesPostgres TestAPITokenScopesPostgres TestPlatformAdminTransferPostgres TestControlRolesPostgres) ;;
   enrollment) tests=(TestDeviceEnrollmentPostgres TestDeviceApprovalPostgres) ;;
+  device-lifecycle) tests=(TestDeviceLifecyclePostgres TestDeviceStateIsolationPostgres) ;;
   bootstrap-browser) ;;
-  *) echo "usage: $0 bootstrap-api|user-status|identity-lifecycle|identity-federation|authorization|enrollment|bootstrap-browser" >&2; exit 2 ;;
+  *) echo "usage: $0 bootstrap-api|user-status|identity-lifecycle|identity-federation|authorization|enrollment|device-lifecycle|bootstrap-browser" >&2; exit 2 ;;
 esac
 
 scratch=$(mktemp -d "${TMPDIR:-/tmp}/deskrealm-m1.XXXXXX")

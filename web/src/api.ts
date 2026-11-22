@@ -34,6 +34,10 @@ const messages: Record<string, string> = {
   device_not_found: '设备不存在或当前账号无权操作。',
   invalid_enrollment_request: '请检查设备组、设备平台、凭据用途和有效期。',
   device_decision_conflict: '设备已处理，请刷新列表。',
+  invalid_device_change: '请检查设备版本和所填字段。',
+  device_conflict: '该 RustDesk ID 或设备密钥已使用。',
+  device_version_conflict: '设备已更新，请关闭此窗口并重新打开详情。',
+  device_lifecycle_conflict: '当前登记状态不允许此操作。',
 }
 
 export class RequestError extends Error {

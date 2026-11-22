@@ -3,6 +3,7 @@ module deskrealm
 go 1.26.0
 
 require (
+	filippo.io/edwards25519 v1.2.0
 	github.com/coreos/go-oidc/v3 v3.21.0
 	github.com/jackc/pgx/v5 v5.13.0
 	github.com/pquerna/otp v1.5.0

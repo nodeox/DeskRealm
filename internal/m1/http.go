@@ -110,9 +110,13 @@ func NewHandler(store Store, origin *url.URL, web fs.FS, config ...AuthConfig) h
 	mux.HandleFunc("POST /v1/admin/enrollment-credentials", api.issueEnrollment)
 	mux.HandleFunc("GET /v1/admin/devices", api.listOrGetDevices)
 	mux.HandleFunc("GET /v1/admin/devices/{id}", api.listOrGetDevices)
+	mux.HandleFunc("GET /v1/admin/devices/{id}/history", api.deviceHistory)
 	mux.HandleFunc("POST /v1/admin/devices/{id}/{action}", api.decideDevice)
+	mux.HandleFunc("POST /v1/admin/devices/{id}/lifecycle/{change}", api.changeDevice)
+	mux.HandleFunc("POST /v1/admin/devices/{id}/key-rotation", api.issueDeviceRotation)
 	mux.HandleFunc("POST /v1/enrollment/challenge", api.enrollDevice)
 	mux.HandleFunc("POST /v1/enrollment/complete", api.enrollDevice)
+	mux.HandleFunc("POST /v1/enrollment/rotate", api.rotateDevice)
 	apiNotFound := func(w http.ResponseWriter, _ *http.Request) {
 		writeError(w, http.StatusNotFound, "not_found")
 	}
@@ -176,7 +180,7 @@ func failure(w http.ResponseWriter, operation string, err error) {
 		writeError(w, http.StatusUnauthorized, errAPIToken.Error())
 	case errors.Is(err, errCredentials):
 		writeError(w, http.StatusUnauthorized, errCredentials.Error())
-	case errors.Is(err, errEnrollment):
+	case errors.Is(err, errEnrollment), errors.Is(err, errDeviceRotation):
 		writeError(w, http.StatusUnauthorized, err.Error())
 	case errors.Is(err, errIdentityGrant):
 		writeError(w, http.StatusUnauthorized, errIdentityGrant.Error())
@@ -196,7 +200,8 @@ func failure(w http.ResponseWriter, operation string, err error) {
 		writeError(w, http.StatusConflict, err.Error())
 	case errors.Is(err, errDeviceMissing), errors.Is(err, errDeviceGroupMissing):
 		writeError(w, http.StatusNotFound, err.Error())
-	case errors.Is(err, errEnrollmentConflict), errors.Is(err, errDeviceConflict), errors.Is(err, errDeviceGroupConflict), errors.Is(err, errDeviceDecision):
+	case errors.Is(err, errEnrollmentConflict), errors.Is(err, errDeviceConflict), errors.Is(err, errDeviceGroupConflict), errors.Is(err, errDeviceDecision),
+		errors.Is(err, errDeviceVersion), errors.Is(err, errDeviceLifecycle):
 		writeError(w, http.StatusConflict, err.Error())
 	default:
 		// PostgreSQL errors can contain argument data. Only the operation is logged.

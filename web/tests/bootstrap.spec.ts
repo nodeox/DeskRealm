@@ -171,6 +171,42 @@ test('首次管理员初始化、成员停用、刷新和退出', async ({ page,
   await page.getByRole('dialog', { name: '批准设备登记' }).getByRole('button', { name: '确认批准' }).click()
   await expect(enrolled).toContainText('已批准')
 
+  await enrolled.getByRole('button', { name: '详情' }).click()
+  const details = page.getByRole('dialog', { name: '设备详情' })
+  await expect(details).toContainText('RustDesk ID 历史')
+  await details.getByRole('button', { name: '修改 RustDesk ID' }).click()
+  const rename = page.getByRole('dialog', { name: '修改 RustDesk ID' })
+  await rename.getByLabel('新 RustDesk ID').fill('10101012')
+  await rename.getByRole('button', { name: '确认', exact: true }).click()
+  const renamed = page.getByRole('row').filter({ hasText: '10101012' })
+  await expect(renamed).toContainText('已批准')
+  await renamed.getByRole('button', { name: '详情' }).click()
+  await expect(details).toContainText(enrollment.rustdesk_id)
+  await details.getByRole('button', { name: '禁用设备', exact: true }).click()
+  await page.getByRole('dialog', { name: '禁用设备', exact: true }).getByRole('button', { name: '确认', exact: true }).click()
+  await expect(renamed).toContainText('已禁用')
+  await expect(renamed).toContainText('未知')
+  await renamed.getByRole('button', { name: '详情' }).click()
+  await details.getByRole('button', { name: '恢复设备', exact: true }).click()
+  await page.getByRole('dialog', { name: '恢复设备', exact: true }).getByRole('button', { name: '确认', exact: true }).click()
+  const rotationInput = page.getByLabel('一次性密钥轮换凭据')
+  await expect(rotationInput).toHaveValue(/"nonce"/)
+  const grant = JSON.parse(await rotationInput.inputValue()) as { device_id: string; version: number; nonce: string; credential: string }
+  const newKeys = generateKeyPairSync('ed25519')
+  const newPublicKey = newKeys.publicKey.export({ format: 'jwk' }).x
+  if (!newPublicKey) throw new Error('Missing replacement Ed25519 key')
+  const encodedKey = Buffer.from(newPublicKey, 'base64url').toString('base64')
+  const rotationMessage = Buffer.from([
+    'deskrealm/device-key-rotation/v1', grant.device_id, grant.version, grant.nonce, encodedKey,
+  ].join('\n'))
+  const restored = await page.request.post('/v1/enrollment/rotate', { data: {
+    device_id: grant.device_id, version: grant.version, credential: grant.credential, public_key: encodedKey,
+    signature: sign(null, rotationMessage, newKeys.privateKey).toString('base64'),
+  } })
+  expect(restored.ok()).toBeTruthy()
+  await page.reload()
+  await expect(renamed).toContainText('已批准')
+
   await page.getByRole('link', { name: '概览', exact: true }).click()
   await page.setViewportSize({ width: 375, height: 800 })
   await page.reload()

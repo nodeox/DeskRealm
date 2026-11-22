@@ -42,8 +42,8 @@ type enrollmentChallenge struct {
 }
 
 func (in enrollmentRequest) key() ([]byte, error) {
-	key, err := base64.StdEncoding.Strict().DecodeString(in.PublicKey)
-	if err != nil || len(key) != ed25519.PublicKeySize || base64.StdEncoding.EncodeToString(key) != in.PublicKey ||
+	key, valid := devicePublicKey(in.PublicKey)
+	if !valid ||
 		!validToken(in.Credential) || !userIDPattern.MatchString(in.GroupID) ||
 		!validDevicePlatform(in.Platform) || !rustdeskIDPattern.MatchString(in.RustDeskID) {
 		return nil, errEnrollment
@@ -166,6 +166,13 @@ func (s Store) challengeEnrollment(ctx context.Context, in enrollmentRequest, ke
 		if !allowed {
 			return errEnrollment
 		}
+		var knownKey bool
+		if err := tx.QueryRow(ctx, "SELECT EXISTS (SELECT 1 FROM device_key_history WHERE public_key=$1)", key).Scan(&knownKey); err != nil {
+			return err
+		}
+		if knownKey {
+			return errDeviceConflict
+		}
 		// An expired uncompleted attempt may be replaced without consuming the credential.
 		if _, err := tx.Exec(ctx, `DELETE FROM enrollment_attempts WHERE credential_id=$1
 			AND expires_at<=clock_timestamp() AND device_id IS NULL`, e.ID); err != nil {
@@ -228,6 +235,14 @@ func (s Store) completeEnrollment(ctx context.Context, in enrollmentRequest, key
 			return errEnrollment
 		}
 		if out.DeviceID != "" && e.Consumed {
+			var active bool
+			if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM devices WHERE id=$1 AND public_key=$2
+				AND registration_state IN ('pending','approved'))`, out.DeviceID, key).Scan(&active); err != nil {
+				return err
+			}
+			if !active {
+				return errEnrollment
+			}
 			// A completed request always returns its original receipt. The status API tracks subsequent decisions.
 			out.State = "pending"
 			return nil
@@ -263,6 +278,9 @@ func (s Store) completeEnrollment(ctx context.Context, in enrollmentRequest, key
 			{"UPDATE enrollment_attempts SET device_id=$2 WHERE id=$1", []any{in.AttemptID, out.DeviceID}},
 		} {
 			if _, err := tx.Exec(ctx, statement.query, statement.args...); err != nil {
+				if uniqueViolation(err) {
+					return errDeviceConflict
+				}
 				return err
 			}
 		}
