@@ -5,7 +5,7 @@ import { api, json, RequestError } from './api'
 type UserStatus = 'pending' | 'active' | 'disabled' | 'archived'
 type ManagedUser = { id: string; username: string; status: UserStatus; platform_admin: boolean }
 type UserList = { users: ManagedUser[]; next?: string }
-type Action = 'enable' | 'disable' | 'archive' | 'recovery'
+type Action = 'enable' | 'disable' | 'archive' | 'recovery' | 'totp-reset'
 type Form = 'direct' | 'invite' | 'import'
 type IssuedLink = { url: string; expires_at: string }
 type ImportEntry = { username: string; result: 'pending' | 'exists' }
@@ -13,7 +13,7 @@ type ImportEntry = { username: string; result: 'pending' | 'exists' }
 const props = defineProps<{ csrf: string }>()
 const emit = defineEmits<{ expired: [] }>()
 const statusLabel: Record<UserStatus, string> = { pending: '待激活', active: '已启用', disabled: '已停用', archived: '已归档' }
-const actionLabel: Record<Action, string> = { enable: '启用', disable: '停用', archive: '归档', recovery: '恢复' }
+const actionLabel: Record<Action, string> = { enable: '启用', disable: '停用', archive: '归档', recovery: '恢复', 'totp-reset': '重置验证' }
 
 const data = ref<ManagedUser[]>([])
 const next = ref('')
@@ -30,6 +30,7 @@ const issued = ref<IssuedLink>()
 const dialog = ref<HTMLDialogElement>()
 const pending = ref<{ action: Action; user: ManagedUser }>()
 const reason = ref('')
+const adminPassword = ref('')
 const dialogError = ref('')
 
 function message(cause: unknown) {
@@ -126,6 +127,7 @@ async function copyLink() {
 async function select(action: Action, user: ManagedUser) {
   pending.value = { action, user }
   reason.value = ''
+  adminPassword.value = ''
   dialogError.value = ''
   await nextTick()
   dialog.value?.showModal()
@@ -134,6 +136,7 @@ async function select(action: Action, user: ManagedUser) {
 function resetDialog() {
   pending.value = undefined
   dialogError.value = ''
+  adminPassword.value = ''
 }
 
 async function change() {
@@ -146,6 +149,10 @@ async function change() {
     const path = '/v1/admin/users/' + selected.user.id + '/' + selected.action
     if (selected.action === 'recovery') {
       issued.value = await api<IssuedLink>(path, json({}, props.csrf))
+    } else if (selected.action === 'totp-reset') {
+      await api(path, json({ reason: reason.value, password: adminPassword.value }, props.csrf))
+      result.value = selected.user.username + ' 的两步验证已重置。'
+      await refresh()
     } else {
       const user = await api<ManagedUser>(path, json({ reason: reason.value }, props.csrf))
       data.value = data.value.map(row => row.id === user.id ? user : row)
@@ -156,6 +163,7 @@ async function change() {
     dialogError.value = message(cause)
   } finally {
     busy.value = false
+    adminPassword.value = ''
   }
 }
 
@@ -223,6 +231,7 @@ onMounted(() => refresh())
               <button v-if="user.status !== 'archived'" class="secondary" type="button" @click="select('archive', user)">归档</button>
               <button v-if="user.status === 'pending'" class="secondary" type="button" :disabled="busy" @click="invite(user.username)">补发邀请</button>
               <button v-else class="secondary" type="button" @click="select('recovery', user)">恢复账号</button>
+              <button v-if="user.status === 'active'" class="secondary" type="button" @click="select('totp-reset', user)">重置验证</button>
             </td>
           </tr>
           <tr v-if="!data.length">
@@ -244,6 +253,10 @@ onMounted(() => refresh())
         <div v-if="pending.action !== 'recovery'" class="field">
           <label for="user-action-reason">操作原因</label>
           <input id="user-action-reason" v-model="reason" maxlength="200" autofocus required>
+        </div>
+        <div v-if="pending.action === 'totp-reset'" class="field">
+          <label for="admin-password">管理员当前密码</label>
+          <input id="admin-password" v-model="adminPassword" type="password" autocomplete="current-password" maxlength="256" required>
         </div>
         <p v-if="dialogError" class="error" role="alert">{{ dialogError }}</p>
         <div class="dialog-actions">

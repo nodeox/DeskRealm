@@ -1,4 +1,16 @@
 import { expect, test } from '@playwright/test'
+import { createHmac } from 'node:crypto'
+
+function verificationCode(secret: string, step: number): string {
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567'
+  const bits = [...secret].map(letter => alphabet.indexOf(letter).toString(2).padStart(5, '0')).join('')
+  const key = Buffer.from((bits.match(/.{8}/g) ?? []).map(value => parseInt(value, 2)))
+  const counter = Buffer.alloc(8)
+  counter.writeBigUInt64BE(BigInt(step))
+  const hash = createHmac('sha1', key).update(counter).digest()
+  const offset = hash[hash.length - 1] & 15
+  return ((hash.readUInt32BE(offset) & 0x7fffffff) % 1000000).toString().padStart(6, '0')
+}
 
 test('首次管理员初始化、成员停用、刷新和退出', async ({ page, browser }) => {
   const invite = process.env.DESKREALM_BROWSER_TICKET
@@ -99,4 +111,28 @@ test('首次管理员初始化、成员停用、刷新和退出', async ({ page,
   await expect(page.getByRole('heading', { name: '登录端域控制台' })).toBeVisible()
   await page.goto('/overview')
   await expect(page).toHaveURL(/\/login$/)
+
+  await page.getByLabel('账号').fill('admin')
+  await page.getByLabel('密码', { exact: true }).fill('test-passphrase-for-deskrealm')
+  await page.getByRole('button', { name: '登录', exact: true }).click()
+  await page.getByRole('link', { name: '账号安全' }).click()
+  await page.getByLabel('当前密码').fill('test-passphrase-for-deskrealm')
+  await page.getByRole('button', { name: '生成验证器密钥' }).click()
+  const secret = await page.getByLabel('验证器密钥').inputValue()
+  const step = Math.floor(Date.now() / 30000)
+  await page.getByLabel('当前密码').fill('test-passphrase-for-deskrealm')
+  await page.getByLabel('验证码').fill(verificationCode(secret, step))
+  await page.getByRole('button', { name: '确认并启用' }).click()
+  await expect(page.getByRole('status').filter({ hasText: '已启用' })).toBeVisible()
+  await page.getByRole('button', { name: '退出登录' }).click()
+  await page.getByLabel('账号').fill('admin')
+  await page.getByLabel('密码', { exact: true }).fill('test-passphrase-for-deskrealm')
+  await page.getByRole('button', { name: '登录', exact: true }).click()
+  await expect(page.getByRole('heading', { name: '两步验证' })).toBeVisible()
+  await page.getByLabel('验证码').fill(verificationCode(secret, step))
+  await page.getByRole('button', { name: '验证登录' }).click()
+  await expect(page.getByRole('alert')).toContainText('已使用')
+  await page.getByLabel('验证码').fill(verificationCode(secret, step + 1))
+  await page.getByRole('button', { name: '验证登录' }).click()
+  await expect(page.getByRole('heading', { name: '概览', exact: true })).toBeVisible()
 })

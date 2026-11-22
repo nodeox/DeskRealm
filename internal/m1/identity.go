@@ -132,7 +132,7 @@ func (s Store) changeUser(ctx context.Context, value, userID, targetStatus, reas
 			return err
 		}
 		err = tx.QueryRow(ctx, `SELECT u.id,u.username,u.status,`+adminBinding+`
-			FROM users u WHERE u.id=$1 AND u.organization_id=$2 FOR UPDATE`, userID, orgID).
+			FROM users u WHERE u.id=$1 AND u.organization_id=$2 FOR NO KEY UPDATE`, userID, orgID).
 			Scan(&result.ID, &result.Username, &result.Status, &result.PlatformAdmin)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return errUserMissing
@@ -159,8 +159,7 @@ func (s Store) changeUser(ctx context.Context, value, userID, targetStatus, reas
 			return err
 		}
 		if targetStatus != "active" {
-			if _, err := tx.Exec(ctx, `UPDATE browser_sessions SET revoked_at=now()
-				WHERE user_id=$1 AND revoked_at IS NULL`, userID); err != nil {
+			if err := revokeUserLogins(ctx, tx, userID); err != nil {
 				return err
 			}
 		}

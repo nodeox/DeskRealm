@@ -45,7 +45,7 @@ func (s Store) issueIdentityGrant(ctx context.Context, actorToken, kind, subject
 		lifetime := recoveryLifetime
 		if kind == invitationGrant {
 			lifetime = invitationLifetime
-			err = tx.QueryRow(ctx, `SELECT id,status FROM users WHERE organization_id=$1 AND username=$2 FOR UPDATE`, orgID, subject).
+			err = tx.QueryRow(ctx, `SELECT id,status FROM users WHERE organization_id=$1 AND username=$2 FOR NO KEY UPDATE`, orgID, subject).
 				Scan(&userID, &status)
 			if errors.Is(err, pgx.ErrNoRows) {
 				status = "pending"
@@ -56,7 +56,7 @@ func (s Store) issueIdentityGrant(ctx context.Context, actorToken, kind, subject
 				return errUserExists
 			}
 		} else {
-			err = tx.QueryRow(ctx, `SELECT id,status FROM users WHERE organization_id=$1 AND id=$2 FOR UPDATE`, orgID, subject).
+			err = tx.QueryRow(ctx, `SELECT id,status FROM users WHERE organization_id=$1 AND id=$2 FOR NO KEY UPDATE`, orgID, subject).
 				Scan(&userID, &status)
 			if errors.Is(err, pgx.ErrNoRows) {
 				return errUserMissing
@@ -101,7 +101,7 @@ func (s Store) redeemIdentityGrant(ctx context.Context, kind, value, password st
 			return err
 		}
 		var status string
-		err = tx.QueryRow(ctx, `SELECT status FROM users WHERE id=$1 AND organization_id=$2 FOR UPDATE`, userID, orgID).Scan(&status)
+		err = tx.QueryRow(ctx, `SELECT status FROM users WHERE id=$1 AND organization_id=$2 FOR NO KEY UPDATE`, userID, orgID).Scan(&status)
 		if err != nil {
 			return err
 		}
@@ -129,7 +129,7 @@ func (s Store) redeemIdentityGrant(ctx context.Context, kind, value, password st
 		if _, err := tx.Exec(ctx, "UPDATE users SET status=$2,password_hash=$3 WHERE id=$1", userID, status, hash); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(ctx, "UPDATE browser_sessions SET revoked_at=now() WHERE user_id=$1 AND revoked_at IS NULL", userID); err != nil {
+		if err := revokeUserLogins(ctx, tx, userID); err != nil {
 			return err
 		}
 		return audit(ctx, tx, orgID, userID, "user."+kind+"_redeemed", userID)

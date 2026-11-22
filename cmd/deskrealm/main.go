@@ -27,11 +27,11 @@ func main() {
 
 func run(ctx context.Context, args []string) error {
 	if len(args) == 1 && args[0] == "--help" {
-		fmt.Println("deskrealm migrate | bootstrap-ticket | serve")
+		fmt.Println("deskrealm migrate | bootstrap-ticket | oidc-bind USERNAME SUBJECT | serve")
 		return nil
 	}
-	if len(args) != 1 {
-		return errors.New("expected migrate, bootstrap-ticket or serve")
+	if len(args) != 1 && !(len(args) == 3 && args[0] == "oidc-bind") {
+		return errors.New("expected migrate, bootstrap-ticket, oidc-bind USERNAME SUBJECT or serve")
 	}
 	dsn := os.Getenv("DESKREALM_DATABASE_URL")
 	if args[0] == "migrate" {
@@ -46,8 +46,8 @@ func run(ctx context.Context, args []string) error {
 		}
 		return nil
 	}
-	if args[0] != "bootstrap-ticket" && args[0] != "serve" {
-		return errors.New("expected migrate, bootstrap-ticket or serve")
+	if args[0] != "bootstrap-ticket" && args[0] != "oidc-bind" && args[0] != "serve" {
+		return errors.New("expected migrate, bootstrap-ticket, oidc-bind USERNAME SUBJECT or serve")
 	}
 	if dsn == "" {
 		return errors.New("DESKREALM_DATABASE_URL is required")
@@ -68,6 +68,19 @@ func run(ctx context.Context, args []string) error {
 		return errors.New("database unavailable")
 	}
 	store := m1.Store{DB: db}
+	if args[0] == "oidc-bind" {
+		if len(args) != 3 {
+			return errors.New("usage: deskrealm oidc-bind USERNAME SUBJECT")
+		}
+		issuer := os.Getenv("DESKREALM_OIDC_ISSUER")
+		if err := m1.ValidateIssuer(issuer, dev); err != nil {
+			return err
+		}
+		if err := store.BindOIDC(check, issuer, args[2], args[1]); err != nil {
+			return errors.New("OIDC binding failed; confirm active account and unique subject")
+		}
+		return nil
+	}
 	if args[0] == "bootstrap-ticket" {
 		ticket, err := store.IssueTicket(check)
 		if err != nil {
@@ -78,6 +91,15 @@ func run(ctx context.Context, args []string) error {
 	}
 	if _, err := store.Initialized(check); err != nil {
 		return errors.New("database schema unavailable; run deskrealm migrate")
+	}
+	totp, err := m1.ParseTOTPKey(os.Getenv("DESKREALM_TOTP_KEY"))
+	if err != nil {
+		return err
+	}
+	provider, err := m1.OpenOIDC(check, os.Getenv("DESKREALM_OIDC_ISSUER"),
+		os.Getenv("DESKREALM_OIDC_CLIENT_ID"), os.Getenv("DESKREALM_OIDC_CLIENT_SECRET"), origin.String(), dev)
+	if err != nil {
+		return err
 	}
 	addr := os.Getenv("DESKREALM_HTTP_ADDR")
 	if addr == "" {
@@ -97,7 +119,7 @@ func run(ctx context.Context, args []string) error {
 		}
 	}
 	server := &http.Server{
-		Addr: addr, Handler: m1.NewHandler(store, origin, web),
+		Addr: addr, Handler: m1.NewHandler(store, origin, web, m1.AuthConfig{TOTP: totp, OIDC: provider}),
 		ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second,
 		WriteTimeout: 20 * time.Second, IdleTimeout: time.Minute,
 	}

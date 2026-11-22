@@ -2,8 +2,9 @@
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { api, json, RequestError } from './api'
 import UsersPanel from './UsersPanel.vue'
+import SecurityPanel from './SecurityPanel.vue'
 
-type Screen = 'loading' | 'initialize' | 'login' | 'overview' | 'users' | 'accept-invitation' | 'recover' | 'unavailable'
+type Screen = 'loading' | 'initialize' | 'login' | 'overview' | 'users' | 'security' | 'accept-invitation' | 'recover' | 'unavailable'
 type Session = {
   username: string
   organization: string
@@ -26,12 +27,16 @@ const error = ref('')
 const submitting = ref(false)
 const session = ref<Session>()
 const overview = ref<Overview>()
+const oidcAvailable = ref(false)
+const verification = ref(false)
+const code = ref('')
 const accountLink = computed(() => screen.value === 'accept-invitation' || screen.value === 'recover')
 const needsTicket = computed(() => accountLink.value || screen.value === 'initialize')
 const formTitle = computed(() => {
   if (screen.value === 'initialize') return '首次管理员初始化'
   if (screen.value === 'accept-invitation') return '接受组织邀请'
   if (screen.value === 'recover') return '恢复账号'
+  if (verification.value) return '两步验证'
   return '登录端域控制台'
 })
 
@@ -56,12 +61,15 @@ async function loadSignedIn(allowAnonymous: boolean) {
   } catch (cause) {
     if (allowAnonymous && cause instanceof RequestError && cause.status === 401) {
       await show('login')
-      return
+      return false
     }
     throw cause
   }
   overview.value = await api<Overview>('/v1/overview')
-  await show(overview.value.can_manage && location.pathname === '/users' ? 'users' : 'overview')
+  const page = location.pathname === '/security' ? 'security' :
+    overview.value.can_manage && location.pathname === '/users' ? 'users' : 'overview'
+  await show(page)
+  return true
 }
 
 async function load() {
@@ -72,7 +80,17 @@ async function load() {
     if (!initialized) await show('initialize')
     else if (location.pathname === '/accept-invitation') await show('accept-invitation')
     else if (location.pathname === '/recover') await show('recover')
-    else await loadSignedIn(true)
+    else {
+      const params = new URLSearchParams(location.search)
+      verification.value = params.get('verification') === 'totp'
+      if (params.has('oidc') || verification.value) history.replaceState(null, '', '/login')
+      if (verification.value) await show('login')
+      if (verification.value || !(await loadSignedIn(true))) {
+        const options = await api<{ oidc: boolean }>('/v1/auth/options').catch(() => ({ oidc: false }))
+        oidcAvailable.value = options.oidc
+        if (params.get('oidc') === 'failed') error.value = '外部身份登录失败。请联系管理员核对账号绑定。'
+      }
+    }
   } catch {
     await show('unavailable')
   }
@@ -96,15 +114,24 @@ async function submit() {
       await api('/v1/auth/' + screen.value, json({ ticket: ticket.value, password: password.value }))
       ticket.value = ''
       await show('login')
-    } else {
-      await api('/v1/auth/login', json({ username: username.value, password: password.value }))
+    } else if (verification.value) {
+      await api('/v1/auth/totp/verify', json({ code: code.value }))
+      verification.value = false
       await loadSignedIn(false)
+    } else {
+      const response = await api<{ next: 'totp' } | undefined>('/v1/auth/login', json({ username: username.value, password: password.value }))
+      if (response?.next === 'totp') {
+        verification.value = true
+        await nextTick()
+        document.getElementById('login-code')?.focus()
+      } else await loadSignedIn(false)
     }
   } catch (cause) {
     if (cause instanceof RequestError && cause.code === 'already_initialized') await show('login')
     error.value = cause instanceof RequestError ? cause.message : '无法连接中心，请重试。'
   } finally {
     password.value = ''
+    code.value = ''
     submitting.value = false
   }
 }
@@ -117,7 +144,7 @@ async function logout() {
     await api('/v1/auth/logout', { method: 'POST', headers: { 'X-CSRF-Token': session.value.csrf_token } })
     session.value = undefined
     overview.value = undefined
-    await show('login')
+    await load()
   } catch (cause) {
     if (cause instanceof RequestError && cause.status === 401) {
       session.value = undefined
@@ -134,27 +161,29 @@ onMounted(load)
 </script>
 
 <template>
-  <div v-if="(screen === 'overview' || screen === 'users') && session && overview" class="workspace">
+  <div v-if="(screen === 'overview' || screen === 'users' || screen === 'security') && session && overview" class="workspace">
     <aside class="sidebar" aria-label="工作台导航">
       <div class="brand"><span class="brand-icon" aria-hidden="true"></span><span><strong>端域</strong><small>DeskRealm</small></span></div>
       <p class="nav-heading">工作台</p>
       <nav class="nav-links">
         <a class="nav-link" href="/overview" :aria-current="screen === 'overview' ? 'page' : undefined">概览</a>
         <a v-if="overview.can_manage" class="nav-link" href="/users" :aria-current="screen === 'users' ? 'page' : undefined">用户与权限</a>
+        <a class="nav-link" href="/security" :aria-current="screen === 'security' ? 'page' : undefined">账号安全</a>
       </nav>
     </aside>
     <header class="topbar">
-      <span class="breadcrumb">工作台 / {{ screen === 'users' ? '用户与权限' : '概览' }}</span>
+      <span class="breadcrumb">工作台 / {{ screen === 'users' ? '用户与权限' : screen === 'security' ? '账号安全' : '概览' }}</span>
       <div class="account">
         <div><strong>{{ session.username }}</strong><small>{{ overview.can_manage ? '平台管理员' : '成员' }}</small></div>
         <button class="secondary" :disabled="submitting" @click="logout">退出登录</button>
       </div>
     </header>
     <main class="content">
-      <h1 ref="heading" tabindex="-1">{{ screen === 'users' ? '用户与权限' : '概览' }}</h1>
+      <h1 ref="heading" tabindex="-1">{{ screen === 'users' ? '用户与权限' : screen === 'security' ? '账号安全' : '概览' }}</h1>
       <p class="muted">{{ overview.organization }}</p>
       <p v-if="error" class="error" role="alert">{{ error }}</p>
       <UsersPanel v-if="screen === 'users'" :csrf="session.csrf_token" @expired="load" />
+      <SecurityPanel v-else-if="screen === 'security'" :csrf="session.csrf_token" @expired="load" />
       <section v-else class="panel" aria-labelledby="organization-title">
         <h2 id="organization-title">当前组织</h2>
         <dl>
@@ -194,11 +223,15 @@ onMounted(load)
               <label for="organization">组织名称</label>
               <input id="organization" v-model="organization" autocomplete="organization" maxlength="80" required>
             </div>
-            <div v-if="!accountLink" class="field">
+            <div v-if="!accountLink && !verification" class="field">
               <label for="username">账号</label>
               <input id="username" v-model="username" autocomplete="username" maxlength="40" required>
             </div>
-            <div class="field">
+            <div v-if="verification" class="field">
+              <label for="login-code">验证码</label>
+              <input id="login-code" v-model="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required>
+            </div>
+            <div v-else class="field">
               <label for="password">{{ accountLink ? '新密码' : '密码' }}</label>
               <input id="password" v-model="password" type="password"
                 :autocomplete="needsTicket ? 'new-password' : 'current-password'"
@@ -207,9 +240,11 @@ onMounted(load)
             </div>
             <p v-if="error" class="error" role="alert">{{ error }}</p>
             <button class="primary full" type="submit" :disabled="submitting">
-              {{ submitting ? '正在提交…' : screen === 'initialize' ? '初始化中心' : accountLink ? '设置密码' : '登录' }}
+              {{ submitting ? '正在提交…' : screen === 'initialize' ? '初始化中心' : accountLink ? '设置密码' : verification ? '验证登录' : '登录' }}
             </button>
+            <button v-if="verification" class="secondary full" type="button" @click="verification = false; error = ''; code = ''">返回登录</button>
           </form>
+          <a v-if="screen === 'login' && oidcAvailable && !verification" class="external-login" href="/v1/auth/oidc/start">使用组织身份登录</a>
         </template>
       </section>
     </div>

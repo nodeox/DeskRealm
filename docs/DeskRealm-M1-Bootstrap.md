@@ -1,6 +1,6 @@
 # DeskRealm M1 首次初始化与登录
 
-当前可运行的控制面包括 PostgreSQL 迁移、一次性首管初始化、本地账号登录、中文概览和成员管理。平台管理员可创建、邀请、导入、启用、停用、归档及恢复账号。初始化、成功登录、注销和成员变更均进入审计。后续计划接入 TOTP、OIDC、作用域授权、设备和任务。
+当前可运行的控制面包括 PostgreSQL 迁移、一次性首管初始化、本地账号与外部身份登录、中文概览和成员管理。平台管理员可创建、邀请、导入、启用、停用、归档及恢复账号。初始化、成功登录、注销和成员变更均进入审计。后续计划接入作用域授权、设备和任务。
 
 ## 本地开发检查
 
@@ -9,6 +9,7 @@
 ```sh
 bash scripts/deskrealm-m1-test bootstrap-api
 bash scripts/deskrealm-m1-test identity-lifecycle
+bash scripts/deskrealm-m1-test identity-federation
 npm --prefix web ci --ignore-scripts
 npm --prefix web run typecheck
 PLAYWRIGHT_SKIP_BROWSER_GC=1 npm --prefix web exec -- playwright install chromium
@@ -38,6 +39,12 @@ go run ./cmd/deskrealm serve
 
 正式入口使用 HTTPS。将中心外部 HTTPS origin 配给 `DESKREALM_PUBLIC_ORIGIN`，用反代连接 Go 的内部监听地址。HTTP 开发模式仅绑定本机回环。浏览器请求使用同源接口，注销需要当前会话的 CSRF 值。
 
+## 两步验证与外部身份
+
+在中心的受控运行环境设置 `DESKREALM_TOTP_KEY`。它需要是 32 字节随机密钥的标准 Base64 表示，可用 `openssl rand -base64 32` 生成。密钥由部署保管并随中心身份一同备份，所有控制面启动使用同一密钥。用户从「账号安全」核对密码、添加验证器并输入一次验证码确认。启用后本地和 OIDC 登录均要求验证码。平台管理员可用当前密码与操作原因重置账号的验证器。重置写审计并撤销现有会话。
+
+配置 `DESKREALM_OIDC_ISSUER`、`DESKREALM_OIDC_CLIENT_ID` 和 `DESKREALM_OIDC_CLIENT_SECRET`。在身份提供方登记回调 `<DESKREALM_PUBLIC_ORIGIN>/v1/auth/oidc/callback`。中心主机运行 `deskrealm oidc-bind USERNAME SUBJECT`，将提供方给出的稳定 subject 绑定至已有启用账号。邮箱用于显示场景，登录身份以签发方和 subject 为准。身份提供方变更时重新核对绑定。成功配置后登录页面显示「使用组织身份登录」。
+
 | 接口 | 返回 |
 | --- | --- |
 | `GET /v1/bootstrap/status` | 初始化状态 |
@@ -52,3 +59,5 @@ go run ./cmd/deskrealm serve
 | `POST /v1/admin/user-invitations`、`POST /v1/admin/users/{id}/recovery` | 签发一次性邀请或恢复链接 |
 | `POST /v1/auth/accept-invitation`、`POST /v1/auth/recover` | 兑换链接并设置密码 |
 | `POST /v1/admin/users/imports` | 使用请求键重复查询同一批导入结果 |
+| `GET /v1/auth/totp`、`POST /v1/auth/totp/{setup,confirm}` | 查询及配置当前账号的验证器 |
+| `POST /v1/auth/totp/verify`、`POST /v1/admin/users/{id}/totp-reset` | 完成两步登录或由管理员重置验证器 |

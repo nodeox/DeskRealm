@@ -26,6 +26,8 @@ type API struct {
 	mu        sync.Mutex
 	attempts  map[string]attempt
 	pruneAt   time.Time
+	totp      *TOTPKey
+	oidc      *OIDC
 }
 
 type attempt struct {
@@ -52,9 +54,17 @@ func Loopback(host string) bool {
 	return host == "localhost" || (err == nil && ip.IsLoopback())
 }
 
-func NewHandler(store Store, origin *url.URL, web fs.FS) http.Handler {
+type AuthConfig struct {
+	TOTP *TOTPKey
+	OIDC *OIDC
+}
+
+func NewHandler(store Store, origin *url.URL, web fs.FS, config ...AuthConfig) http.Handler {
 	api := &API{store: store, origin: origin.String(), secure: origin.Scheme == "https",
 		web: web, hashSlots: make(chan struct{}, 4), attempts: make(map[string]attempt)}
+	if len(config) > 0 {
+		api.totp, api.oidc = config[0].TOTP, config[0].OIDC
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/bootstrap/status", api.bootstrapStatus)
 	mux.HandleFunc("POST /v1/bootstrap", api.bootstrap)
@@ -70,6 +80,14 @@ func NewHandler(store Store, origin *url.URL, web fs.FS) http.Handler {
 	mux.HandleFunc("POST /v1/admin/users/{id}/recovery", api.recoverUser)
 	mux.HandleFunc("POST /v1/auth/accept-invitation", api.redeemUserLink)
 	mux.HandleFunc("POST /v1/auth/recover", api.redeemUserLink)
+	mux.HandleFunc("GET /v1/auth/options", api.authOptions)
+	mux.HandleFunc("GET /v1/auth/oidc/start", api.startOIDC)
+	mux.HandleFunc("GET /v1/auth/oidc/callback", api.callbackOIDC)
+	mux.HandleFunc("GET /v1/auth/totp", api.totpStatus)
+	mux.HandleFunc("POST /v1/auth/totp/setup", api.changeTOTP)
+	mux.HandleFunc("POST /v1/auth/totp/confirm", api.changeTOTP)
+	mux.HandleFunc("POST /v1/auth/totp/verify", api.verifyLoginTOTP)
+	mux.HandleFunc("POST /v1/admin/users/{id}/totp-reset", api.resetTOTP)
 	apiNotFound := func(w http.ResponseWriter, _ *http.Request) {
 		writeError(w, http.StatusNotFound, "not_found")
 	}
@@ -98,7 +116,7 @@ func (a *API) frontend(w http.ResponseWriter, r *http.Request) {
 	}
 	p := strings.TrimPrefix(r.URL.Path, "/")
 	switch p {
-	case "", "initialize", "login", "overview", "users", "accept-invitation", "recover":
+	case "", "initialize", "login", "overview", "users", "security", "accept-invitation", "recover":
 		w.Header().Set("Cache-Control", "no-store")
 		http.ServeFileFS(w, r, a.web, "index.html")
 	default:
@@ -132,6 +150,12 @@ func failure(w http.ResponseWriter, operation string, err error) {
 		writeError(w, http.StatusUnauthorized, errCredentials.Error())
 	case errors.Is(err, errIdentityGrant):
 		writeError(w, http.StatusUnauthorized, errIdentityGrant.Error())
+	case errors.Is(err, errTOTPCode):
+		writeError(w, http.StatusUnauthorized, errTOTPCode.Error())
+	case errors.Is(err, errTOTPEnrollment):
+		writeError(w, http.StatusConflict, errTOTPEnrollment.Error())
+	case errors.Is(err, errTOTPUnavailable):
+		writeError(w, http.StatusServiceUnavailable, errTOTPUnavailable.Error())
 	case errors.Is(err, errForbidden):
 		writeError(w, http.StatusForbidden, errForbidden.Error())
 	case errors.Is(err, errUserMissing):
@@ -252,13 +276,12 @@ func (a *API) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer func() { <-a.hashSlots }()
-	value, err := a.store.login(r.Context(), normalizeUsername(in.Username), in.Password, a.cookieValue(r))
+	result, err := a.store.login(r.Context(), normalizeUsername(in.Username), in.Password, a.cookieValue(r))
 	if err != nil {
 		failure(w, "login", err)
 		return
 	}
-	a.setCookie(w, value, int(sessionLifetime.Seconds()))
-	w.WriteHeader(http.StatusNoContent)
+	a.loginResponse(w, result)
 }
 
 func (a *API) cookieName() string {
@@ -305,13 +328,21 @@ func (a *API) overview(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (a *API) logout(w http.ResponseWriter, r *http.Request) {
+func (a *API) sessionWrite(w http.ResponseWriter, r *http.Request) (principal, bool) {
 	user, ok := a.requireSession(w, r)
 	if !ok {
-		return
+		return user, false
 	}
 	if subtle.ConstantTimeCompare([]byte(r.Header.Get("X-CSRF-Token")), []byte(user.CSRF)) != 1 {
 		writeError(w, http.StatusForbidden, "csrf_denied")
+		return user, false
+	}
+	return user, true
+}
+
+func (a *API) logout(w http.ResponseWriter, r *http.Request) {
+	user, ok := a.sessionWrite(w, r)
+	if !ok {
 		return
 	}
 	if err := a.store.logout(r.Context(), a.cookieValue(r), user); err != nil {

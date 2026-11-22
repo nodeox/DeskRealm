@@ -67,6 +67,7 @@ input, textarea {
 .secondary { background: var(--white); border: 1px solid #c6cede; color: #29344a; }
 .secondary:hover:not(:disabled) { background: #f4f5fc; }
 .full { width: 100%; margin-top: 3px; }
+.external-login { display: block; margin-top: 14px; color: #443acc; text-align: center; font-size: 14px; }
 .error { color: #a11e27; background: #fdf0f1; padding: 9px 12px; border-radius: 8px; margin: 0 0 14px; font-size: 14px; }
 
 .workspace { display: grid; grid-template-columns: 208px 1fr; grid-template-rows: 64px 1fr; min-height: 100vh; }

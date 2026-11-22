@@ -17,6 +17,9 @@ const messages: Record<string, string> = {
   invalid_or_expired_identity_link: '链接已使用、过期或无效，请联系管理员重新发放。',
   invalid_import: '请输入 1 到 100 个格式正确且不重复的账号。',
   import_request_conflict: '本次导入内容已变更，请重新提交。',
+  invalid_verification_code: '验证码错误、已使用或登录请求已过期。',
+  totp_enrollment_unavailable: '当前验证器状态不允许此操作。',
+  totp_unavailable: '中心暂时无法验证两步验证码。',
 }
 
 export class RequestError extends Error {

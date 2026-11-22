@@ -174,7 +174,7 @@ func auditWithReason(ctx context.Context, tx pgx.Tx, organizationID, actorID, ac
 	_, err := tx.Exec(ctx, `
 		WITH event AS (
 			INSERT INTO audit_events (organization_id, actor_id, action, result, resource_id, reason)
-			VALUES ($1, $2, $3, 'success', $4, NULLIF($5, '')) RETURNING id
+			VALUES ($1, NULLIF($2, '')::uuid, $3, 'success', $4, NULLIF($5, '')) RETURNING id
 		)
 		INSERT INTO outbox (event_id) SELECT id FROM event`, organizationID, actorID, action, resourceID, reason)
 	return err
@@ -188,43 +188,45 @@ type principal struct {
 	CSRF         string `json:"csrf_token,omitempty"`
 }
 
-func (s Store) login(ctx context.Context, username, password, previous string) (string, error) {
-	var userID, orgID, hash string
-	err := s.DB.QueryRow(ctx, `SELECT id, organization_id, COALESCE(password_hash, '') FROM users
-		WHERE username = $1 AND status = 'active'`, username).Scan(&userID, &orgID, &hash)
+func (s Store) login(ctx context.Context, username, password, previous string) (loginResult, error) {
+	var userID, hash string
+	err := s.DB.QueryRow(ctx, `SELECT id, COALESCE(password_hash, '') FROM users
+		WHERE username = $1 AND status = 'active'`, username).Scan(&userID, &hash)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-		return "", err
+		return loginResult{}, err
 	}
 	if !passwordMatches(password, hash) || userID == "" {
-		return "", errCredentials
+		return loginResult{}, errCredentials
 	}
-	value, err := token()
-	if err != nil {
-		return "", err
-	}
+	var result loginResult
 	err = pgx.BeginFunc(ctx, s.DB, func(tx pgx.Tx) error {
-		var currentHash string
-		err := tx.QueryRow(ctx, `SELECT COALESCE(password_hash, '') FROM users
-			WHERE id = $1 AND status = 'active' FOR SHARE`, userID).Scan(&currentHash)
+		var currentHash, orgID string
+		err := tx.QueryRow(ctx, `SELECT COALESCE(password_hash, ''), organization_id FROM users
+			WHERE id = $1 AND status = 'active' FOR NO KEY UPDATE`, userID).Scan(&currentHash, &orgID)
 		if errors.Is(err, pgx.ErrNoRows) || (err == nil && currentHash != hash) {
 			return errCredentials
 		}
 		if err != nil {
 			return err
 		}
-		if validToken(previous) {
-			if _, err := tx.Exec(ctx, `UPDATE browser_sessions SET revoked_at = now()
-				WHERE token_digest = $1 AND revoked_at IS NULL`, digest(previous)); err != nil {
-				return err
-			}
-		}
-		if _, err := tx.Exec(ctx, `INSERT INTO browser_sessions (token_digest, user_id, expires_at)
-			VALUES ($1, $2, now() + $3::interval)`, digest(value), userID, fmt.Sprintf("%d seconds", int(sessionLifetime.Seconds()))); err != nil {
+		result, err = s.beginLogin(ctx, tx, userID, orgID, previous)
+		return err
+	})
+	return result, err
+}
+
+func createSession(ctx context.Context, tx pgx.Tx, userID, orgID, previous, value string) error {
+	if validToken(previous) {
+		if _, err := tx.Exec(ctx, `UPDATE browser_sessions SET revoked_at = now()
+			WHERE token_digest = $1 AND user_id = $2 AND revoked_at IS NULL`, digest(previous), userID); err != nil {
 			return err
 		}
-		return audit(ctx, tx, orgID, userID, "user.login", userID)
-	})
-	return value, err
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO browser_sessions (token_digest, user_id, expires_at)
+		VALUES ($1, $2, now() + $3::interval)`, digest(value), userID, fmt.Sprintf("%d seconds", int(sessionLifetime.Seconds()))); err != nil {
+		return err
+	}
+	return audit(ctx, tx, orgID, userID, "user.login", userID)
 }
 
 func (s Store) session(ctx context.Context, value string) (principal, error) {
