@@ -6,8 +6,9 @@ mode="${1:-}"
 case "$mode" in
   bootstrap-api) tests=(TestBootstrapPostgres TestBrowserSessionPostgres) ;;
   user-status) tests=(TestUserStatusPostgres TestAccountRevocationPostgres) ;;
+  identity-lifecycle) tests=(TestUserStatusPostgres TestAccountRevocationPostgres TestIdentityLifecyclePostgres) ;;
   bootstrap-browser) ;;
-  *) echo "usage: $0 bootstrap-api|user-status|bootstrap-browser" >&2; exit 2 ;;
+  *) echo "usage: $0 bootstrap-api|user-status|identity-lifecycle|bootstrap-browser" >&2; exit 2 ;;
 esac
 
 scratch=$(mktemp -d "${TMPDIR:-/tmp}/deskrealm-m1.XXXXXX")

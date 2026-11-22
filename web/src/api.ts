@@ -11,9 +11,12 @@ const messages: Record<string, string> = {
   username_in_use: '该账号已存在。',
   last_platform_admin: '需保留至少一位启用的平台管理员。',
   user_not_found: '该账号已不存在，请刷新列表。',
-  invalid_user_transition: '账号处于归档状态。',
+  invalid_user_transition: '当前账号状态不允许此操作。',
   invalid_reason: '请输入 1 到 200 个字符的操作原因。',
   forbidden: '当前账号没有管理该资源的权限。',
+  invalid_or_expired_identity_link: '链接已使用、过期或无效，请联系管理员重新发放。',
+  invalid_import: '请输入 1 到 100 个格式正确且不重复的账号。',
+  import_request_conflict: '本次导入内容已变更，请重新提交。',
 }
 
 export class RequestError extends Error {

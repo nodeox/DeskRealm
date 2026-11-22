@@ -11,7 +11,7 @@
 
 *, *::before, *::after { box-sizing: border-box; }
 body { margin: 0; min-width: 280px; }
-button, input { font: inherit; }
+button, input, textarea { font: inherit; }
 button { cursor: pointer; }
 button:disabled { cursor: wait; opacity: .7; }
 :focus-visible { outline: 3px solid #5148dd; outline-offset: 3px; }
@@ -51,7 +51,7 @@ small { display: block; color: var(--muted); font-size: 12px; }
 .auth-panel .muted:last-child { margin-bottom: 0; }
 .field { display: grid; gap: 6px; margin-bottom: 16px; }
 .field label { font-size: 14px; font-weight: 600; }
-input {
+input, textarea {
   width: 100%;
   min-height: 44px;
   padding: 9px 12px;
@@ -90,6 +90,7 @@ input {
 .users-surface { padding: 20px; border: 1px solid var(--line); border-radius: 12px; background: var(--white); }
 .section-heading { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; margin-bottom: 18px; }
 .section-heading h2 { margin-bottom: 4px; }
+.user-tools { display: flex; flex-wrap: wrap; gap: 6px; }
 .member-form { display: grid; grid-template-columns: minmax(120px, 1fr) minmax(150px, 1fr) auto; align-items: end; gap: 14px; border-bottom: 1px solid var(--line); padding: 4px 0 16px; margin-bottom: 12px; }
 .member-form .field { margin-bottom: 0; }
 .member-form .primary { min-height: 44px; }
@@ -101,6 +102,10 @@ thead th { background: #f6f8fc; color: #45546b; font-size: 13px; }
 .user-status { display: inline-block; padding: 4px 7px; border-radius: 6px; color: #526078; background: #eef1f6; white-space: nowrap; }
 .user-status[data-state="active"] { color: #116040; background: #e5f4ed; }
 .user-status[data-state="disabled"] { color: #8e302f; background: #faeceb; }
+.user-status[data-state="pending"] { color: #795001; background: #fff3d8; }
+.link-form { max-width: 640px; margin: 12px 0; padding: 14px 0; }
+.link-form textarea { resize: vertical; }
+.import-results { margin: 12px 0; color: #29344a; font-size: 14px; }
 .inline-success { margin-bottom: 12px; color: #116040; font-size: 14px; }
 .load-more { margin-top: 12px; }
 dialog { width: min(calc(100% - 28px), 420px); border: 1px solid var(--line); border-radius: 12px; padding: 22px; color: inherit; }
@@ -118,4 +123,5 @@ dialog::backdrop { background: rgb(25 32 51 / .35); }
   .panel { padding: 18px; }
   .member-form { grid-template-columns: 1fr; }
   .users-surface { padding: 14px; }
+  .section-heading { flex-wrap: wrap; }
 }

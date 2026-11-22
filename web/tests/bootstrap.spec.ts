@@ -58,6 +58,38 @@ test('首次管理员初始化、成员停用、刷新和退出', async ({ page,
     await member.close()
   }
 
+  await page.getByRole('button', { name: '导入账号', exact: true }).click()
+  await page.getByLabel('待导入账号').fill('invite01')
+  await page.getByRole('button', { name: '导入', exact: true }).click()
+  const invitedRow = page.getByRole('row').filter({ hasText: 'invite01' })
+  await expect(invitedRow).toContainText('待激活')
+  await invitedRow.getByRole('button', { name: '补发邀请' }).click()
+  const linkInput = page.getByLabel('一次性账号链接')
+  await expect(linkInput).toHaveValue(/\/accept-invitation#ticket=/)
+  const invited = await browser.newPage()
+  try {
+    await invited.goto(await linkInput.inputValue())
+    await expect(invited).toHaveURL(/\/accept-invitation$/)
+    await invited.getByLabel('新密码').fill('invited-test-passphrase')
+    await invited.getByRole('button', { name: '设置密码' }).click()
+    await expect(invited.getByRole('heading', { name: '登录端域控制台' })).toBeVisible()
+    await page.reload()
+    await expect(invitedRow).toContainText('已启用')
+    await invitedRow.getByRole('button', { name: '恢复账号' }).click()
+    await page.getByRole('dialog', { name: '恢复账号' }).getByRole('button', { name: '确认恢复' }).click()
+    await expect(linkInput).toHaveValue(/\/recover#ticket=/)
+    await invited.goto(await linkInput.inputValue())
+    await expect(invited).toHaveURL(/\/recover$/)
+    await invited.getByLabel('新密码').fill('recovered-test-passphrase')
+    await invited.getByRole('button', { name: '设置密码' }).click()
+    await invited.getByLabel('账号').fill('invite01')
+    await invited.getByLabel('密码', { exact: true }).fill('recovered-test-passphrase')
+    await invited.getByRole('button', { name: '登录', exact: true }).click()
+    await expect(invited.getByRole('heading', { name: '概览', exact: true })).toBeVisible()
+  } finally {
+    await invited.close()
+  }
+
   await page.getByRole('link', { name: '概览', exact: true }).click()
   await page.setViewportSize({ width: 375, height: 800 })
   await page.reload()

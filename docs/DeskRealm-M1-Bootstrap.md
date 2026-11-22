@@ -1,6 +1,6 @@
 # DeskRealm M1 首次初始化与登录
 
-当前可运行的控制面包括 PostgreSQL 迁移、一次性首管初始化、本地账号登录、中文概览、服务端注销和成员管理。初始化、成功登录、注销和成员状态变更均进入审计。后续计划接入邀请、恢复、身份源、作用域授权、设备和任务。
+当前可运行的控制面包括 PostgreSQL 迁移、一次性首管初始化、本地账号登录、中文概览和成员管理。平台管理员可创建、邀请、导入、启用、停用、归档及恢复账号。初始化、成功登录、注销和成员变更均进入审计。后续计划接入 TOTP、OIDC、作用域授权、设备和任务。
 
 ## 本地开发检查
 
@@ -8,7 +8,7 @@
 
 ```sh
 bash scripts/deskrealm-m1-test bootstrap-api
-bash scripts/deskrealm-m1-test user-status
+bash scripts/deskrealm-m1-test identity-lifecycle
 npm --prefix web ci --ignore-scripts
 npm --prefix web run typecheck
 PLAYWRIGHT_SKIP_BROWSER_GC=1 npm --prefix web exec -- playwright install chromium
@@ -34,6 +34,8 @@ go run ./cmd/deskrealm serve
 
 打开票据命令打印的链接，设置组织、账号和至少 12 字符的密码。链接有效期为 15 分钟。再签发会替换前一次票据，完成初始化后停止签发。随后用新账号登录并在概览查看当前组织和账号。
 
+平台管理员在「用户与权限」生成邀请或恢复链接，再通过组织渠道交给对应成员。邀请有效期为 1 小时，恢复有效期为 15 分钟。兑换会移除地址栏里的票据并使旧会话失效。归档账号完成密码恢复后处于停用状态，由管理员明确启用。批量导入每次最多 100 个账号，新账号待激活，已有账号返回原状态。
+
 正式入口使用 HTTPS。将中心外部 HTTPS origin 配给 `DESKREALM_PUBLIC_ORIGIN`，用反代连接 Go 的内部监听地址。HTTP 开发模式仅绑定本机回环。浏览器请求使用同源接口，注销需要当前会话的 CSRF 值。
 
 | 接口 | 返回 |
@@ -47,3 +49,6 @@ go run ./cmd/deskrealm serve
 | `GET /v1/admin/users` | 平台管理员可分页查看账号、角色和状态 |
 | `POST /v1/admin/users` | 创建成员账号，需当前会话的 CSRF 值 |
 | `POST /v1/admin/users/{id}/{enable,disable,archive}` | 记录原因并变更状态。停用或归档会撤销现有登录会话 |
+| `POST /v1/admin/user-invitations`、`POST /v1/admin/users/{id}/recovery` | 签发一次性邀请或恢复链接 |
+| `POST /v1/auth/accept-invitation`、`POST /v1/auth/recover` | 兑换链接并设置密码 |
+| `POST /v1/admin/users/imports` | 使用请求键重复查询同一批导入结果 |

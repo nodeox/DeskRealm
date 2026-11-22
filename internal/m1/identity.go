@@ -140,7 +140,7 @@ func (s Store) changeUser(ctx context.Context, value, userID, targetStatus, reas
 		if err != nil || result.Status == targetStatus {
 			return err
 		}
-		if result.Status == "archived" {
+		if result.Status == "archived" || (result.Status == "pending" && targetStatus != "archived") {
 			return errUserTransition
 		}
 		if result.PlatformAdmin && result.Status == "active" && targetStatus != "active" {

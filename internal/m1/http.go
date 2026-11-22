@@ -65,6 +65,11 @@ func NewHandler(store Store, origin *url.URL, web fs.FS) http.Handler {
 	mux.HandleFunc("GET /v1/admin/users", api.listUsers)
 	mux.HandleFunc("POST /v1/admin/users", api.createUser)
 	mux.HandleFunc("POST /v1/admin/users/{id}/{action}", api.changeUser)
+	mux.HandleFunc("POST /v1/admin/user-invitations", api.inviteUser)
+	mux.HandleFunc("POST /v1/admin/users/imports", api.importUsers)
+	mux.HandleFunc("POST /v1/admin/users/{id}/recovery", api.recoverUser)
+	mux.HandleFunc("POST /v1/auth/accept-invitation", api.redeemUserLink)
+	mux.HandleFunc("POST /v1/auth/recover", api.redeemUserLink)
 	apiNotFound := func(w http.ResponseWriter, _ *http.Request) {
 		writeError(w, http.StatusNotFound, "not_found")
 	}
@@ -93,7 +98,7 @@ func (a *API) frontend(w http.ResponseWriter, r *http.Request) {
 	}
 	p := strings.TrimPrefix(r.URL.Path, "/")
 	switch p {
-	case "", "initialize", "login", "overview", "users":
+	case "", "initialize", "login", "overview", "users", "accept-invitation", "recover":
 		w.Header().Set("Cache-Control", "no-store")
 		http.ServeFileFS(w, r, a.web, "index.html")
 	default:
@@ -125,11 +130,13 @@ func failure(w http.ResponseWriter, operation string, err error) {
 		writeError(w, http.StatusUnauthorized, errSession.Error())
 	case errors.Is(err, errCredentials):
 		writeError(w, http.StatusUnauthorized, errCredentials.Error())
+	case errors.Is(err, errIdentityGrant):
+		writeError(w, http.StatusUnauthorized, errIdentityGrant.Error())
 	case errors.Is(err, errForbidden):
 		writeError(w, http.StatusForbidden, errForbidden.Error())
 	case errors.Is(err, errUserMissing):
 		writeError(w, http.StatusNotFound, errUserMissing.Error())
-	case errors.Is(err, errUserExists), errors.Is(err, errLastAdmin), errors.Is(err, errUserTransition):
+	case errors.Is(err, errUserExists), errors.Is(err, errLastAdmin), errors.Is(err, errUserTransition), errors.Is(err, errImportConflict):
 		writeError(w, http.StatusConflict, err.Error())
 	default:
 		// PostgreSQL errors can contain argument data. Only the operation is logged.

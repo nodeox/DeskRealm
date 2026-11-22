@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import { nextTick, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { api, json, RequestError } from './api'
 import UsersPanel from './UsersPanel.vue'
 
-type Screen = 'loading' | 'initialize' | 'login' | 'overview' | 'users' | 'unavailable'
+type Screen = 'loading' | 'initialize' | 'login' | 'overview' | 'users' | 'accept-invitation' | 'recover' | 'unavailable'
 type Session = {
   username: string
   organization: string
@@ -26,6 +26,14 @@ const error = ref('')
 const submitting = ref(false)
 const session = ref<Session>()
 const overview = ref<Overview>()
+const accountLink = computed(() => screen.value === 'accept-invitation' || screen.value === 'recover')
+const needsTicket = computed(() => accountLink.value || screen.value === 'initialize')
+const formTitle = computed(() => {
+  if (screen.value === 'initialize') return '首次管理员初始化'
+  if (screen.value === 'accept-invitation') return '接受组织邀请'
+  if (screen.value === 'recover') return '恢复账号'
+  return '登录端域控制台'
+})
 
 watch(() => props.ticket, (value) => {
   if (value) {
@@ -36,7 +44,7 @@ watch(() => props.ticket, (value) => {
 
 async function show(page: Screen) {
   screen.value = page
-  const path = page === 'initialize' || page === 'login' || page === 'overview' || page === 'users' ? '/' + page : ''
+  const path = page === 'loading' || page === 'unavailable' ? '' : '/' + page
   if (path && path !== location.pathname) history.replaceState(null, '', path)
   await nextTick()
   heading.value?.focus()
@@ -62,6 +70,8 @@ async function load() {
   try {
     const { initialized } = await api<{ initialized: boolean }>('/v1/bootstrap/status')
     if (!initialized) await show('initialize')
+    else if (location.pathname === '/accept-invitation') await show('accept-invitation')
+    else if (location.pathname === '/recover') await show('recover')
     else await loadSignedIn(true)
   } catch {
     await show('unavailable')
@@ -80,6 +90,10 @@ async function submit() {
         password: password.value,
         ticket: ticket.value,
       }))
+      ticket.value = ''
+      await show('login')
+    } else if (accountLink.value) {
+      await api('/v1/auth/' + screen.value, json({ ticket: ticket.value, password: password.value }))
       ticket.value = ''
       await show('login')
     } else {
@@ -166,30 +180,34 @@ onMounted(load)
           <button class="primary" @click="load">重试</button>
         </template>
         <template v-else>
-          <h1 ref="heading" tabindex="-1">{{ screen === 'initialize' ? '首次管理员初始化' : '登录端域控制台' }}</h1>
+          <h1 ref="heading" tabindex="-1">{{ formTitle }}</h1>
           <p v-if="screen === 'initialize' && !ticket" class="muted">
             请在中心主机运行 <code>deskrealm bootstrap-ticket</code>，用生成的链接打开初始化页面。
           </p>
+          <p v-else-if="accountLink && !ticket" class="muted">
+            请使用管理员发放的链接。<a href="/login">前往登录</a>
+          </p>
           <form v-else @submit.prevent="submit">
             <p v-if="screen === 'initialize'" class="muted">设置组织名称和首个管理员账号。</p>
+            <p v-else-if="accountLink" class="muted">设置新密码后登录端域控制台。</p>
             <div v-if="screen === 'initialize'" class="field">
               <label for="organization">组织名称</label>
               <input id="organization" v-model="organization" autocomplete="organization" maxlength="80" required>
             </div>
-            <div class="field">
+            <div v-if="!accountLink" class="field">
               <label for="username">账号</label>
               <input id="username" v-model="username" autocomplete="username" maxlength="40" required>
             </div>
             <div class="field">
-              <label for="password">密码</label>
+              <label for="password">{{ accountLink ? '新密码' : '密码' }}</label>
               <input id="password" v-model="password" type="password"
-                :autocomplete="screen === 'initialize' ? 'new-password' : 'current-password'"
-                :minlength="screen === 'initialize' ? 12 : undefined" maxlength="256" required>
-              <span v-if="screen === 'initialize'" class="hint">至少 12 个字符</span>
+                :autocomplete="needsTicket ? 'new-password' : 'current-password'"
+                :minlength="needsTicket ? 12 : undefined" maxlength="256" required>
+              <span v-if="needsTicket" class="hint">至少 12 个字符</span>
             </div>
             <p v-if="error" class="error" role="alert">{{ error }}</p>
             <button class="primary full" type="submit" :disabled="submitting">
-              {{ submitting ? '正在提交…' : screen === 'initialize' ? '初始化中心' : '登录' }}
+              {{ submitting ? '正在提交…' : screen === 'initialize' ? '初始化中心' : accountLink ? '设置密码' : '登录' }}
             </button>
           </form>
         </template>
