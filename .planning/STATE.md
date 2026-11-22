@@ -5,14 +5,14 @@ current_phase_name: M1 用户、设备与管理面
 status: executing
 last_updated: "2026-11-22T11:18:12.336Z"
 last_activity: 2026-11-22
-last_activity_desc: M1 02-02 Task 2 TOTP 与 OIDC 通过开发检查
+last_activity_desc: M1 02-02 认证与管理授权通过开发检查，接续 02-03 设备纳管
 state_head: d6e8540eab6c0ac0705d53bf5363fbbc562a28d8
 progress:
   total_phases: 5
   completed_phases: 1
   total_plans: 5
-  completed_plans: 1
-  percent: 20
+  completed_plans: 3
+  percent: 60
 ---
 
 # Project State
@@ -27,9 +27,9 @@ See: .planning/PROJECT.md (updated 2026-11-22)
 ## Current Position
 
 Phase: 2 (M1 用户、设备与管理面)
-Plan: 02-02 of 4，Task 2 已验证，接续 Task 3 分组、作用域与 API Token。
+Plan: 02-03 of 4，接续 Task 1 设备组、入网凭据、持钥登记及审批。
 Status: In progress
-Last activity: 2026-11-22 — TOTP、本地 OIDC 提供方、验证器恢复及中文两步登录通过开发检查。
+Last activity: 2026-11-22 — TOTP、OIDC、管理员移交、作用域委派、控制角色及限时令牌通过开发检查。
 
 ## Accumulated Context
 
@@ -39,4 +39,4 @@ M0–M3 开发完成后进入目标环境验收。先 Linux 中心和一台中�
 
 获取当前阶段计划和证据时使用本仓库的 `.planning/phases/`。
 
-由当前会话继续执行。M0 完成开发验证。M1 已完成 02-01 与 02-02 的 Task 1、Task 2。作用域授权、设备及通讯录、审计查询和任务管理仍在后续计划。
+由当前会话继续执行。M0 完成开发验证。M1 已完成 02-01 和 02-02。设备组及其授权、设备和通讯录、审计查询和任务管理仍在后续计划。
