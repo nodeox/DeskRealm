@@ -1,0 +1,10 @@
+[package]
+name = "deskrealm-signing-vectors"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+publish = false
+
+[dev-dependencies]
+serde_json = "=1.0.118"
+sodiumoxide = "=0.2.7"

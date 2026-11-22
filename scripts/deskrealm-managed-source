@@ -1,0 +1,157 @@
+#!/usr/bin/env python3
+"""Materialize or verify the locked RustDesk sources for local builds."""
+
+import argparse
+import json
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def git(repo, *args):
+    result = subprocess.run(
+        ["git", "-c", "core.hooksPath=/dev/null", "-c", "protocol.file.allow=never",
+         "-C", str(repo), *args],
+        check=True, stdout=subprocess.PIPE,
+    )
+    return result.stdout.decode("utf-8")
+
+
+def gitlinks(repo, commit):
+    links = {}
+    for entry in git(repo, "ls-tree", "-rz", commit).strip("\0").split("\0"):
+        if entry:
+            metadata, path = entry.split("\t", 1)
+            mode, _kind, oid = metadata.split(" ")
+            if mode == "160000":
+                links[path] = oid
+    return links
+
+
+def module_urls(repo, commit):
+    if ".gitmodules" not in git(repo, "ls-tree", "--name-only", commit, "--", ".gitmodules").splitlines():
+        return {}
+    entries = git(repo, "config", "--blob", f"{commit}:.gitmodules", "-z", "--list")
+    options = {}
+    for entry in entries.strip("\0").split("\0"):
+        key, value = entry.split("\n", 1)
+        name, field = key.rsplit(".", 1)
+        if not name.startswith("submodule.") or field not in ("path", "url") or field in options.setdefault(name, {}):
+            raise ValueError(f"{repo.name}: unexpected .gitmodules entry")
+        options[name][field] = value
+    paths = {fields["path"]: fields["url"] for fields in options.values()}
+    if len(paths) != len(options):
+        raise ValueError(f"{repo.name}: duplicate submodule path")
+    return paths
+
+
+def verify_checkout(repo, spec, fetch_modules=False):
+    if not (repo / ".git").exists():
+        raise ValueError(f"{repo.name}: Git checkout missing")
+    if git(repo, "remote", "get-url", "origin").strip() != spec["url"]:
+        raise ValueError(f"{repo.name}: upstream URL differs from lock")
+    if git(repo, "rev-parse", "HEAD").strip() != spec["commit"]:
+        raise ValueError(f"{repo.name}: HEAD differs from lock")
+    if "tag" in spec:
+        tag = "refs/tags/" + spec["tag"] + "^{commit}"
+        if git(repo, "rev-parse", "--verify", tag).strip() != spec["commit"]:
+            raise ValueError(f"{repo.name}: release tag moved")
+    # Read gitlinks and paths from the locked object. Walk each real checkout in
+    # turn so a new nested submodule cannot be fetched without a matching lock.
+    links = gitlinks(repo, spec["commit"])
+    urls = module_urls(repo, spec["commit"])
+    modules = spec.get("submodules", {})
+    if links != {path: pin["commit"] for path, pin in modules.items()} or urls != {
+        path: pin["url"] for path, pin in modules.items()
+    }:
+        raise ValueError(f"{repo.name}: submodule inventory differs from lock")
+    if git(repo, "status", "--porcelain=v1", "--untracked-files=all", "--ignore-submodules=all"):
+        raise ValueError(f"{repo.name}: checkout has local changes")
+    for path, pin in sorted(modules.items()):
+        if fetch_modules:
+            git(repo, "submodule", "update", "--init", "--depth", "1", "--", path)
+        verify_checkout(repo / path, pin, fetch_modules)
+    if git(repo, "status", "--porcelain=v1", "--untracked-files=all", "--ignore-submodules=none"):
+        raise ValueError(f"{repo.name}: worktree or submodule index differs from lock")
+
+
+def load_lock():
+    lock = json.loads((ROOT / "managed/upstream.lock").read_text())
+    if lock["version"] != 1 or set(lock["repositories"]) != {"client", "server"}:
+        raise ValueError("unsupported upstream.lock format")
+    return lock["repositories"]
+
+
+def prepared_targets(repo, spec, patch_root):
+    yield repo, patch_root / "root"
+    for subpath, pin in sorted(spec.get("submodules", {}).items()):
+        yield from prepared_targets(repo / subpath, pin, patch_root / "submodules" / subpath)
+
+
+def apply_patches(repo, spec, patch_root):
+    applied = set()
+    for checkout, directory in prepared_targets(repo, spec, patch_root):
+        for patch in sorted(directory.glob("*.patch")):
+            git(checkout, "apply", "--check", "--index", str(patch))
+            git(checkout, "apply", "--index", str(patch))
+            applied.add(patch)
+        if git(checkout, "diff", "--cached", "--name-only", "--", ".gitmodules"):
+            raise ValueError(f"{checkout.name}: patch modifies submodule configuration")
+        if gitlinks(checkout, git(checkout, "write-tree").strip()) != gitlinks(checkout, git(checkout, "rev-parse", "HEAD").strip()):
+            raise ValueError(f"{checkout.name}: patch modifies locked submodule entries")
+    if applied != set(patch_root.rglob("*.patch")):
+        raise ValueError(f"{repo.name}: patch placed outside a recognized checkout")
+
+
+def prepare(destination, repositories, patched):
+    if destination.exists() or destination.is_symlink():
+        raise ValueError("destination must not already exist")
+    if not destination.parent.is_dir():
+        raise ValueError("destination parent must exist")
+    with tempfile.TemporaryDirectory(prefix=".deskrealm-source-", dir=destination.parent) as scratch:
+        tree = Path(scratch) / "source"
+        tree.mkdir()
+        for name, spec in sorted(repositories.items()):
+            repo = tree / name
+            repo.mkdir()
+            git(repo, "init", "--quiet")
+            git(repo, "remote", "add", "origin", spec["url"])
+            tag = "refs/tags/" + spec["tag"]
+            git(repo, "fetch", "--quiet", "--no-tags", "--depth=1", "origin", f"{tag}:{tag}")
+            git(repo, "checkout", "--quiet", "--detach", spec["commit"])
+            verify_checkout(repo, spec, fetch_modules=True)
+            if patched:
+                apply_patches(repo, spec, ROOT / "managed/patches" / name)
+        tree.rename(destination)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("command", choices=("prepare", "verify"))
+    parser.add_argument("directory", type=Path)
+    parser.add_argument("--apply-patches", action="store_true", help="apply the managed series to a fresh checkout")
+    args = parser.parse_args()
+    if args.apply_patches and args.command != "prepare":
+        parser.error("--apply-patches requires prepare")
+    directory = args.directory.absolute()
+    try:
+        repositories = load_lock()
+        if args.command == "prepare":
+            prepare(directory, repositories, args.apply_patches)
+        else:
+            for name, spec in sorted(repositories.items()):
+                verify_checkout(directory / name, spec)
+        for name, spec in sorted(repositories.items()):
+            print(f"{name} {spec['tag']} {spec['commit']}")
+    except (KeyError, OSError, ValueError, subprocess.CalledProcessError) as err:
+        print(f"managed source: {err}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

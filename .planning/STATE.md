@@ -2,11 +2,11 @@
 gsd_state_version: "1.0"
 current_phase: 3
 current_phase_name: M2 受管连接与策略
-status: ready
-last_updated: "2026-11-22T21:16:04Z"
+status: executing
+last_updated: "2026-11-22T22:37:23Z"
 last_activity: 2026-11-22
-last_activity_desc: M2 已拆分五个开发计划，接续 03-01 Task 1
-state_head: 3a42e9cb11a2d4b09f90584a5ccd902769553a7b
+last_activity_desc: 03-01 Task 1 固定源码和 Go／Rust 签名向量已验证
+state_head: 49d62b7740a88b5c573a78762cfff62cbb0c974e
 progress:
   total_phases: 5
   completed_phases: 2
@@ -27,9 +27,9 @@ See: .planning/PROJECT.md (updated 2026-11-22)
 ## Current Position
 
 Phase: 3 — M2 受管连接与策略
-Plan: 03-01 of 5，接续 Task 1 固定源码、构建入口与协议测试向量。
-Status: Ready to execute
-Last activity: 2026-11-22 — 已核对固定 RustDesk 源码并完成 M2 规划。
+Plan: 03-01 of 5，Task 1 已验证，接续 Task 2 设备运行身份与可信心跳。
+Status: In progress
+Last activity: 2026-11-22 — 源码检出和 Go／Rust 签名向量通过开发门禁。
 
 ## Accumulated Context
 

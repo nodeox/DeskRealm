@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+case "${1:-}" in
+  sources)
+    python3 managed/tests/source_check.py
+    bash scripts/deskrealm-m2-test vectors
+    ;;
+  vectors)
+    go_result=$(go test -count=1 -v ./internal/managedproto -run '^TestSharedSigningVectors$') || {
+      printf '%s\n' "$go_result" >&2
+      exit 1
+    }
+    printf '%s\n' "$go_result"
+    [[ "$go_result" == *'--- PASS: TestSharedSigningVectors ('* ]] || { echo "missing Go signing-vector test" >&2; exit 1; }
+    image=docker.io/library/rust:1.75.0-bookworm@sha256:87f3b2f93b82995443a1a558c234212dafe79cfdc3af956539610560369ddcd0
+    rust_result=$(docker run --rm --volume "$PWD/managed/tests:/fixture:ro" --workdir /fixture/signing \
+      --env CARGO_TARGET_DIR=/tmp/deskrealm-target "$image" \
+      cargo test --locked --lib -- tests::shared_signing_vectors --exact) || {
+      printf '%s\n' "$rust_result" >&2
+      exit 1
+    }
+    printf '%s\n' "$rust_result"
+    [[ "$rust_result" == *'test tests::shared_signing_vectors ... ok'* ]] || { echo "missing Rust signing-vector test" >&2; exit 1; }
+    ;;
+  *) echo "usage: $0 sources|vectors" >&2; exit 2 ;;
+esac
