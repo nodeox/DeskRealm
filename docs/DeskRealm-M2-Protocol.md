@@ -28,6 +28,7 @@ bash scripts/deskrealm-m2-test sources
 | `02` 用户与设备绑定 | 主控设备 | 组织 UUID、设备 UUID、用户 UUID、绑定 UUID、中心随机数、中心签发的不透明登录流程标识的 SHA-256、设备密钥版本、挑战到期 |
 | `03` 会话授权 | 中心 | `kid`（1–32 字节）、组织 UUID、会话 UUID、凭据 UUID、主控用户 UUID、主控设备 UUID、受控设备 UUID、主控当前公钥 SHA-256、受控当前公钥 SHA-256、受控端已应用策略修订序号、一字节操作掩码、一字节确认模式、用途标识（1–64 字节）、签发时间、到期时间 |
 | `04` 连接证明 | 连接一方 | 一字节证明方角色、授权摘要、会话 UUID、连接 UUID、本次加密通道绑定摘要、主控随机数、受控随机数、一字节路径 |
+| `05` 策略应用回执 | 接收策略的设备 | 组织 UUID、设备 UUID、交付 UUID、策略版本、载荷 SHA-256、设备密钥版本、一字节应用结果、一字节失败字段掩码 |
 
 操作掩码从最低位开始依次为画面、键鼠、音频、剪贴板、文件传输，至少请求一项。确认模式 `01` 为有人值守，`02` 为经批准的无人值守。连接证明角色 `01` 为主控，`02` 为受控。路径 `01` 为实际直连，`02` 为实际中继，未知路径在证明前保持未确认。两端随机数必须独立。授权摘要为验证通过后同一签名帧与 64 字节签名直接拼接的 SHA-256。通道绑定摘要来自本次已认证加密连接的实际协商，具体传输适配和一致性证明由 03-04 交付。
 
@@ -41,7 +42,7 @@ bash scripts/deskrealm-m2-test sources
 | 状态冲突 | 授权同键异载荷或版本已变更，要求按入口重取。身份挑战的重放返回统一认证失败。 |
 | 中心不可用 | 无法安全签发、核销或续租，保持拒绝新会话及现有租约的截止时间。 |
 
-协议夹具 [vectors.json](../managed/tests/vectors.json) 包含设备挑战、用户绑定、中心授权、直连主控证明和中继受控证明的签名，以及无效格式用例。所有测试种子仅供夹具使用。Go 使用标准库 Ed25519，Rust 测试使用与上游同版本的 `sodiumoxide`，测试和环境均通过锁文件或镜像摘要固定。运行 `bash scripts/deskrealm-m2-test vectors` 可单独复跑。端点实际加密通道、准入、操作执行与租约回执将在后续计划取证。
+协议夹具 [vectors.json](../managed/tests/vectors.json) 包含设备挑战、用户绑定、中心授权、直连主控证明、中继受控证明和策略回执的签名，以及无效格式用例。所有测试种子仅供夹具使用。Go 使用标准库 Ed25519，Rust 测试使用与上游同版本的 `sodiumoxide`，测试和环境均通过锁文件或镜像摘要固定。运行 `bash scripts/deskrealm-m2-test vectors` 可单独复跑。端点实际加密通道、准入、操作执行与租约回执将在后续计划取证。
 
 ## 设备运行身份与主控绑定
 
@@ -79,6 +80,29 @@ bash scripts/deskrealm-m2-test sources
 预览目标可选 `target_device_id`、`target_rustdesk_id` 或 `book_id` 与 `entry_id`。通讯录入口按被模拟用户实时复查册权限和目标设备可见性。连接判定还检查用户活跃、两端已批准、当前密钥认证心跳及协议版本。任一匹配拒绝优先。允许时须有一条已发布规则和它引用的同版角色完整覆盖所申请动作，后台管理员身份不会跳过 ACL。预览及规则变更写入审计。
 
 当前预览只计算 ACL 结果。后续会话签发以已认证主控主体调用同一个事务评估函数，并结合设备实际应用策略、可信发布和本地确认。
+
+## 设备策略、灰度与回执
+
+平台管理员发布不可变策略版本。分配优先级为设备、归属用户、主设备组、组织默认。一个范围保留一个分配 ID 和递增修订。灰度按 `SHA-256(分配 UUID || 设备 UUID)` 前四字节的大端无符号整数除以 100 的余数分桶。小于灰度百分比的设备接收灰度版本，其余使用本范围的基线。基线为空时继续查找低优先级范围。重复应用相同分配或灰度参数时，内容未变的设备保留交付 ID。回滚生成新修订并记录来源和目标修订，受影响设备重新回执。
+
+| API | 请求与结果 |
+| --- | --- |
+| `GET /v1/admin/strategies` | 列出发布版本。可用 `before` 按策略版本分页。 |
+| `POST /v1/admin/strategies` | 提交 `name`、`allowed_actions` 和可选 `unattended_purposes`，返回不可变 `policy_version` 和载荷摘要。空动作列表可表示禁止全部动作。 |
+| `GET /v1/admin/strategies/assignments` | 列出分配和当前修订。可用 `after` 按 ID 分页。 |
+| `GET /v1/admin/strategies/assignments/{id}` | 返回当前修订，使用 `?revision=N` 查历史。 |
+| `POST /v1/admin/strategies/assignments` | 提交 `scope` 和 `object_id`，组织范围省略后者。指定基线 `policy_version`，或指定 `canary_version` 及 1 至 99 的 `canary_percent`。 |
+| `POST /v1/admin/strategies/assignments/{id}` | 提交当前 `revision` 和完整分配参数。两种策略版本均为空时撤销本范围分配。 |
+| `POST /v1/admin/strategies/assignments/{id}/rollback` | 提交当前 `revision` 与 `rollback_to_revision`。版本冲突返回 409。 |
+| `POST /v1/admin/devices/{id}/policy-owner` | 提交 `device_version` 和 `owner_user_id`。归属账号应启用，空字符串清除归属。旧设备初始无归属。 |
+| `GET /v1/admin/devices/{id}/policy` | 按设备查看权限返回期望和已应用版本、当前回执状态、失败字段及中心接收时间。 |
+| `POST /v1/admin/devices/{id}/policy-retry` | 提交当前失败的 `delivery_id`，只重新交付该设备。 |
+| `GET /v1/managed/devices/{id}/policy` | 使用该设备的 `drd_` Bearer。返回 `policy` 对象或空值。对象包含交付、组织、设备、密钥版本、策略和载荷字段。 |
+| `POST /v1/managed/devices/policy-receipts` | 使用同一设备的 `drd_` Bearer，提交 `device_id`、`delivery_id`、`policy_version`、`payload_sha256`、`result`、`failed_fields` 和签名。 |
+
+策略格式版本 1 的载荷摘要为 `SHA-256`，输入依次为 ASCII `DR-M2-policy-v1`、零字节、一字节操作掩码、字典序排序的无人值守用途。每个用途以零字节结束，用途遵循协议标识格式。策略标题和显示字段不参与摘要。含无人值守用途的版本只能分配到明确指定的设备。
+
+`05` 帧的应用结果 `01` 表示 `applied`，失败字段掩码为零。`02` 表示 `failed`，掩码按从低到高依次记录 `allowed_actions`、`unattended_purposes`、`schema_version`，至少一位有效。签名以当前登记设备密钥生成。中心只接受当前交付的身份、版本和摘要。重复同一结果可重试，过期或冲突回执返回 409。失败回执保留上一已应用版本。会话判定所用策略只取当前交付且经同一密钥版本确认成功的能力，密钥轮换会重新交付。
 
 ## 原生构建入口与证据
 

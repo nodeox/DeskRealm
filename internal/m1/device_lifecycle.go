@@ -140,6 +140,14 @@ func applyDeviceChange(ctx context.Context, tx pgx.Tx, who actor, d *device, act
 	if err := revokePendingRotations(ctx, tx, d.ID); err != nil {
 		return err
 	}
+	if action == "move" || action == "retire" {
+		if err := refreshManagedPolicyTargets(ctx, tx, who.Organization, d.ID, false); err != nil {
+			return err
+		}
+		if err := tx.QueryRow(ctx, "SELECT expected_policy_version FROM devices WHERE id=$1", d.ID).Scan(&d.ExpectedPolicy); err != nil {
+			return err
+		}
+	}
 	if action == "move" {
 		_, err := addAuditEvent(ctx, tx, auditEvent{OrganizationID: who.Organization, ActorID: who.ID,
 			ResourceID: d.ID, DeviceGroupID: originalGroup, Action: event, Result: "success", Reason: reason})

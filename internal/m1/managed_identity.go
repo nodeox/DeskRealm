@@ -95,20 +95,21 @@ func (d runtimeDevice) credential(ctx context.Context, tx pgx.Tx, hash []byte) (
 	return protocol, expires, err
 }
 
+func managedFrameUUID(value string) []byte {
+	out, _ := hex.DecodeString(strings.ReplaceAll(value, "-", ""))
+	return out
+}
+
 func challengeProof(c identityChallenge) ([]byte, error) {
-	uuid := func(value string) []byte {
-		out, _ := hex.DecodeString(strings.ReplaceAll(value, "-", ""))
-		return out
-	}
 	nonce, _ := base64.RawURLEncoding.Strict().DecodeString(c.Nonce)
 	epoch := binary.BigEndian.AppendUint64(nil, uint64(c.KeyEpoch))
 	expiry := binary.BigEndian.AppendUint64(nil, uint64(c.ExpiresMS))
 	if c.User != "" {
 		flow, _ := base64.RawURLEncoding.Strict().DecodeString(c.Flow)
-		return managedproto.Encode(managedproto.UserBinding, uuid(c.Organization), uuid(c.Device), uuid(c.User),
-			uuid(c.ID), nonce, digest(string(flow)), epoch, expiry)
+		return managedproto.Encode(managedproto.UserBinding, managedFrameUUID(c.Organization), managedFrameUUID(c.Device),
+			managedFrameUUID(c.User), managedFrameUUID(c.ID), nonce, digest(string(flow)), epoch, expiry)
 	}
-	return managedproto.Encode(managedproto.DeviceChallenge, uuid(c.Organization), uuid(c.Device), uuid(c.ID),
+	return managedproto.Encode(managedproto.DeviceChallenge, managedFrameUUID(c.Organization), managedFrameUUID(c.Device), managedFrameUUID(c.ID),
 		nonce, epoch, expiry, binary.BigEndian.AppendUint16(nil, c.Protocol))
 }
 

@@ -111,6 +111,13 @@ func NewHandler(store Store, origin *url.URL, web fs.FS, config ...AuthConfig) h
 	mux.HandleFunc("POST /v1/admin/access-rules/preview", api.previewConnectionRule)
 	mux.HandleFunc("POST /v1/admin/access-rules/{id}", api.saveConnectionRule)
 	mux.HandleFunc("POST /v1/admin/access-rules/{id}/{change}", api.changeConnectionRule)
+	mux.HandleFunc("GET /v1/admin/strategies", api.listManagedPolicies)
+	mux.HandleFunc("POST /v1/admin/strategies", api.publishManagedPolicy)
+	mux.HandleFunc("GET /v1/admin/strategies/assignments", api.readManagedAssignments)
+	mux.HandleFunc("GET /v1/admin/strategies/assignments/{id}", api.readManagedAssignments)
+	mux.HandleFunc("POST /v1/admin/strategies/assignments", api.updateManagedAssignment)
+	mux.HandleFunc("POST /v1/admin/strategies/assignments/{id}", api.updateManagedAssignment)
+	mux.HandleFunc("POST /v1/admin/strategies/assignments/{id}/rollback", api.rollbackManagedAssignment)
 	mux.HandleFunc("GET /v1/admin/device-groups", api.listDeviceGroups)
 	mux.HandleFunc("POST /v1/admin/device-groups", api.createDeviceGroup)
 	mux.HandleFunc("GET /v1/admin/device-groups/{id}/grants", api.deviceGroupGrants)
@@ -119,6 +126,9 @@ func NewHandler(store Store, origin *url.URL, web fs.FS, config ...AuthConfig) h
 	mux.HandleFunc("GET /v1/admin/devices", api.listOrGetDevices)
 	mux.HandleFunc("GET /v1/admin/devices/{id}", api.listOrGetDevices)
 	mux.HandleFunc("GET /v1/admin/devices/{id}/history", api.deviceHistory)
+	mux.HandleFunc("GET /v1/admin/devices/{id}/policy", api.devicePolicyStatus)
+	mux.HandleFunc("POST /v1/admin/devices/{id}/policy-owner", api.changePolicyOwner)
+	mux.HandleFunc("POST /v1/admin/devices/{id}/policy-retry", api.retryDevicePolicy)
 	mux.HandleFunc("POST /v1/admin/devices/{id}/{action}", api.decideDevice)
 	mux.HandleFunc("POST /v1/admin/devices/{id}/lifecycle/{change}", api.changeDevice)
 	mux.HandleFunc("POST /v1/admin/devices/{id}/key-rotation", api.issueDeviceRotation)
@@ -129,6 +139,8 @@ func NewHandler(store Store, origin *url.URL, web fs.FS, config ...AuthConfig) h
 	mux.HandleFunc("POST /v1/managed/devices/challenge", api.managedChallenge)
 	mux.HandleFunc("POST /v1/managed/devices/complete", api.managedComplete)
 	mux.HandleFunc("POST /v1/managed/devices/heartbeat", api.managedHeartbeat)
+	mux.HandleFunc("GET /v1/managed/devices/{id}/policy", api.getRuntimePolicy)
+	mux.HandleFunc("POST /v1/managed/devices/policy-receipts", api.receiveRuntimePolicy)
 	mux.HandleFunc("POST /v1/managed/users/challenge", api.managedChallenge)
 	mux.HandleFunc("POST /v1/managed/users/complete", api.managedComplete)
 	mux.HandleFunc("GET /v1/managed/users/session", api.managedUserSession)
@@ -171,7 +183,8 @@ func NewHandler(store Store, origin *url.URL, web fs.FS, config ...AuthConfig) h
 			if r.Method == http.MethodPost {
 				origin := r.Header.Get("Origin")
 				switch r.URL.Path {
-				case "/v1/managed/devices/challenge", "/v1/managed/devices/complete", "/v1/managed/devices/heartbeat":
+				case "/v1/managed/devices/challenge", "/v1/managed/devices/complete", "/v1/managed/devices/heartbeat",
+					"/v1/managed/devices/policy-receipts":
 					if len(r.Header.Values("Cookie")) != 0 || (origin != "" && origin != api.origin) {
 						writeError(w, http.StatusForbidden, "origin_denied")
 						return
@@ -252,11 +265,11 @@ func failure(w http.ResponseWriter, operation string, err error) {
 		writeError(w, http.StatusConflict, err.Error())
 	case errors.Is(err, errControlRoleConflict), errors.Is(err, errControlRoleVersion):
 		writeError(w, http.StatusConflict, err.Error())
-	case errors.Is(err, errConnectionInput):
+	case errors.Is(err, errConnectionInput), errors.Is(err, errPolicyInput):
 		writeError(w, http.StatusBadRequest, err.Error())
-	case errors.Is(err, errConnectionMissing):
+	case errors.Is(err, errConnectionMissing), errors.Is(err, errPolicyMissing):
 		writeError(w, http.StatusNotFound, err.Error())
-	case errors.Is(err, errConnectionStale):
+	case errors.Is(err, errConnectionStale), errors.Is(err, errPolicyStale):
 		writeError(w, http.StatusConflict, err.Error())
 	case errors.Is(err, errAuditInvalid), errors.Is(err, errTaskInvalid):
 		writeError(w, http.StatusBadRequest, err.Error())

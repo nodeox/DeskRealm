@@ -190,6 +190,9 @@ func (s Store) completeDeviceRotation(ctx context.Context, in rotationRequest, k
 			hash, key, version); err != nil {
 			return err
 		}
+		if err := refreshManagedPolicyTargets(ctx, tx, org, in.DeviceID, false); err != nil {
+			return err
+		}
 
 		event := "device.key_rotated"
 		if restore {

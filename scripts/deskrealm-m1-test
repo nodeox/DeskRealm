@@ -29,11 +29,12 @@ case "$mode" in
   overview) tests=("${overview[@]}") ;;
   managed-identity) tests=(TestManagedDeviceIdentityPostgres TestManagedControllerBindingPostgres TestManagedSigningKeyConfig) ;;
   connection-rules) tests=(TestConnectionRuleEvaluationPostgres TestConnectionRuleRevisionsPostgres) ;;
+  managed-policies) tests=(TestManagedPolicyAssignmentPostgres TestManagedPolicyReceiptsPostgres) ;;
   all) tests=("${bootstrap[@]}" "${identity[@]}" "${federation[@]}" "${authorization[@]}" "${enrollment[@]}" "${lifecycle[@]}" "${addressbooks[@]}" "${audit[@]}" "${tasks[@]}" "${overview[@]}") ;;
   bootstrap-browser) browser_suite=bootstrap; browser_test='首次管理员初始化、成员停用、刷新和退出' ;;
   resources-browser) browser_suite=resources; browser_test='共享通讯录、审计和任务中心按实际授权与结果运行' ;;
   roles-browser) browser_suite=roles; browser_test='四类角色的概览、入口和操作遵守真实授权' ;;
-  *) echo "usage: $0 all|bootstrap-api|user-status|identity-lifecycle|identity-federation|management-scopes|authorization|enrollment|device-lifecycle|addressbooks|audit|tasks|overview|managed-identity|connection-rules|bootstrap-browser|resources-browser|roles-browser" >&2; exit 2 ;;
+  *) echo "usage: $0 all|bootstrap-api|user-status|identity-lifecycle|identity-federation|management-scopes|authorization|enrollment|device-lifecycle|addressbooks|audit|tasks|overview|managed-identity|connection-rules|managed-policies|bootstrap-browser|resources-browser|roles-browser" >&2; exit 2 ;;
 esac
 
 scratch=$(mktemp -d "${TMPDIR:-/tmp}/deskrealm-m1.XXXXXX")

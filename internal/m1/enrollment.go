@@ -293,6 +293,9 @@ func (s Store) completeEnrollment(ctx context.Context, in enrollmentRequest, key
 		if err != nil {
 			return err
 		}
+		if err := refreshManagedPolicyTargets(ctx, tx, e.Organization, out.DeviceID, false); err != nil {
+			return err
+		}
 		_, err = addAuditEvent(ctx, tx, auditEvent{OrganizationID: e.Organization, ResourceID: out.DeviceID,
 			TaskID: taskID, DeviceGroupID: e.GroupID, Action: "device.enrollment_pending", Result: "success"})
 		return err

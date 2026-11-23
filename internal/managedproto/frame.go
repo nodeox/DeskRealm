@@ -15,6 +15,7 @@ const (
 	UserBinding     Kind = 2
 	SessionGrant    Kind = 3
 	ConnectionProof Kind = 4
+	PolicyReceipt   Kind = 5
 )
 
 const prefix = "DR-M2\x00\x01"
@@ -34,6 +35,7 @@ var fieldWidths = map[Kind][]int{
 	UserBinding:     {uuid, uuid, uuid, uuid, digest, digest, word, word},
 	SessionGrant:    {0, uuid, uuid, uuid, uuid, uuid, uuid, digest, digest, word, 1, 1, 0, word, word},
 	ConnectionProof: {1, digest, uuid, uuid, digest, digest, digest, 1},
+	PolicyReceipt:   {uuid, uuid, uuid, word, digest, word, 1, 1},
 }
 
 // Encode produces the exact signed bytes. Frame validation checks the wire
@@ -97,6 +99,9 @@ func validValues(kind Kind, f [][]byte) bool {
 			(f[11][0] == 1 || f[11][0] == 2) && positive(f[13]) && positive(f[14]) && expires > issued && expires-issued <= 60_000
 	case ConnectionProof:
 		return (f[0][0] == 1 || f[0][0] == 2) && (f[7][0] == 1 || f[7][0] == 2) && !bytes.Equal(f[5], f[6])
+	case PolicyReceipt:
+		return positive(f[3]) && positive(f[5]) &&
+			((f[6][0] == 1 && f[7][0] == 0) || (f[6][0] == 2 && f[7][0] > 0 && f[7][0] <= 7))
 	default:
 		return false
 	}
