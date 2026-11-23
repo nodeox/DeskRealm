@@ -30,6 +30,19 @@ class FlutterVersionTests(unittest.TestCase):
         with patch.object(build.subprocess, "check_output", return_value=output):
             self.assertEqual(build.flutter_version(), report)
 
+    def test_selects_bash_from_git_for_windows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            git_root = Path(tmp) / "Git"
+            (git_root / "bin").mkdir(parents=True)
+            (git_root / "cmd").mkdir()
+            git = git_root / "cmd" / "git.exe"
+            bash = git_root / "bin" / "bash.exe"
+            git.touch()
+            bash.touch()
+            with patch.object(build.platform, "system", return_value="Windows"):
+                with patch.object(build.shutil, "which", return_value=str(git)):
+                    self.assertEqual(build.flutter_patch_shell(), bash.resolve())
+
 
 class WindowsEvidenceTests(unittest.TestCase):
     def setUp(self):

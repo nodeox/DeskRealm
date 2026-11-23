@@ -154,9 +154,22 @@ def flutter_version():
     raise ValueError("Flutter did not report its framework version and engine revision")
 
 
+def flutter_patch_shell():
+    if platform.system() != "Windows":
+        return "bash"
+    git_binary = shutil.which("git")
+    require(git_binary, "Git for Windows is required for Flutter source patches")
+    # Windows system32 can put the WSL launcher ahead of Git Bash on PATH.
+    for directory in Path(git_binary).resolve().parents:
+        bash = directory / "bin" / "bash.exe"
+        if bash.is_file():
+            return bash
+    raise ValueError("Git for Windows does not provide bin/bash.exe")
+
+
 def apply_flutter_source(client, target):
     if TARGETS[target]["arch"] == "arm64":
-        subprocess.run(["bash", ".github/patches/apply_flutter_3.44_source_patches.sh"],
+        subprocess.run([flutter_patch_shell(), ".github/patches/apply_flutter_3.44_source_patches.sh"],
                        cwd=client, check=True)
 
 
