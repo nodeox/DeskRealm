@@ -79,9 +79,10 @@ func port(public, target uint16, protocol, host string) composePort {
 
 func renderCompose(d deployment) ([]byte, error) {
 	c := d.Config
+	images := d.Center.runtimeImages(c.Images)
 	centerImage := []string{"/usr/local/bin/deskrealm"}
 	db := composeService{
-		Image:       c.Images.PostgreSQL,
+		Image:       images.PostgreSQL,
 		Environment: map[string]string{"POSTGRES_DB": "deskrealm", "POSTGRES_USER": "postgres"},
 		EnvFile:     []string{"./secrets/postgres.env"},
 		Volumes: []composeBind{
@@ -96,13 +97,13 @@ func renderCompose(d deployment) ([]byte, error) {
 		Restart: "unless-stopped",
 	}
 	migrate := composeService{
-		Image: c.Images.Center, User: d.RunAs, Entrypoint: centerImage, Command: []string{"migrate"},
+		Image: images.Center, User: d.RunAs, Entrypoint: centerImage, Command: []string{"migrate"},
 		EnvFile:   []string{"./secrets/migrate.env"},
 		Networks:  map[string]composeAttachment{"database": {}},
 		DependsOn: map[string]composeDependency{"database": {Condition: "service_healthy"}},
 	}
 	center := composeService{
-		Image: c.Images.Center, User: d.RunAs, Entrypoint: centerImage, Command: []string{"serve"},
+		Image: images.Center, User: d.RunAs, Entrypoint: centerImage, Command: []string{"serve"},
 		Environment: map[string]string{
 			"DESKREALM_PUBLIC_ORIGIN":            c.PublicOrigin,
 			"DESKREALM_HTTP_ADDR":                "0.0.0.0:8080",
@@ -133,7 +134,7 @@ func renderCompose(d deployment) ([]byte, error) {
 		}
 	}
 	rendezvous := composeService{
-		Image: c.Images.Rendezvous, User: d.RunAs, Entrypoint: []string{"/usr/local/bin/hbbs"},
+		Image: images.Rendezvous, User: d.RunAs, Entrypoint: []string{"/usr/local/bin/hbbs"},
 		Command: []string{"-k", "_"}, WorkingDir: "/var/lib/deskrealm-rendezvous",
 		Environment: map[string]string{
 			"DESKREALM_MANAGED_MODE":              "1",

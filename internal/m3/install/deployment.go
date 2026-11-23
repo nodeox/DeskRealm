@@ -29,16 +29,17 @@ type deployment struct {
 }
 
 type publicDeployment struct {
-	ID                  string `json:"deployment_id"`
-	Project             string `json:"compose_project"`
-	ComposeFile         string `json:"compose_file"`
-	PublicOrigin        string `json:"public_origin"`
-	IDServer            string `json:"id_server"`
-	RendezvousKey       string `json:"rendezvous_public_key"`
-	RendezvousKeySHA256 string `json:"rendezvous_public_key_sha256"`
-	SigningKeyID        string `json:"signing_key_id"`
-	SigningKey          string `json:"signing_public_key"`
-	SigningKeySHA256    string `json:"signing_public_key_sha256"`
+	ID                  string          `json:"deployment_id"`
+	Project             string          `json:"compose_project"`
+	ComposeFile         string          `json:"compose_file"`
+	PublicOrigin        string          `json:"public_origin"`
+	IDServer            string          `json:"id_server"`
+	RendezvousKey       string          `json:"rendezvous_public_key"`
+	RendezvousKeySHA256 string          `json:"rendezvous_public_key_sha256"`
+	SigningKeyID        string          `json:"signing_key_id"`
+	SigningKey          string          `json:"signing_public_key"`
+	SigningKeySHA256    string          `json:"signing_public_key_sha256"`
+	Offline             offlineIdentity `json:"offline,omitzero"`
 }
 
 var requiredFiles = []string{
@@ -130,6 +131,13 @@ func newDeployment(c config) (deployment, map[string][]byte, error) {
 		return d, nil, err
 	}
 	d.Center = describeDeployment(c, identifier, routePublic, signingPublic)
+	if c.Offline != (offlineConfig{}) {
+		bundle, err := readOfflineBundle(c)
+		if err != nil {
+			return d, nil, err
+		}
+		d.Center.Offline = bundle.identity
+	}
 	totp := base64.StdEncoding.EncodeToString(material[48:80])
 	rendezvousToken := base64.RawURLEncoding.EncodeToString(material[80:112])
 	dbPasswords := map[string]string{
@@ -209,7 +217,12 @@ func readPrepared(c config) (publicDeployment, error) {
 		return failed("secrets/signing.seed")
 	}
 	signing := ed25519.NewKeyFromSeed(seed).Public().(ed25519.PublicKey)
-	if d.Center != describeDeployment(c, d.Center.ID, public, signing) {
+	expected := describeDeployment(c, d.Center.ID, public, signing)
+	if !d.Center.Offline.valid(c.Offline != (offlineConfig{})) {
+		return failed(manifestName)
+	}
+	expected.Offline = d.Center.Offline
+	if d.Center != expected {
 		return failed(manifestName)
 	}
 	rendered, err := renderCompose(d)

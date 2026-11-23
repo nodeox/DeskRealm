@@ -1,5 +1,6 @@
 """Build and exercise the center installation in a disposable Docker project."""
 
+import argparse
 import base64
 from contextlib import ExitStack
 import hashlib
@@ -46,7 +47,7 @@ def available_ports():
         return ports
 
 
-def publish_images(scratch, resources):
+def publish_images(scratch, resources, offline):
     architecture = output("docker", "version", "--format", "{{.Server.Os}}/{{.Server.Arch}}")
     if architecture not in {"linux/arm64", "linux/amd64"}:
         raise RuntimeError(f"unsupported development engine: {architecture}")
@@ -73,8 +74,9 @@ def publish_images(scratch, resources):
         repository = f"{address}/deskrealm-{name}"
         tag = f"{repository}:dev"
         resources.callback(cleanup, "docker", "image", "rm", tag)
+        labels = ("--label", f"org.deskrealm.test.offline={scratch.name}") if offline else ()
         run("docker", "build", "--quiet", "--platform", architecture,
-            "--target", name, "--tag", tag,
+            "--target", name, "--tag", tag, *labels,
             "--file", ROOT / "internal/m3/install/runtime.Dockerfile", context)
         push = output("docker", "push", tag)
         digest = re.search(r"^dev: digest: (sha256:[a-f0-9]{64}) size:", push, re.MULTILINE)
@@ -83,7 +85,49 @@ def publish_images(scratch, resources):
         references[name] = f"{repository}@{digest[1]}"
         resources.callback(cleanup, "docker", "image", "rm", references[name])
         print(f"Built {name} for {architecture} at {digest[1]}", flush=True)
-    return references
+    return references, registry
+
+
+def prepare_offline_bundle(scratch, images, registry, resources):
+    media = scratch / "bundle"
+    media.mkdir()
+    manifest = media / "manifest.json"
+    archive = media / "images.tar"
+    key, public = scratch / "signing-key.pem", scratch / "trusted-key.pem"
+    signature = media / "manifest.sig"
+    platform = output("docker", "version", "--format", "{{.Server.Os}}/{{.Server.Arch}}")
+    bindings = {}
+    for role, reference in images.items():
+        if role != "postgresql":
+            run("docker", "pull", "--platform", platform, reference)
+        image_id = output("docker", "image", "inspect", "--format", "{{.Id}}", reference)
+        bindings[role] = {"reference": reference, "image_id": image_id}
+        if role != "postgresql":
+            resources.callback(cleanup, "docker", "image", "rm", image_id)
+    run("docker", "image", "save", "--output", archive, *(entry["image_id"] for entry in bindings.values()))
+    digest = hashlib.sha256()
+    with archive.open("rb") as source:
+        for block in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(block)
+    manifest.write_text(json.dumps({
+        "version": 1, "platform": platform, "images": bindings,
+        "archive": {"file": archive.name, "sha256": digest.hexdigest(), "bytes": archive.stat().st_size},
+    }))
+    run("openssl", "genpkey", "-algorithm", "ED25519", "-out", key)
+    run("openssl", "pkey", "-in", key, "-pubout", "-out", public)
+    run("openssl", "pkeyutl", "-sign", "-rawin", "-inkey", key, "-in", manifest, "-out", signature)
+    run("docker", "rm", "--force", "--volumes", registry)
+    for role in ("center", "rendezvous"):
+        entry = bindings[role]
+        reference = entry["reference"]
+        cleanup("docker", "image", "rm", reference)
+        cleanup("docker", "image", "rm", reference.split("@")[0] + ":dev")
+        cleanup("docker", "image", "rm", entry["image_id"])
+        absent = subprocess.run(["docker", "image", "inspect", entry["image_id"]], capture_output=True)
+        if absent.returncode == 0:
+            raise RuntimeError(f"{role} image unexpectedly remains cached before offline installation")
+    print("Signed three pinned images and stopped their development registry before installer import.", flush=True)
+    return {"manifest": str(manifest), "signature": str(signature), "trusted_public_key": str(public)}
 
 
 def https_status(origin, port, ca):
@@ -140,21 +184,24 @@ def browser_bootstrap(scratch, origin, certificate, ticket):
         raise RuntimeError("required Chromium bootstrap regression did not pass")
 
 
-def exercise(scratch, images, resources):
+def exercise(scratch, images, resources, offline=None):
     api_port, check_port, route_port = available_ports()
     origin = f"https://{HOST}:{api_port}"
     ca, _ = tls_context(scratch, f"DNS:{HOST}")
     certificate, private_key = scratch / "server.pem", scratch / "server.key"
     installation = scratch / "deployment"
     config = scratch / "center.json"
-    config.write_text(json.dumps({
+    configuration = {
         "version": 1, "directory": str(installation), "public_origin": origin,
         "id_server": f"{LOOPBACK}:{route_port}",
         "https": {"mode": "provided", "certificate": str(certificate),
                   "private_key": str(private_key), "ca_certificate": str(ca)},
         "images": images,
         "ports": {"rendezvous": route_port, "rendezvous_check": check_port, "bind_host": LOOPBACK},
-    }))
+    }
+    if offline:
+        configuration["offline"] = offline
+    config.write_text(json.dumps(configuration))
     installer = scratch / "deskrealm-install"
     run("go", "build", "-o", installer, "./cmd/deskrealm-install")
     flags = ("--config", config)
@@ -164,11 +211,26 @@ def exercise(scratch, images, resources):
     resources.callback(cleanup, *compose, "down", "--volumes", "--remove-orphans")
     if json.loads(output(installer, "status", *flags))["phase"] != "prepared":
         raise RuntimeError("status did not identify a prepared deployment")
+    if offline:
+        archive = Path(offline["manifest"]).parent / "images.tar"
+        with archive.open("r+b") as file:
+            first = file.read(1)
+            file.seek(0)
+            file.write(bytes([first[0] ^ 1]))
+        try:
+            assert_install_refusal(installer, flags, compose, "archive SHA-256")
+        finally:
+            with archive.open("r+b") as file:
+                file.write(first)
     installed = json.loads(output(installer, "install", *flags))
     if installed["phase"] != "ready" or installed["initialized"] is not False:
         raise RuntimeError("installation did not reach ready before issuing a ticket")
     if any(installed.get(key) != value for key, value in prepared.items()):
         raise RuntimeError("starting services changed the persisted deployment identity")
+    if offline:
+        media = Path(offline["manifest"]).parent
+        media.rename(media.with_name("detached-bundle"))
+        print("Signed archive imported by image ID; subsequent restarts use the cache with the media detached.", flush=True)
     wait_for_center(origin, api_port, ca, initialized=False)
     run(*compose, "exec", "-T", "rendezvous", "getent", "ahostsv4", HOST, stdout=subprocess.DEVNULL)
     print("Compose migration, CA-verified HTTPS and native hbbs readiness passed.", flush=True)
@@ -203,7 +265,7 @@ def exercise(scratch, images, resources):
     original_record = record.read_bytes()
     try:
         record.write_text(f"1 {prepared['deployment_id']} 1\n")
-        assert_storage_refusal(installer, flags, compose, "different cluster")
+        assert_install_refusal(installer, flags, compose, "different cluster")
     finally:
         record.write_bytes(original_record)
 
@@ -212,18 +274,18 @@ def exercise(scratch, images, resources):
     database.rename(original)
     try:
         database.mkdir(mode=0o700)
-        assert_storage_refusal(installer, flags, compose, "missing or incomplete")
+        assert_install_refusal(installer, flags, compose, "missing or incomplete")
     finally:
         database.rmdir()
         original.rename(database)
     print("A missing database or mismatched cluster ID was rejected before starting services.", flush=True)
 
 
-def assert_storage_refusal(installer, flags, compose, reason):
+def assert_install_refusal(installer, flags, compose, reason):
     failed = subprocess.run([installer, "install", *flags], capture_output=True, text=True)
     if (not failed.returncode or failed.stdout or reason not in failed.stderr or
             output(*compose, "ps", "--all", "--quiet")):
-        raise RuntimeError(f"installer did not stop on PostgreSQL storage conflict: {reason}")
+        raise RuntimeError(f"installer did not stop at expected failed check: {reason}")
 
 
 def assert_initialized(installer, flags, prepared):
@@ -263,9 +325,14 @@ def interrupted_rebuild(scratch, installer, flags, ca):
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--offline", action="store_true")
+    options = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix="deskrealm-center-", dir="/tmp") as directory, ExitStack() as resources:
         scratch = Path(directory).resolve()
-        exercise(scratch, publish_images(scratch, resources), resources)
+        images, registry = publish_images(scratch, resources, options.offline)
+        offline = prepare_offline_bundle(scratch, images, registry, resources) if options.offline else None
+        exercise(scratch, images, resources, offline)
 
 
 if __name__ == "__main__":

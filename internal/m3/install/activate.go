@@ -62,10 +62,11 @@ func installCenter(ctx context.Context, c config, run dockerRunner) (centerStatu
 	if err != nil {
 		return centerStatus{}, err
 	}
-	if err := ensureImages(ctx, c.Images, platform, run); err != nil {
+	if err := ensureImages(ctx, c, center, platform, recordedCluster != "", run); err != nil {
 		return centerStatus{}, err
 	}
-	cluster, empty, err := databaseStorage(ctx, c, run)
+	postgresImage := center.runtimeImages(c.Images).PostgreSQL
+	cluster, empty, err := databaseStorage(ctx, c.Directory, postgresImage, run)
 	if err != nil {
 		return centerStatus{}, err
 	}
@@ -82,7 +83,7 @@ func installCenter(ctx context.Context, c config, run dockerRunner) (centerStatu
 		if err := startServices(ctx, run, center, "database"); err != nil {
 			return centerStatus{}, err
 		}
-		actual, _, err := databaseStorage(ctx, c, run)
+		actual, _, err := databaseStorage(ctx, c.Directory, postgresImage, run)
 		if err != nil || actual == "" || (cluster != "" && cluster != actual) {
 			return centerStatus{}, errors.New("PostgreSQL started without a verified persistent data directory")
 		}
@@ -116,7 +117,11 @@ func startServices(ctx context.Context, run dockerRunner, center publicDeploymen
 	return errors.New("center service startup failed; use status to identify the failed migration, center or rendezvous service")
 }
 
-func ensureImages(ctx context.Context, images imageConfig, platform string, run dockerRunner) error {
+func ensureImages(ctx context.Context, c config, center publicDeployment, platform string, activated bool, run dockerRunner) error {
+	if center.Offline != (offlineIdentity{}) {
+		return ensureOfflineImages(ctx, c, center.Offline, platform, activated, run)
+	}
+	images := c.Images
 	for _, image := range []struct{ service, ref string }{
 		{"database", images.PostgreSQL}, {"center", images.Center}, {"rendezvous", images.Rendezvous},
 	} {
@@ -171,10 +176,10 @@ func recordDatabase(directory, id, cluster string) error {
 	return syncDirectory(directory)
 }
 
-func databaseStorage(ctx context.Context, c config, run dockerRunner) (cluster string, empty bool, err error) {
+func databaseStorage(ctx context.Context, directory, image string, run dockerRunner) (cluster string, empty bool, err error) {
 	var value strings.Builder
 	writer := csv.NewWriter(&value)
-	if err := writer.Write([]string{"type=bind", "source=" + filepath.Join(c.Directory, "postgres"),
+	if err := writer.Write([]string{"type=bind", "source=" + filepath.Join(directory, "postgres"),
 		"target=/var/lib/postgresql", "readonly"}); err != nil {
 		return "", false, err
 	}
@@ -184,7 +189,7 @@ func databaseStorage(ctx context.Context, c config, run dockerRunner) (cluster s
 	}
 	data, err := run(ctx, "run", "--rm", "--pull", "never", "--network", "none", "--read-only",
 		"--user", "0:0", "--entrypoint", "/bin/sh", "--mount", strings.TrimSuffix(value.String(), "\n"),
-		c.Images.PostgreSQL, "-ec", `
+		image, "-ec", `
 if [ "${PGDATA:-}" != /var/lib/postgresql/18/docker ]; then exit 1; fi
 if [ -f "$PGDATA/PG_VERSION" ] && [ "$(cat "$PGDATA/PG_VERSION")" = 18 ] && [ -s "$PGDATA/global/pg_control" ]; then
   report="$(LC_ALL=C pg_controldata "$PGDATA")"

@@ -66,7 +66,45 @@ docker compose --env-file /dev/null -f /var/lib/deskrealm/compose.json \
 
 `status` 读取部署记录及当前 Compose 服务状态。停机时返回 `stopped`，仅准备完成时返回 `prepared`，验活失败时返回对应阶段和原因。首次启动达到 `ready` 后，由 `bootstrap-ticket` 生成一次性初始化链接。将链接直接交给首位管理员，并在浏览器完成初始化和登录。
 
-中断后用同一配置重新执行 `install`。备份部署目录时保留 `database-ready`、原密钥和 PostgreSQL 数据。安装器按记录核对 PostgreSQL 系统标识，遇到数据缺失或不同实例时停止启动。空机运行时准备和离线清单接续 [04-01](../.planning/phases/04-m3/04-01-PLAN.md)。
+中断后用同一配置重新执行 `install`。备份部署目录时保留 `database-ready`、原密钥和 PostgreSQL 数据。安装器按记录核对 PostgreSQL 系统标识，遇到数据缺失或不同实例时停止启动。
+
+## 签名离线包
+
+在有 Docker Engine 和 Compose 的主机上，为原配置增加 `offline`。所用公钥由部署方从独立可信渠道预置，签名私钥保留在发布环境。
+
+```json
+"offline": {
+  "manifest": "/mnt/deskrealm/manifest.json",
+  "signature": "/mnt/deskrealm/manifest.sig",
+  "trusted_public_key": "/etc/deskrealm/release-signing.pem"
+}
+```
+
+在受控发布环境按原配置的摘要拉取目标平台镜像，使用 `docker image inspect --format '{{.Id}}'` 获取每个镜像的完整 ID。按这些 ID 用 `docker image save --output images.tar CENTER_ID POSTGRESQL_ID RENDEZVOUS_ID` 导出。发布环境应使用与部署环境兼容的 Docker 镜像存储后端。打包后可在清洁的同类环境执行 `docker image load` 核对三个 ID 能否还原。[Docker 镜像导出](https://docs.docker.com/reference/cli/docker/image/save/) · [Docker 镜像导入](https://docs.docker.com/reference/cli/docker/image/load/)
+
+清单格式如下。填写归档文件的实际字节数及 SHA-256。每个 `reference` 对应配置 `images` 中的完整摘要引用，`image_id` 填写导出的 ID。
+
+```json
+{
+  "version": 1,
+  "platform": "linux/arm64",
+  "archive": {"file": "images.tar", "bytes": 123, "sha256": "<archive-sha256>"},
+  "images": {
+    "center": {"reference": "<center-reference>", "image_id": "sha256:<center-id>"},
+    "postgresql": {"reference": "<postgresql-reference>", "image_id": "sha256:<postgresql-id>"},
+    "rendezvous": {"reference": "<rendezvous-reference>", "image_id": "sha256:<rendezvous-id>"}
+  }
+}
+```
+
+以 Ed25519 签署清单的原始字节。将清单、原始二进制签名和归档放到离线介质，归档与清单位于同一目录。
+
+```sh
+openssl pkeyutl -sign -rawin -inkey release-key.pem -in manifest.json -out manifest.sig
+openssl pkey -in release-key.pem -pubout -out release-signing.pem
+```
+
+使用相同的 `preflight` 和 `install` 命令。预检校验签名与平台，安装在交给 Docker 前校验归档字节数及摘要，再核对已加载的镜像 ID 和架构。Compose 使用这些本地 ID 启动。首次安装成功后，重跑可复用已核验的缓存；缓存缺失时重新接入同一签名包。
 
 ## 开发验证
 
@@ -83,6 +121,9 @@ bash scripts/deskrealm-m3-test install-prepare
 npm --prefix web ci --ignore-scripts
 npm --prefix web exec -- playwright install chromium
 bash scripts/deskrealm-m3-test install-bootstrap
+bash scripts/deskrealm-m3-test install-offline
 ```
 
 检查构建本机 Docker 架构的 Go 中心、生产 Vue 静态文件和锁定受管源码的会合服务。两个临时镜像经回环 Registry 取得摘要后写入测试配置。安装器使用 Compose 启动四项服务并验活，Chromium 用一次性链接完成首管登录。随后模拟迁移后的 HTTPS 校验失败和安装中断，重跑后核对数据库和原公钥，再验证数据缺失或标识不符会阻止服务启动。数据库、测试 CA、镜像及 Compose 项目均为临时资源。
+
+离线检查创建签名包，关闭临时 Registry 并清除两个测试服务的本地镜像。它先验证归档被篡改时安装停止，再验证从归档导入及移除介质后的服务重建。

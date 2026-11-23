@@ -65,8 +65,9 @@ func runningServices(ctx context.Context, c config, center publicDeployment, run
 		}
 		containers = append(containers, row)
 	}
+	images := center.runtimeImages(c.Images)
 	expected := map[string]string{
-		"database": c.Images.PostgreSQL, "migrate": c.Images.Center, "center": c.Images.Center, "rendezvous": c.Images.Rendezvous,
+		"database": images.PostgreSQL, "migrate": images.Center, "center": images.Center, "rendezvous": images.Rendezvous,
 	}
 	result := make(map[string]containerStatus, len(containers))
 	for _, row := range containers {

@@ -38,13 +38,14 @@ type portBinding struct {
 }
 
 type preflightResult struct {
-	Directory      string        `json:"directory"`
-	PublicOrigin   string        `json:"public_origin"`
-	IDServer       string        `json:"id_server"`
-	HTTPSMode      string        `json:"https_mode"`
-	DockerPlatform string        `json:"docker_platform"`
-	ComposeVersion string        `json:"compose_version"`
-	Ports          []portBinding `json:"ports"`
+	Directory      string          `json:"directory"`
+	PublicOrigin   string          `json:"public_origin"`
+	IDServer       string          `json:"id_server"`
+	HTTPSMode      string          `json:"https_mode"`
+	DockerPlatform string          `json:"docker_platform"`
+	ComposeVersion string          `json:"compose_version"`
+	Ports          []portBinding   `json:"ports"`
+	Offline        offlineIdentity `json:"offline,omitzero"`
 }
 
 type dockerRunner func(context.Context, ...string) ([]byte, error)
@@ -95,6 +96,17 @@ func check(ctx context.Context, c config, run dockerRunner) (preflightResult, er
 	if err != nil {
 		return result, err
 	}
+	var offline offlineIdentity
+	if c.Offline != (offlineConfig{}) {
+		bundle, err := readOfflineBundle(c)
+		if err != nil {
+			return result, err
+		}
+		if bundle.identity.Platform != platform {
+			return result, fmt.Errorf("offline bundle is for %s, Docker Engine runs %s", bundle.identity.Platform, platform)
+		}
+		offline = bundle.identity
+	}
 	apiHost := "127.0.0.1"
 	if c.HTTPS.Mode == httpsProvided {
 		apiHost = c.Ports.BindHost
@@ -113,6 +125,7 @@ func check(ctx context.Context, c config, run dockerRunner) (preflightResult, er
 	return preflightResult{
 		Directory: c.Directory, PublicOrigin: c.PublicOrigin, IDServer: c.IDServer,
 		HTTPSMode: c.HTTPS.Mode, DockerPlatform: platform, ComposeVersion: compose, Ports: bindings,
+		Offline: offline,
 	}, nil
 }
 

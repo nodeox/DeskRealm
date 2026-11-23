@@ -47,13 +47,14 @@ type portConfig struct {
 }
 
 type config struct {
-	Version      int         `json:"version"`
-	Directory    string      `json:"directory"`
-	PublicOrigin string      `json:"public_origin"`
-	IDServer     string      `json:"id_server"`
-	HTTPS        httpsConfig `json:"https"`
-	Images       imageConfig `json:"images"`
-	Ports        portConfig  `json:"ports"`
+	Version      int           `json:"version"`
+	Directory    string        `json:"directory"`
+	PublicOrigin string        `json:"public_origin"`
+	IDServer     string        `json:"id_server"`
+	HTTPS        httpsConfig   `json:"https"`
+	Images       imageConfig   `json:"images"`
+	Ports        portConfig    `json:"ports"`
+	Offline      offlineConfig `json:"offline,omitzero"`
 }
 
 var (
@@ -134,6 +135,9 @@ func validateConfig(c config, now time.Time) (config, error) {
 		if !validImage(image.value) {
 			return c, fmt.Errorf("images.%s must use an image name pinned to a SHA-256 digest", image.field)
 		}
+	}
+	if err := c.Offline.validate(); err != nil {
+		return c, err
 	}
 	switch c.HTTPS.Mode {
 	case httpsExternal:
