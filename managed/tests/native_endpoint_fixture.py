@@ -240,10 +240,11 @@ class SessionFixture(Fixture):
             return 409, {}
         self.redemptions[route.session] = body
         now = time.time_ns() // 1_000_000
+        confirmed = ["view", "input"] if route.purpose.endswith("-input") else ["view"]
         return 200, {
             "session_id": str(route.session), "connection_id": str(route.connection),
             "path": route.path, "relay_id": RELAY_ID if route.path == "relay" else "",
-            "allowed_actions": ["view"], "lease_sequence": 1,
+            "allowed_actions": confirmed, "lease_sequence": 1,
             "redeemed_ms": now, "lease_until_ms": now + 30_000, "session_credential": bearer("drc_", 13),
         }
 
@@ -266,8 +267,10 @@ class SessionFixture(Fixture):
             return False
         if decoded(body["target_signature"]) != self.target.sign(signed_frame(4, [b"\x02", *common])):
             return False
-        consent = signed_frame(6, [route.bound, route.session.bytes, route.connection.bytes, channel, b"\x01"])
-        return body["confirmed_actions"] == ["view"] and decoded(body["consent_signature"]) == self.target.sign(consent)
+        confirmed = ["view", "input"] if route.purpose.endswith("-input") else ["view"]
+        mask = 3 if route.purpose.endswith("-input") else 1
+        consent = signed_frame(6, [route.bound, route.session.bytes, route.connection.bytes, channel, bytes([mask])])
+        return body["confirmed_actions"] == confirmed and decoded(body["consent_signature"]) == self.target.sign(consent)
 
 
 def main():
@@ -288,9 +291,10 @@ def main():
                 assert fixture.policy_receipts == [(1, "applied"), (2, "failed"), (5, "applied")]
                 assert fixture.results == [("direct-admit", True), ("relay-admit", True),
                                            ("deny-redeem", True), ("direct-clean", True),
-                                           ("direct-forbidden", True), ("direct-supervised", True),
+                                           ("direct-forbidden", True), ("direct-input", True),
+                                           ("relay-input", True), ("direct-supervised", True),
                                            ("relay-supervised", True)]
-                assert len(fixture.redemptions) == 6 and len(fixture.renewals) == 3
+                assert len(fixture.redemptions) == 8 and len(fixture.renewals) == 3
                 assert fixture.stopped == fixture.redemptions.keys()
                 assert fixture.revoked_renewals == {
                     route.session for route in fixture.routes.values() if route.purpose == "relay-admit"

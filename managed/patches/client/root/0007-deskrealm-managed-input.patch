@@ -1,0 +1,1191 @@
+diff --git a/libs/base/src/deskrealm_endpoint/lease/supervisor.rs b/libs/base/src/deskrealm_endpoint/lease/supervisor.rs
+index 301a69a..9f65303 100644
+--- a/libs/base/src/deskrealm_endpoint/lease/supervisor.rs
++++ b/libs/base/src/deskrealm_endpoint/lease/supervisor.rs
+@@ -28,6 +28,7 @@ struct Snapshot {
+     window: LeaseWindow,
+     last_check: Duration,
+     ready: bool,
++    generation: u64,
+ }
+ 
+ /// A target resource checks this immediately before dispatching a managed operation.
+@@ -41,27 +42,41 @@ impl SessionAccess {
+     }
+ 
+     pub fn permits(&self, action: ManagedAction) -> bool {
+-        LeaseClock::now().is_ok_and(|now| self.permits_at(action, now))
++        self.generation(action).is_some()
+     }
+ 
++    /// Workers can attach this to queued work and require the same generation
++    /// immediately before execution to discard work queued before a pause.
++    pub fn generation(&self, action: ManagedAction) -> Option<u64> {
++        self.generation_at(action, LeaseClock::now().ok()?)
++    }
++
++    fn generation_at(&self, action: ManagedAction, now: LeaseClock) -> Option<u64> {
++        let snapshot = self.0.read().ok()?;
++        let state = snapshot.as_ref()?;
++        (state.ready
++            && state.allowed & action as u8 != 0
++            && state.window.active_at(now)
++            && !missed_check(state.last_check, now.boot))
++        .then_some(state.generation)
++    }
++
++    #[cfg(test)]
+     fn permits_at(&self, action: ManagedAction, now: LeaseClock) -> bool {
+-        self.0.read().is_ok_and(|snapshot| {
+-            snapshot.as_ref().is_some_and(|state| {
+-                state.ready
+-                    && state.allowed & action as u8 != 0
+-                    && state.window.active_at(now)
+-                    && !missed_check(state.last_check, now.boot)
+-            })
+-        })
++        self.generation_at(action, now).is_some()
+     }
+ 
+     fn publish(&self, lease: &Lease, now: LeaseClock, ready: bool) {
+         if let Ok(mut snapshot) = self.0.write() {
++            let generation = snapshot.as_ref().map_or(0, |previous| {
++                previous.generation + u64::from(previous.ready != ready)
++            });
+             *snapshot = Some(Snapshot {
+                 allowed: lease.allowed_mask,
+                 window: lease.window,
+                 last_check: now.boot,
+                 ready,
++                generation,
+             });
+         }
+     }
+@@ -332,6 +347,7 @@ mod tests {
+         };
+         let access = SessionAccess::new();
+         access.publish(&lease, start, true);
++        let original = access.generation_at(ManagedAction::View, start);
+         assert!(access.permits_at(ManagedAction::View, clock(500, 500)));
+         assert!(!access.permits_at(ManagedAction::Input, clock(500, 500)));
+ 
+@@ -340,6 +356,7 @@ mod tests {
+         access.publish(&lease, resumed, false);
+         assert!(!access.permits_at(ManagedAction::View, resumed));
+         access.publish(&lease, resumed, true);
++        assert_ne!(access.generation_at(ManagedAction::View, resumed), original);
+         assert!(access.permits_at(ManagedAction::View, resumed));
+         assert!(!access.permits_at(ManagedAction::View, clock(500, 30_000)));
+ 
+diff --git a/libs/base/tests/deskrealm_interop.rs b/libs/base/tests/deskrealm_interop.rs
+index 1d8ec32..023d315 100644
+--- a/libs/base/tests/deskrealm_interop.rs
++++ b/libs/base/tests/deskrealm_interop.rs
+@@ -89,6 +89,8 @@ async fn managed_endpoint_admission_on_direct_and_relay() -> ResultType<()> {
+         (Path::Relay, "deny-redeem", Some(1), false),
+         (Path::Direct, "direct-clean", Some(1), true),
+         (Path::Direct, "direct-forbidden", Some(1), true),
++        (Path::Direct, "direct-input", Some(3), true),
++        (Path::Relay, "relay-input", Some(3), true),
+         (Path::Direct, "direct-supervised", Some(1), true),
+         (Path::Relay, "relay-supervised", Some(1), true),
+     ] {
+@@ -169,12 +171,53 @@ async fn managed_endpoint_admission_on_direct_and_relay() -> ResultType<()> {
+             }
+             let (client, mut controller_stream) = client?;
+             let (mut host, mut target_stream) = host?;
+-            assert_eq!(client.allowed_mask, 1);
+-            assert_eq!(host.allowed_mask, 1);
++            let expected = selection.expect("successful fixture declares consent");
++            assert_eq!(client.allowed_mask, u32::from(expected));
++            assert_eq!(host.allowed_mask, expected);
+             assert_eq!(client.lease_sequence, host.sequence);
+             assert_eq!(client.lease_until_ms, host.until_ms);
+             assert_eq!(host.credential(), bearer("drc_", 13));
+             use base::deskrealm_endpoint::{ManagedAction, SessionStatus, StopReason};
++            if purpose.ends_with("-input") {
++                assert!(host.permits(ManagedAction::Input));
++                let mut received = false;
++                let run = authority.run_target(
++                    target_stream,
++                    host,
++                    || Some(bearer("drd_", 12)),
++                    || false,
++                    |mut stream, access| {
++                        let received = &mut received;
++                        async move {
++                            while !access.permits(ManagedAction::Input) {
++                                tokio::time::sleep(Duration::from_millis(25)).await;
++                            }
++                            if let Some(Ok(bytes)) = stream.next().await {
++                                if let Ok(message) = Message::parse_from_bytes(&bytes) {
++                                    *received = message.has_key_event()
++                                        && message.key_event().chr() == 38
++                                        && access.permits(ManagedAction::Input);
++                                }
++                            }
++                            StopReason::LocalEnd
++                        }
++                    },
++                    || async { Ok(()) },
++                );
++                let send = async {
++                    let mut command = Message::new();
++                    command.mut_key_event().set_chr(38);
++                    controller_stream.send(&command).await
++                };
++                let (reason, sent) = timeout(WAIT, async { tokio::join!(run, send) }).await?;
++                sent?;
++                assert_eq!(reason?, StopReason::LocalEnd);
++                assert!(
++                    received,
++                    "the authorized input never reached the resource gate"
++                );
++                continue;
++            }
+             if matches!(purpose, "direct-clean" | "direct-forbidden") {
+                 let supervise = authority.hold_target(
+                     target_stream,
+diff --git a/src/client.rs b/src/client.rs
+index 285f557..1494bae 100644
+--- a/src/client.rs
++++ b/src/client.rs
+@@ -386,6 +386,7 @@ impl Client {
+             &'static str,
+         ),
+         (i32, String),
++        bool,
+     )> {
+         debug_assert!(peer == interface.get_id());
+         interface.update_direct(None);
+@@ -395,9 +396,9 @@ impl Client {
+             if conn_type != ConnType::DEFAULT_CONN {
+                 bail!("managed mode requires the desktop connection entry");
+             }
+-            let (stream, direct) =
++            let (stream, direct, input) =
+                 crate::deskrealm_desktop::connect(peer, interface.is_force_relay()).await?;
+-            return Ok(((stream, direct, None, None, "TCP"), (0, String::new())));
++            return Ok(((stream, direct, None, None, "TCP"), (0, String::new()), input));
+         }
+         match Self::_start(peer, key, token, conn_type, interface.clone()).await {
+             Err(err) => {
+@@ -419,7 +420,7 @@ impl Client {
+                         interface.get_lch().write().unwrap().set_direct_failure(n);
+                     }
+                 }
+-                Ok((x.0, x.1))
++                Ok((x.0, x.1, false))
+             }
+         }
+     }
+diff --git a/src/client/io_loop.rs b/src/client/io_loop.rs
+index e87ac12..47621d2 100644
+--- a/src/client/io_loop.rs
++++ b/src/client/io_loop.rs
+@@ -79,7 +79,7 @@ fn managed_view_refresh(message: &Message) -> bool {
+     )
+ }
+ 
+-fn managed_view_response(message: &Message, connected: bool) -> bool {
++fn managed_view_response(message: &Message, connected: bool, input: bool) -> bool {
+     match message.union.as_ref() {
+         Some(message::Union::VideoFrame(frame)) => connected && frame.display == 0,
+         Some(message::Union::LoginResponse(response)) => !connected
+@@ -93,7 +93,10 @@ fn managed_view_response(message: &Message, connected: bool) -> bool {
+             },
+         Some(message::Union::Misc(misc)) => match misc.union.as_ref() {
+             Some(misc::Union::CloseReason(_)) => true,
+-            Some(misc::Union::PermissionInfo(permission)) => !permission.enabled,
++            Some(misc::Union::PermissionInfo(permission)) => {
++                !permission.enabled
++                    || (input && permission.permission.enum_value() == Ok(Permission::Keyboard))
++            }
+             _ => false,
+         },
+         _ => false,
+@@ -105,18 +108,29 @@ fn managed_view_response(message: &Message, connected: bool) -> bool {
+ fn managed_view_does_not_dispatch_legacy_or_other_capabilities() {
+     let mut message = Message::new();
+     message.set_hash(Default::default());
+-    assert!(!managed_view_response(&message, false));
++    assert!(!managed_view_response(&message, false, false));
+     message.set_clipboard(Default::default());
+-    assert!(!managed_view_response(&message, true));
++    assert!(!managed_view_response(&message, true, false));
+     message.set_file_action(Default::default());
+-    assert!(!managed_view_response(&message, true));
++    assert!(!managed_view_response(&message, true, false));
+     message.set_audio_frame(Default::default());
+-    assert!(!managed_view_response(&message, true));
++    assert!(!managed_view_response(&message, true, false));
+     message.set_video_frame(Default::default());
+-    assert!(!managed_view_response(&message, false));
+-    assert!(managed_view_response(&message, true));
++    assert!(!managed_view_response(&message, false, false));
++    assert!(managed_view_response(&message, true, false));
+     message.mut_video_frame().display = 1;
+-    assert!(!managed_view_response(&message, true));
++    assert!(!managed_view_response(&message, true, false));
++    let mut control = Misc::new();
++    control.set_permission_info(PermissionInfo {
++        permission: Permission::Keyboard.into(),
++        enabled: true,
++        ..Default::default()
++    });
++    message.set_misc(control);
++    assert!(!managed_view_response(&message, false, false));
++    assert!(managed_view_response(&message, false, true));
++    message.mut_misc().mut_permission_info().permission = Permission::File.into();
++    assert!(!managed_view_response(&message, true, true));
+ }
+ 
+ pub struct Remote<T: InvokeUiSession> {
+@@ -254,7 +268,7 @@ impl<T: InvokeUiSession> Remote<T> {
+         )
+         .await
+         {
+-            Ok(((mut peer, direct, pk, kcp, stream_type), (feedback, rendezvous_server))) => {
++            Ok(((mut peer, direct, pk, kcp, stream_type), (feedback, rendezvous_server), _managed_input)) => {
+                 self.handler
+                     .connection_round_state
+                     .lock()
+@@ -301,7 +315,7 @@ impl<T: InvokeUiSession> Remote<T> {
+                 self.handler.update_direct(Some(direct));
+                 #[cfg(not(any(target_os = "android", target_os = "ios")))]
+                 if managed {
+-                    self.managed_view_loop(&mut peer).await;
++                    self.managed_view_loop(&mut peer, _managed_input).await;
+                     self.handle_disconnected(round);
+                     return;
+                 }
+@@ -362,7 +376,7 @@ impl<T: InvokeUiSession> Remote<T> {
+                                             self.handler.update_received(true);
+                                         }
+                                         self.data_count.fetch_add(bytes.len(), Ordering::Relaxed);
+-                                        if !self.handle_msg_from_peer(bytes, &mut peer, false).await {
++                                        if !self.handle_msg_from_peer(bytes, &mut peer, None).await {
+                                             break
+                                         }
+                                     }
+@@ -1750,7 +1764,8 @@ impl<T: InvokeUiSession> Remote<T> {
+     }
+ 
+     #[cfg(not(any(target_os = "android", target_os = "ios")))]
+-    async fn managed_view_loop(&mut self, peer: &mut Stream) {
++    async fn managed_view_loop(&mut self, peer: &mut Stream, input_allowed: bool) {
++        *self.handler.server_keyboard_enabled.write().unwrap() = false;
+         let mut deadline = Instant::now() + SEC30;
+         loop {
+             tokio::select! {
+@@ -1767,7 +1782,7 @@ impl<T: InvokeUiSession> Remote<T> {
+                     if !self.is_connected {
+                         self.handler.update_received(true);
+                     }
+-                    if !self.handle_msg_from_peer(&bytes, peer, true).await {
++                    if !self.handle_msg_from_peer(&bytes, peer, Some(input_allowed)).await {
+                         break;
+                     }
+                 }
+@@ -1776,7 +1791,11 @@ impl<T: InvokeUiSession> Remote<T> {
+                         base::deskrealm_endpoint::send_controller_end(peer).await;
+                         break;
+                     }
+-                    Some(Data::Message(message)) if managed_view_refresh(&message) => {
++                    Some(Data::Message(message)) if managed_view_refresh(&message) ||
++                        (input_allowed && self.is_connected
++                            && *self.handler.server_keyboard_enabled.read().unwrap()
++                            && matches!(message.union.as_ref(),
++                                Some(message::Union::KeyEvent(_) | message::Union::MouseEvent(_)))) => {
+                         if !matches!(time::timeout(Duration::from_secs(2), peer.send(&message)).await, Ok(Ok(()))) {
+                             break;
+                         }
+@@ -1790,11 +1809,19 @@ impl<T: InvokeUiSession> Remote<T> {
+         }
+     }
+ 
+-    async fn handle_msg_from_peer(&mut self, data: &[u8], peer: &mut Stream, managed: bool) -> bool {
++    async fn handle_msg_from_peer(
++        &mut self,
++        data: &[u8],
++        peer: &mut Stream,
++        managed_input: Option<bool>,
++    ) -> bool {
+         if let Ok(msg_in) = Message::parse_from_bytes(data) {
+-            if managed && !managed_view_response(&msg_in, self.is_connected) {
+-                return true;
++            if let Some(input) = managed_input {
++                if !managed_view_response(&msg_in, self.is_connected, input) {
++                    return true;
++                }
+             }
++            let managed = managed_input.is_some();
+             match msg_in.union {
+                 Some(message::Union::VideoFrame(vf)) => {
+                     if !self.first_frame {
+diff --git a/src/deskrealm_desktop.rs b/src/deskrealm_desktop.rs
+index 759ecd9..840b910 100644
+--- a/src/deskrealm_desktop.rs
++++ b/src/deskrealm_desktop.rs
+@@ -44,11 +44,14 @@ const SETTINGS: &[&str] = &[
+     "DESKREALM_MANAGED_RELAY_ID",
+     "DESKREALM_MANAGED_CONTROLLER_CREDENTIAL_FILE",
+     "DESKREALM_MANAGED_PURPOSE",
++    "DESKREALM_MANAGED_INPUT",
+ ];
+ const ONLINE_INTERVAL: Duration = Duration::from_secs(12);
+ const REGISTRATION_INTERVAL: Duration = Duration::from_secs(8);
+ const REFRESH_MARGIN: Duration = Duration::from_secs(120);
+ const LOOKUP_TIMEOUT: Duration = Duration::from_secs(5);
++const VIEW: u8 = ManagedAction::View as u8;
++const INPUT: u8 = ManagedAction::Input as u8;
+ 
+ pub(crate) fn enabled() -> bool {
+     cfg!(feature = "deskrealm-managed") || SETTINGS.iter().any(|var| env::var_os(var).is_some())
+@@ -194,7 +197,7 @@ impl Desktop {
+     }
+ }
+ 
+-pub(crate) async fn connect(peer: &str, force_relay: bool) -> ResultType<(Stream, bool)> {
++pub(crate) async fn connect(peer: &str, force_relay: bool) -> ResultType<(Stream, bool, bool)> {
+     if hbb_common::config::is_incoming_only() {
+         bail!("managed controller is unavailable in incoming-only mode");
+     }
+@@ -217,6 +220,11 @@ pub(crate) async fn connect(peer: &str, force_relay: bool) -> ResultType<(Stream
+     } else {
+         Path::Direct
+     };
++    let requested = match optional("DESKREALM_MANAGED_INPUT")?.as_deref() {
++        None | Some("0") => VIEW,
++        Some("1") => VIEW | INPUT,
++        Some(_) => bail!("invalid DESKREALM_MANAGED_INPUT"),
++    };
+     let route = desktop
+         .authority
+         .issue(
+@@ -225,7 +233,7 @@ pub(crate) async fn connect(peer: &str, force_relay: bool) -> ResultType<(Stream
+             peer,
+             Uuid::new_v4(),
+             &purpose,
+-            ManagedAction::View as u8,
++            requested,
+             true,
+         )
+         .await?;
+@@ -239,13 +247,20 @@ pub(crate) async fn connect(peer: &str, force_relay: bool) -> ResultType<(Stream
+         .network()
+         .connect_controller(&desktop.authority, &desktop.device, &route, path)
+         .await?;
+-    desktop
++    let admitted = desktop
+         .authority
+         .connect_controller(&mut stream, &route, &desktop.device, path)
+         .await?;
++    if admitted.allowed_mask & u32::from(VIEW) == 0 {
++        bail!("managed desktop requires screen permission");
++    }
+     // Only the controller reads encoded video frames after admission.
+     stream.set_max_packet_length(16 * 1024 * 1024);
+-    Ok((stream, path == Path::Direct))
++    Ok((
++        stream,
++        path == Path::Direct,
++        admitted.allowed_mask & u32::from(INPUT) != 0,
++    ))
+ }
+ 
+ pub(crate) type CurrentCredential = watch::Receiver<Option<Arc<DeviceCredential>>>;
+@@ -359,7 +374,8 @@ pub(crate) async fn authorize_target(
+         .as_ref()
+         .ok_or_else(|| anyhow!("no managed policy applied"))?;
+     if grant.policy_version() != policy.version()
+-        || grant.allowed_mask() != ManagedAction::View as u8
++        || grant.allowed_mask() & VIEW == 0
++        || grant.allowed_mask() & !(VIEW | INPUT) != 0
+         || grant.allowed_mask() & !policy.allowed_mask() != 0
+     {
+         bail!("managed grant does not match locally applied policy");
+@@ -367,6 +383,9 @@ pub(crate) async fn authorize_target(
+     #[cfg(windows)]
+     let console = crate::platform::deskrealm_unlocked_console()
+         .ok_or_else(|| anyhow!("managed view requires an unlocked console"))?;
++    if grant.allowed_mask() & INPUT != 0 && !crate::server::managed_input::available() {
++        bail!("managed input is unavailable on this desktop");
++    }
+     let capture = capture
+         .try_acquire_owned()
+         .map_err(|_| anyhow!("managed display is busy"))?;
+@@ -412,7 +431,7 @@ pub(crate) async fn authorize_target(
+             |request| async move { ask_local_user(request, prompts).await },
+         )
+         .await?;
+-    let view = crate::server::managed_view::Capture::new(capture);
++    let view = crate::server::managed_view::Capture::new(capture, lease.allowed_mask & INPUT != 0);
+     let worker = view.clone();
+     desktop
+         .authority
+diff --git a/src/port_forward.rs b/src/port_forward.rs
+index 356ea4a..c56c2e1 100644
+--- a/src/port_forward.rs
++++ b/src/port_forward.rs
+@@ -175,7 +175,7 @@ async fn connect_and_login(
+     } else {
+         ConnType::PORT_FORWARD
+     };
+-    let ((mut stream, direct, pk, kcp, _stream_type), (feedback, rendezvous_server)) =
++    let ((mut stream, direct, pk, kcp, _stream_type), (feedback, rendezvous_server), _) =
+         Client::start(id, key, token, conn_type, interface.clone()).await?;
+     let mut trust = crate::trusted_devices::client::Session::new(
+         &interface.get_lch().read().unwrap(), stream.is_secured(), pk.as_deref())?;
+@@ -428,7 +428,7 @@ async fn connect_and_login_mux(
+     } else {
+         ConnType::PORT_FORWARD
+     };
+-    let ((mut stream, direct, pk, kcp, _stream_type), (feedback, rendezvous_server)) =
++    let ((mut stream, direct, pk, kcp, _stream_type), (feedback, rendezvous_server), _) =
+         Client::start(id, key, token, conn_type, interface.clone()).await?;
+     let mut trust = crate::trusted_devices::client::Session::new(
+         &interface.get_lch().read().unwrap(), stream.is_secured(), pk.as_deref())?;
+diff --git a/src/server.rs b/src/server.rs
+index 2b396aa..196843f 100644
+--- a/src/server.rs
++++ b/src/server.rs
+@@ -73,6 +73,8 @@ pub mod input_service {
+ mod connection;
+ #[cfg(not(any(target_os = "android", target_os = "ios")))]
+ pub(crate) mod managed_view;
++#[cfg(not(any(target_os = "android", target_os = "ios")))]
++pub(crate) mod managed_input;
+ mod login_failure_check;
+ pub(crate) mod port_forward_mux;
+ pub mod display_service;
+diff --git a/src/server/managed_input.rs b/src/server/managed_input.rs
+new file mode 100644
+index 0000000..f40a925
+--- /dev/null
++++ b/src/server/managed_input.rs
+@@ -0,0 +1,504 @@
++//! Session-scoped keyboard and mouse dispatch for the managed desktop.
++
++use crate::input::*;
++use base::{
++    deskrealm_endpoint::{ManagedAction, SessionAccess},
++    message_proto::{key_event, DisplayInfo, KeyEvent, KeyboardMode, MouseEvent},
++};
++use hbb_common::{anyhow::anyhow, log, ResultType};
++use rdev::{Button, EventType, Key, RawKey};
++use std::{
++    sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender},
++    thread::{self, JoinHandle},
++    time::Duration,
++};
++
++const CHECK_INTERVAL: Duration = Duration::from_millis(25);
++const QUEUE_DEPTH: usize = 32;
++const HELD_LIMIT: usize = 32;
++
++#[cfg(windows)]
++pub(crate) fn available() -> bool {
++    let Some(console) = crate::platform::deskrealm_unlocked_console() else {
++        return false;
++    };
++    crate::platform::get_current_process_session_id() == Some(console)
++        && !crate::platform::desktop_changed()
++}
++
++#[cfg(target_os = "linux")]
++pub(crate) fn available() -> bool {
++    scrap::is_x11() && std::env::var_os("DISPLAY").is_some()
++}
++
++#[cfg(not(any(windows, target_os = "linux")))]
++pub(crate) fn available() -> bool {
++    false
++}
++
++#[derive(Clone, Copy)]
++pub(super) struct Screen {
++    left: i32,
++    top: i32,
++    width: i32,
++    height: i32,
++}
++
++impl From<&DisplayInfo> for Screen {
++    fn from(info: &DisplayInfo) -> Self {
++        Self {
++            left: info.x,
++            top: info.y,
++            width: info.width,
++            height: info.height,
++        }
++    }
++}
++
++impl Screen {
++    fn contains(self, x: i32, y: i32) -> bool {
++        let x = i64::from(x) - i64::from(self.left);
++        let y = i64::from(y) - i64::from(self.top);
++        (0..i64::from(self.width)).contains(&x) && (0..i64::from(self.height)).contains(&y)
++    }
++}
++
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub(super) enum Held {
++    Key(Key),
++    Mouse(Button),
++}
++
++impl Held {
++    fn event(self, down: bool) -> EventType {
++        match (self, down) {
++            (Self::Key(key), true) => EventType::KeyPress(key),
++            (Self::Key(key), false) => EventType::KeyRelease(key),
++            (Self::Mouse(button), true) => EventType::ButtonPress(button),
++            (Self::Mouse(button), false) => EventType::ButtonRelease(button),
++        }
++    }
++}
++
++#[derive(Clone, Copy)]
++pub(super) enum Input {
++    Down(Held),
++    Up(Held),
++    Press(Held),
++    Move(i32, i32),
++    Scroll(i64),
++}
++
++impl Input {
++    pub(super) fn key(event: &KeyEvent) -> Option<Self> {
++        if event.mode.enum_value() != Ok(KeyboardMode::Map) {
++            return None;
++        }
++        let Some(key_event::Union::Chr(code)) = event.union else {
++            return None;
++        };
++        let key = Held::Key(Key::RawKey(raw_key(code)?));
++        Some(if event.press {
++            Self::Press(key)
++        } else if event.down {
++            Self::Down(key)
++        } else {
++            Self::Up(key)
++        })
++    }
++
++    pub(super) fn mouse(event: &MouseEvent, screen: Screen) -> Option<Self> {
++        let variant = event.mask & MOUSE_TYPE_MASK;
++        let button = event.mask >> 3;
++        match variant {
++            MOUSE_TYPE_MOVE if (0..32).contains(&button) && screen.contains(event.x, event.y) => {
++                Some(Self::Move(event.x, event.y))
++            }
++            MOUSE_TYPE_DOWN | MOUSE_TYPE_UP => {
++                let button = match button {
++                    MOUSE_BUTTON_LEFT => Button::Left,
++                    MOUSE_BUTTON_RIGHT => Button::Right,
++                    MOUSE_BUTTON_WHEEL => Button::Middle,
++                    _ => return None,
++                };
++                let held = Held::Mouse(button);
++                Some(if variant == MOUSE_TYPE_DOWN {
++                    Self::Down(held)
++                } else {
++                    Self::Up(held)
++                })
++            }
++            // Use a single vertical notch per packet; the X11 backend uses the sign
++            // only and Windows applies the same native wheel unit.
++            MOUSE_TYPE_WHEEL if (0..32).contains(&button) && event.y != 0 => {
++                Some(Self::Scroll(i64::from(event.y.signum())))
++            }
++            _ => None,
++        }
++    }
++}
++
++#[cfg(windows)]
++fn raw_key(code: u32) -> Option<RawKey> {
++    // Nonzero set-1 scan code, optionally prefixed with E0 for an extended key.
++    let ordinary = (1..=0x7f).contains(&code);
++    let extended = (0xe001..=0xe07f).contains(&code);
++    (ordinary || extended).then_some(RawKey::ScanCode(code))
++}
++
++#[cfg(target_os = "linux")]
++fn raw_key(code: u32) -> Option<RawKey> {
++    (8..=255)
++        .contains(&code)
++        .then_some(RawKey::LinuxXorgKeycode(code))
++}
++
++#[cfg(not(any(windows, target_os = "linux")))]
++fn raw_key(_code: u32) -> Option<RawKey> {
++    None
++}
++
++fn simulate(event: EventType) -> ResultType<()> {
++    #[cfg(windows)]
++    if let EventType::MouseMove { x, y } = event {
++        if unsafe { winapi::um::winuser::SetCursorPos(x as i32, y as i32) } == 0 {
++            return Err(std::io::Error::last_os_error().into());
++        }
++        return Ok(());
++    }
++    rdev::simulate(&event)?;
++    Ok(())
++}
++
++struct Queued {
++    generation: u64,
++    input: Input,
++}
++
++pub(super) struct InputWorker {
++    sender: Option<SyncSender<Queued>>,
++    thread: Option<JoinHandle<ResultType<()>>>,
++    access: SessionAccess,
++}
++
++impl InputWorker {
++    pub(super) fn start(access: SessionAccess, screen: Screen) -> ResultType<Self> {
++        let (sender, receiver) = mpsc::sync_channel(QUEUE_DEPTH);
++        let gate = access.clone();
++        let thread = thread::Builder::new()
++            .name("managed-input".into())
++            .spawn(move || {
++                run(
++                    receiver,
++                    || {
++                        gate.generation(ManagedAction::Input)
++                            .filter(|_| available())
++                    },
++                    |input| {
++                        if matches!(input, Input::Down(Held::Mouse(_)) | Input::Scroll(_)) {
++                            return crate::platform::get_cursor_pos()
++                                .is_some_and(|(x, y)| screen.contains(x, y));
++                        }
++                        true
++                    },
++                    simulate,
++                )
++            })?;
++        Ok(Self {
++            sender: Some(sender),
++            thread: Some(thread),
++            access,
++        })
++    }
++
++    pub(super) fn enqueue(&self, input: Input) -> ResultType<()> {
++        if let Some(generation) = self.access.generation(ManagedAction::Input) {
++            self.sender
++                .as_ref()
++                .ok_or_else(|| anyhow!("managed input is closed"))?
++                .try_send(Queued { generation, input })
++                .map_err(|_| anyhow!("managed input queue is full or closed"))?;
++        }
++        Ok(())
++    }
++
++    pub(super) fn finished(&self) -> bool {
++        self.thread.as_ref().map_or(true, JoinHandle::is_finished)
++    }
++
++    pub(super) fn stop(&mut self) -> ResultType<()> {
++        self.sender.take();
++        if let Some(worker) = self.thread.take() {
++            worker
++                .join()
++                .map_err(|_| anyhow!("managed input worker panicked"))??;
++        }
++        Ok(())
++    }
++}
++
++impl Drop for InputWorker {
++    fn drop(&mut self) {
++        if let Err(err) = self.stop() {
++            log::error!("managed input shutdown failed: {err}");
++        }
++    }
++}
++
++fn run(
++    receiver: Receiver<Queued>,
++    permission: impl Fn() -> Option<u64>,
++    valid: impl Fn(Input) -> bool,
++    mut simulate: impl FnMut(EventType) -> ResultType<()>,
++) -> ResultType<()> {
++    let mut held: Vec<Held> = Vec::new();
++    let mut previous = None;
++    let result = (|| -> ResultType<()> {
++        loop {
++            let entry = match receiver.recv_timeout(CHECK_INTERVAL) {
++                Ok(entry) => Some(entry),
++                Err(RecvTimeoutError::Timeout) => None,
++                Err(RecvTimeoutError::Disconnected) => break,
++            };
++            let active = permission();
++            if active != previous {
++                release(&mut held, &mut simulate)?;
++                previous = active;
++            }
++            if let Some(entry) = entry {
++                if active == Some(entry.generation) && valid(entry.input) && permission() == active
++                {
++                    dispatch(entry.input, &mut held, &mut simulate)?;
++                }
++            }
++        }
++        Ok(())
++    })();
++    // Releases are permitted during cancellation. No new downs can be issued.
++    if let Err(err) = result {
++        log::debug!("managed input dispatch stopped: {err}");
++    }
++    release(&mut held, &mut simulate)
++}
++
++fn dispatch(
++    input: Input,
++    held: &mut Vec<Held>,
++    simulate: &mut impl FnMut(EventType) -> ResultType<()>,
++) -> ResultType<()> {
++    match input {
++        Input::Down(control) | Input::Press(control) => {
++            let fresh = !held.contains(&control);
++            if fresh {
++                if held.len() >= HELD_LIMIT {
++                    return Err(anyhow!("too many held managed inputs"));
++                }
++                // Track before emitting the press so cleanup attempts release even
++                // when a backend reports failure after partially applying an event.
++                held.push(control);
++                simulate(control.event(true))?;
++            } else if matches!(control, Held::Key(_)) && matches!(input, Input::Down(_)) {
++                simulate(control.event(true))?;
++            }
++            if fresh && matches!(input, Input::Press(_)) {
++                simulate(control.event(false))?;
++                held.pop();
++            }
++        }
++        Input::Up(control) => {
++            if let Some(index) = held.iter().position(|item| *item == control) {
++                simulate(control.event(false))?;
++                held.remove(index);
++            }
++        }
++        Input::Move(x, y) => simulate(EventType::MouseMove {
++            x: x.into(),
++            y: y.into(),
++        })?,
++        Input::Scroll(delta_y) => simulate(EventType::Wheel {
++            delta_x: 0,
++            delta_y,
++        })?,
++    }
++    Ok(())
++}
++
++fn release(
++    held: &mut Vec<Held>,
++    simulate: &mut impl FnMut(EventType) -> ResultType<()>,
++) -> ResultType<()> {
++    let mut error = None;
++    for index in (0..held.len()).rev() {
++        match simulate(held[index].event(false)) {
++            Ok(()) => {
++                held.remove(index);
++            }
++            Err(err) => error = Some(err),
++        }
++    }
++    error.map_or(Ok(()), Err)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use std::{
++        sync::{
++            atomic::{AtomicU64, Ordering},
++            Arc,
++        },
++        time::Instant,
++    };
++
++    fn queue(sender: &SyncSender<Queued>, generation: u64, input: Input) {
++        sender.send(Queued { generation, input }).unwrap();
++    }
++
++    #[test]
++    fn managed_input_discards_stale_queued_events_and_releases_held_buttons() {
++        let (tx, rx) = mpsc::sync_channel(QUEUE_DEPTH);
++        let (events, seen) = mpsc::channel();
++        let generation = Arc::new(AtomicU64::new(1));
++        let gate = generation.clone();
++        let left = Held::Mouse(Button::Left);
++        let right = Held::Mouse(Button::Right);
++        let worker = thread::spawn(move || {
++            run(
++                rx,
++                || match gate.load(Ordering::SeqCst) {
++                    0 => None,
++                    epoch => Some(epoch),
++                },
++                |_| true,
++                |event| {
++                    events.send(event)?;
++                    Ok(())
++                },
++            )
++        });
++        // A release for an unowned button must not become a local mouse-up.
++        queue(&tx, 1, Input::Up(right));
++        queue(&tx, 1, Input::Down(left));
++        let recv = || seen.recv_timeout(Duration::from_secs(2)).unwrap();
++        assert_eq!(recv(), left.event(true));
++        generation.store(2, Ordering::SeqCst);
++        queue(&tx, 1, Input::Down(right));
++        queue(&tx, 2, Input::Down(right));
++        assert_eq!(recv(), left.event(false));
++        assert_eq!(recv(), right.event(true));
++        generation.store(0, Ordering::SeqCst);
++        queue(&tx, 2, Input::Down(left));
++        assert_eq!(recv(), right.event(false));
++        drop(tx);
++        worker.join().unwrap().unwrap();
++        assert!(seen.try_recv().is_err());
++    }
++
++    #[cfg(target_os = "linux")]
++    fn x11_state(code: u8) -> (bool, bool, (i32, i32)) {
++        use std::ffi::c_void;
++        use std::os::raw::{c_char, c_int, c_uint, c_ulong};
++        #[link(name = "X11")]
++        extern "C" {
++            fn XOpenDisplay(name: *const c_char) -> *mut c_void;
++            fn XCloseDisplay(display: *mut c_void) -> c_int;
++            fn XDefaultRootWindow(display: *mut c_void) -> c_ulong;
++            fn XQueryKeymap(display: *mut c_void, keys: *mut c_char) -> c_int;
++            fn XQueryPointer(
++                display: *mut c_void,
++                window: c_ulong,
++                root: *mut c_ulong,
++                child: *mut c_ulong,
++                x: *mut c_int,
++                y: *mut c_int,
++                wx: *mut c_int,
++                wy: *mut c_int,
++                mask: *mut c_uint,
++            ) -> c_int;
++        }
++        unsafe {
++            let display = XOpenDisplay(std::ptr::null());
++            assert!(!display.is_null(), "X11 display required");
++            let mut keys = [0 as c_char; 32];
++            let (mut root, mut child, mut x, mut y, mut wx, mut wy, mut mask) =
++                (0, 0, 0, 0, 0, 0, 0);
++            XQueryKeymap(display, keys.as_mut_ptr());
++            assert_ne!(
++                XQueryPointer(
++                    display,
++                    XDefaultRootWindow(display),
++                    &mut root,
++                    &mut child,
++                    &mut x,
++                    &mut y,
++                    &mut wx,
++                    &mut wy,
++                    &mut mask,
++                ),
++                0
++            );
++            XCloseDisplay(display);
++            let down = keys[usize::from(code / 8)] as u8 & (1 << (code % 8)) != 0;
++            (down, mask & (1 << 8) != 0, (x, y))
++        }
++    }
++
++    #[cfg(target_os = "linux")]
++    #[test]
++    #[ignore = "injects local events, run inside isolated Xvfb"]
++    fn managed_input_x11_injects_and_cleans_up_after_permission_loss() {
++        let code = 38;
++        let map_key = |down| {
++            let mut key = KeyEvent {
++                mode: KeyboardMode::Map.into(),
++                down,
++                ..Default::default()
++            };
++            key.set_chr(code.into());
++            key
++        };
++        let button_down = MouseEvent {
++            mask: MOUSE_TYPE_DOWN | (MOUSE_BUTTON_LEFT << 3),
++            ..Default::default()
++        };
++        let screen = Screen {
++            left: 0,
++            top: 0,
++            width: 640,
++            height: 480,
++        };
++        let (tx, rx) = mpsc::sync_channel(QUEUE_DEPTH);
++        let generation = Arc::new(AtomicU64::new(1));
++        let gate = generation.clone();
++        let worker = thread::spawn(move || {
++            run(
++                rx,
++                || (gate.load(Ordering::SeqCst) == 1).then_some(1),
++                |_| true,
++                simulate,
++            )
++        });
++        queue(&tx, 1, Input::Move(55, 80));
++        queue(&tx, 1, Input::key(&map_key(true)).unwrap());
++        queue(&tx, 1, Input::mouse(&button_down, screen).unwrap());
++        let wait = |expected| {
++            let deadline = Instant::now() + Duration::from_secs(3);
++            loop {
++                if x11_state(code) == expected {
++                    break;
++                }
++                assert!(
++                    Instant::now() < deadline,
++                    "X11 state did not reach {expected:?}"
++                );
++                thread::sleep(Duration::from_millis(20));
++            }
++        };
++        wait((true, true, (55, 80)));
++        generation.store(0, Ordering::SeqCst);
++        queue(&tx, 1, Input::Move(100, 110));
++        wait((false, false, (55, 80)));
++        drop(tx);
++        worker.join().unwrap().unwrap();
++    }
++}
+diff --git a/src/server/managed_view.rs b/src/server/managed_view.rs
+index 4dbe56f..88a8fd1 100644
+--- a/src/server/managed_view.rs
++++ b/src/server/managed_view.rs
+@@ -1,7 +1,8 @@
+-//! Read-only monitor sessions after a DeskRealm redemption.
++//! Monitor and input sessions after a DeskRealm redemption.
+ 
+ use super::{
+     display_service,
++    managed_input::{Input, InputWorker, Screen},
+     service::{GenericService, Service},
+     video_service, ConnInner,
+ };
+@@ -32,6 +33,8 @@ pub(crate) struct Capture(Arc<CaptureState>);
+ 
+ struct CaptureState {
+     active: Mutex<Option<Monitor>>,
++    input: Mutex<Option<InputWorker>>,
++    allow_input: bool,
+     _exclusive: OwnedSemaphorePermit,
+ }
+ 
+@@ -51,9 +54,11 @@ impl Drop for Monitor {
+ }
+ 
+ impl Capture {
+-    pub(crate) fn new(exclusive: OwnedSemaphorePermit) -> Self {
++    pub(crate) fn new(exclusive: OwnedSemaphorePermit, allow_input: bool) -> Self {
+         Self(Arc::new(CaptureState {
+             active: Mutex::new(None),
++            input: Mutex::new(None),
++            allow_input,
+             _exclusive: exclusive,
+         }))
+     }
+@@ -62,11 +67,13 @@ impl Capture {
+         // Keep the exclusive permit until the capture worker is joined, even if
+         // the session task is cancelled while waiting for this blocking job.
+         tokio::task::spawn_blocking(move || {
++            let input = self.0.input.lock().unwrap().take();
++            let result = input.map_or(Ok(()), |mut input| input.stop());
+             let monitor = self.0.active.lock().unwrap().take();
+             drop(monitor);
++            result
+         })
+-        .await?;
+-        Ok(())
++        .await?
+     }
+ 
+     pub(crate) async fn run(self, mut stream: Stream, access: SessionAccess) -> StopReason {
+@@ -103,6 +110,12 @@ impl Capture {
+             return Ok(StopReason::LocalEnd);
+         }
+         let display = displays.swap_remove(primary);
++        let screen = Screen::from(&display);
++        let input_enabled = self.0.allow_input && access.permits(ManagedAction::Input);
++        if input_enabled {
++            let worker = InputWorker::start(access.clone(), screen)?;
++            *self.0.input.lock().unwrap() = Some(worker);
++        }
+         for permission in [
+             Permission::Keyboard,
+             Permission::Audio,
+@@ -116,6 +129,7 @@ impl Capture {
+             let mut control = Misc::new();
+             control.set_permission_info(PermissionInfo {
+                 permission: permission.into(),
++                enabled: permission == Permission::Keyboard && input_enabled,
+                 ..Default::default()
+             });
+             let mut message = Message::new();
+@@ -158,11 +172,16 @@ impl Capture {
+                 packet = stream.next() => {
+                     let Some(Ok(packet)) = packet else { return Ok(StopReason::ConnectionLost) };
+                     let message = Message::parse_from_bytes(&packet)?;
+-                    match request(&message) {
++                    match request(&message, input_enabled, screen) {
+                         ViewRequest::Close => return Ok(StopReason::LocalEnd),
+                         ViewRequest::Refresh if access.permits(ManagedAction::View) => {
+                             service.set_option_bool(video_service::OPTION_REFRESH, true);
+                         }
++                        ViewRequest::Input(event) => {
++                            if let Some(input) = self.0.input.lock().unwrap().as_ref() {
++                                input.enqueue(event)?;
++                            }
++                        }
+                         _ => {}
+                     }
+                 }
+@@ -180,6 +199,9 @@ impl Capture {
+                     send_video(stream, access, &message).await?;
+                 }
+                 _ = probe.tick() => {
++                    if self.0.input.lock().unwrap().as_ref().is_some_and(InputWorker::finished) {
++                        return Ok(StopReason::LocalEnd);
++                    }
+                     let mut message = Message::new();
+                     message.mut_test_delay().time = get_time();
+                     send(stream, &message).await?;
+@@ -217,15 +239,21 @@ pub(super) fn is_video_packet(message: &Message) -> bool {
+     matches!(message.union, Some(message::Union::VideoFrame(_)))
+ }
+ 
+-#[derive(Debug, PartialEq, Eq)]
+ enum ViewRequest {
+     Close,
+     Refresh,
++    Input(Input),
+     Ignore,
+ }
+ 
+-fn request(message: &Message) -> ViewRequest {
++fn request(message: &Message, input_allowed: bool, screen: Screen) -> ViewRequest {
+     match message.union.as_ref() {
++        Some(message::Union::KeyEvent(event)) if input_allowed => {
++            Input::key(event).map_or(ViewRequest::Ignore, ViewRequest::Input)
++        }
++        Some(message::Union::MouseEvent(event)) if input_allowed => {
++            Input::mouse(event, screen).map_or(ViewRequest::Ignore, ViewRequest::Input)
++        }
+         Some(message::Union::Misc(misc)) => match misc.union.as_ref() {
+             Some(misc::Union::CloseReason(_)) => ViewRequest::Close,
+             Some(misc::Union::RefreshVideo(true) | misc::Union::RefreshVideoDisplay(0)) => {
+@@ -242,28 +270,69 @@ mod tests {
+     use super::*;
+ 
+     #[test]
+-    fn managed_view_requests_only_dispatch_refresh_and_close() {
++    fn managed_view_dispatches_only_the_authorized_message_scope() {
++        let screen = Screen::from(&base::message_proto::DisplayInfo {
++            width: 640,
++            height: 480,
++            ..Default::default()
++        });
+         let mut message = Message::new();
+         message.set_mouse_event(Default::default());
+-        assert_eq!(request(&message), ViewRequest::Ignore);
++        assert!(matches!(
++            request(&message, false, screen),
++            ViewRequest::Ignore
++        ));
++        assert!(matches!(
++            request(&message, true, screen),
++            ViewRequest::Input(_)
++        ));
+         message.set_key_event(Default::default());
+-        assert_eq!(request(&message), ViewRequest::Ignore);
++        assert!(matches!(
++            request(&message, false, screen),
++            ViewRequest::Ignore
++        ));
++        assert!(matches!(
++            request(&message, true, screen),
++            ViewRequest::Ignore
++        ));
+         message.set_audio_frame(Default::default());
+-        assert_eq!(request(&message), ViewRequest::Ignore);
++        assert!(matches!(
++            request(&message, true, screen),
++            ViewRequest::Ignore
++        ));
+         message.set_clipboard(Default::default());
+-        assert_eq!(request(&message), ViewRequest::Ignore);
++        assert!(matches!(
++            request(&message, true, screen),
++            ViewRequest::Ignore
++        ));
+         message.set_file_action(Default::default());
+-        assert_eq!(request(&message), ViewRequest::Ignore);
++        assert!(matches!(
++            request(&message, true, screen),
++            ViewRequest::Ignore
++        ));
+         message.set_login_request(Default::default());
+-        assert_eq!(request(&message), ViewRequest::Ignore);
++        assert!(matches!(
++            request(&message, true, screen),
++            ViewRequest::Ignore
++        ));
+         message.set_misc(Misc::new());
+         message.mut_misc().set_refresh_video_display(1);
+-        assert_eq!(request(&message), ViewRequest::Ignore);
++        assert!(matches!(
++            request(&message, false, screen),
++            ViewRequest::Ignore
++        ));
+         message.mut_misc().set_refresh_video_display(0);
+-        assert_eq!(request(&message), ViewRequest::Refresh);
++        assert!(matches!(
++            request(&message, false, screen),
++            ViewRequest::Refresh
++        ));
+         message.mut_misc().set_close_reason(String::new());
+-        assert_eq!(request(&message), ViewRequest::Close);
++        assert!(matches!(
++            request(&message, false, screen),
++            ViewRequest::Close
++        ));
+     }
++
+     #[cfg(target_os = "linux")]
+     #[tokio::test]
+     #[ignore = "requires Xvfb or a real X11 display"]
+diff --git a/src/ui_session_interface.rs b/src/ui_session_interface.rs
+index d9146f2..6031341 100644
+--- a/src/ui_session_interface.rs
++++ b/src/ui_session_interface.rs
+@@ -297,6 +297,10 @@ impl<T: InvokeUiSession> Session<T> {
+ 
+     // Caution: This function must be called after peer info is received.
+     pub fn get_keyboard_mode(&self) -> String {
++        #[cfg(not(any(target_os = "android", target_os = "ios")))]
++        if crate::deskrealm_desktop::enabled() {
++            return KeyboardMode::Map.to_string();
++        }
+         let mode = self.lc.read().unwrap().keyboard_mode.clone();
+         let keyboard_mode = KeyboardMode::from_str(&mode);
+ 

@@ -110,15 +110,15 @@ def check_desktop(client, cache, scratch):
           "--no-default-features", "--features", DESKTOP_FEATURES)
 
 
-def check_view(client, cache, scratch):
+def check_x11(client, cache, scratch, selector, expected):
     in_source(
         client, cache, desktop_image(scratch),
         ["env", "RUSTDESK_FORCED_DISPLAY_SERVER=x11", "XDG_SESSION_TYPE=x11", "sh", "-ec",
-         'xvfb-run -a -s "-screen 0 640x480x24" "$@"\ntrue', "view",
+         'xvfb-run -a -s "-screen 0 640x480x24 -noreset" "$@"\ntrue', "desktop",
          "cargo", "test", "--locked", "--lib",
-         "--no-default-features", "--features", DESKTOP_FEATURES, "managed_view_",
+         "--no-default-features", "--features", DESKTOP_FEATURES, selector,
          "--", "--include-ignored", "--nocapture"],
-        required="test result: ok. 3 passed",
+        required=f"test result: ok. {expected} passed",
     )
 
 
@@ -129,6 +129,7 @@ def main():
     modes.add_argument("--admission", action="store_true", help="run managed endpoint admission on both paths")
     modes.add_argument("--desktop", action="store_true", help="check desktop routing and run native interoperability")
     modes.add_argument("--view", action="store_true", help="run the managed capture and message tests on X11")
+    modes.add_argument("--input", action="store_true", help="run the managed input dispatch and cleanup tests on X11")
     arguments = parser.parse_args()
     # Use a Docker-mountable path on macOS, even when TMPDIR is a per-user path.
     directory = os.environ.get("DESKREALM_NATIVE_TMPDIR", "/tmp")
@@ -142,8 +143,9 @@ def main():
             if actual.read_bytes() != canonical:
                 raise RuntimeError(f"{target}: managed protocol differs from the reviewed source")
         verify_schemas(source / "client", source / "server")
-        if arguments.view:
-            check_view(source / "client", scratch / "client-cache", scratch)
+        if arguments.view or arguments.input:
+            selector, expected = ("managed_input_", 2) if arguments.input else ("managed_view_", 3)
+            check_x11(source / "client", scratch / "client-cache", scratch, selector, expected)
             return
         if arguments.coordination or arguments.admission or arguments.desktop:
             admission = arguments.admission or arguments.desktop
