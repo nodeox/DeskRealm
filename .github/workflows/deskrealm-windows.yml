@@ -2,6 +2,9 @@ name: DeskRealm Windows native builds
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - ci/windows-native
   pull_request:
     paths:
       - '.github/workflows/deskrealm-windows.yml'
