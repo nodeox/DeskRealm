@@ -3,10 +3,10 @@ gsd_state_version: "1.0"
 current_phase: 3
 current_phase_name: M2 受管连接与策略
 status: executing
-last_updated: "2026-11-23T09:13:00Z"
+last_updated: "2026-11-23T09:40:45Z"
 last_activity: 2026-11-23
-last_activity_desc: 03-04 Task 2 双向纯文本剪贴板许可、队列失效和清理
-state_head: e2699fbe444648c442be669d5fed6e7543a9f234
+last_activity_desc: 03-04 Task 2 双向文件传输、撤销清理和审计回执
+state_head: d1c9bf7eaaa30ad770666cd46d44d77ba43c6f4f
 progress:
   total_phases: 5
   completed_phases: 2
@@ -27,9 +27,9 @@ See: .planning/PROJECT.md (updated 2026-11-22)
 ## Current Position
 
 Phase: 3 — M2 受管连接与策略
-Plan: 03-04 of 5，Task 2 进行中。受管主屏、键鼠、系统音频和双向文本剪贴板已接入。接续文件传输、资源清理和原生构建。
+Plan: 03-04 of 5，Task 2 进行中。五项受管能力均已接入。接续 Windows x64、ARM64 原生构建及端点门禁。
 Status: In progress
-Last activity: 2026-11-23 — Linux X11 验证剪贴板读写、旧队列丢弃、恢复和线程退出，直连及强制中继夹具验证双向报文。Windows 原生剪贴板待真机验证。
+Last activity: 2026-11-23 — Linux 原生文件用例验证双向传输、取消、撤销后的临时文件清理及失败回执。两路文件准入和 PostgreSQL 租约回归通过。
 
 ## Accumulated Context
 
