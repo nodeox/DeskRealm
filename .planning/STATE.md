@@ -3,10 +3,10 @@ gsd_state_version: "1.0"
 current_phase: 3
 current_phase_name: M2 受管连接与策略
 status: executing
-last_updated: "2026-11-23T07:48:39Z"
+last_updated: "2026-11-23T08:19:17Z"
 last_activity: 2026-11-23
-last_activity_desc: 03-04 Task 2 受管只读主屏采集及停控接入
-state_head: 95decf88aea17c9c6cf527593239c1eaa7501bb3
+last_activity_desc: 03-04 Task 2 受管键鼠许可、队列失效和本地输入清理
+state_head: d6af1692164f5e2fd91dd45c5d3b4a1047e56e9a
 progress:
   total_phases: 5
   completed_phases: 2
@@ -27,9 +27,9 @@ See: .planning/PROJECT.md (updated 2026-11-22)
 ## Current Position
 
 Phase: 3 — M2 受管连接与策略
-Plan: 03-04 of 5，Task 2 进行中。受管只读主屏已接入。接续键鼠、音频、剪贴板与文件传输的独立授权、资源清理和原生构建。
+Plan: 03-04 of 5，Task 2 进行中。受管主屏及键鼠已接入。接续音频、剪贴板与文件传输的独立授权、资源清理和原生构建。
 Status: In progress
-Last activity: 2026-11-23 — Linux X11 验证原生采集线程生成 VP9 帧和关闭后的订阅及线程清理。受管消息分派拒绝其他操作，直连和中继准入及停控回归通过。
+Last activity: 2026-11-23 — Linux X11 验证键鼠实际按下、许可失效后释放和旧队列丢弃。两路签名键鼠核销及只读画面回归通过。
 
 ## Accumulated Context
 
