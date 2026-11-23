@@ -18,4 +18,5 @@ export const auditLabels: Record<string, string> = {
   'audit.exported': '导出审计', 'audit.granted': '授予审计权限', 'audit.grant_revoked': '撤销审计权限',
   'audit.retention_changed': '更新保留期', 'audit.retention_pruned': '清理过期审计',
   'user.import_batch': '导入账号', 'task.retry_requested': '提交任务重试', 'task.target_finished': '完成任务执行',
+  'task.install_record_imported': '导入中心安装记录',
 }

@@ -1,17 +1,22 @@
 package install
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/csv"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
+
+	"deskrealm/internal/m1"
 )
 
 const databaseRecord = "database-ready"
@@ -296,4 +301,39 @@ func issueBootstrapTicket(ctx context.Context, c config, center publicDeployment
 		return "", errors.New("the center returned an invalid initialization link")
 	}
 	return link, nil
+}
+
+func importCenterRecord(ctx context.Context, center publicDeployment, actor string, record installRecord, output *json.Encoder) error {
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	if _, _, err := checkRuntime(ctx, docker); err != nil {
+		return err
+	}
+	data, err := json.Marshal(record)
+	if err != nil {
+		return err
+	}
+	withRecord := func(ctx context.Context, args ...string) ([]byte, error) {
+		cmd := exec.CommandContext(ctx, "docker", args...)
+		cmd.Stdin = bytes.NewReader(data)
+		return cmd.Output()
+	}
+	reply, err := composeCommand(ctx, withRecord, center, "exec", "-T", "center",
+		"/usr/local/bin/deskrealm", "import-install-record", actor)
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			for _, reason := range []error{m1.ErrInstallationRecordActor, m1.ErrInstallationRecordConflict, m1.ErrInstallationRecordInvalid} {
+				if strings.TrimSpace(string(exitErr.Stderr)) == "deskrealm: "+reason.Error() {
+					return reason
+				}
+			}
+		}
+		return errors.New("installation record import failed; check that the center is running with the latest migrations")
+	}
+	var result m1.InstallationImport
+	if err := json.Unmarshal(reply, &result); err != nil || result.TaskID != record.TaskID || result.Revision != record.Revision {
+		return errors.New("the center returned an invalid installation import result")
+	}
+	return output.Encode(result)
 }

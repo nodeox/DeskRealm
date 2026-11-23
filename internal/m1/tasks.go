@@ -3,9 +3,11 @@ package m1
 import (
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
+	"deskrealm/internal/installrecord"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -53,8 +55,8 @@ const scopedTaskFrom = ` FROM tasks t LEFT JOIN devices d ON d.id=t.device_id
 	LEFT JOIN device_groups dg ON dg.id=d.group_id `
 
 const taskSummaries = `SELECT t.id,t.kind,t.created_at,COALESCE(d.id::text,''),COALESCE(dg.name,''),
-	count(*) FILTER(WHERE tt.state='waiting'),count(*) FILTER(WHERE tt.state='queued'),
-	count(*) FILTER(WHERE tt.state='running'),count(*) FILTER(WHERE tt.state='succeeded'),
+	count(*) FILTER(WHERE tt.state='waiting' AND tt.result_code<>'install_running'),count(*) FILTER(WHERE tt.state='queued'),
+	count(*) FILTER(WHERE tt.state='running' OR tt.result_code='install_running'),count(*) FILTER(WHERE tt.state='succeeded'),
 	count(*) FILTER(WHERE tt.state='failed')` + scopedTaskFrom + ` LEFT JOIN task_targets tt ON tt.task_id=t.id
 	WHERE ` + taskScope
 
@@ -117,10 +119,20 @@ func (a *API) getTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := r.Context()
+	var revision int64
+	if value := r.URL.Query().Get("revision"); value != "" {
+		number, err := strconv.ParseInt(value, 10, 64)
+		if err != nil || number < 1 {
+			failure(w, "view task", errTaskInvalid)
+			return
+		}
+		revision = number
+	}
 	result := struct {
 		taskSummary
-		Targets  []taskTarget  `json:"targets"`
-		Attempts []taskAttempt `json:"attempts"`
+		Targets      []taskTarget          `json:"targets"`
+		Attempts     []taskAttempt         `json:"attempts"`
+		Installation *installrecord.Record `json:"installation,omitempty"`
 	}{}
 	err := a.withActor(r, false, func(tx pgx.Tx, who actor) error {
 		rows, err := tx.Query(ctx, taskSummaries+` AND t.id=$4`+taskSummaryGroup, who.Organization, who.ID, who.PlatformAdmin, id)
@@ -133,6 +145,19 @@ func (a *API) getTask(w http.ResponseWriter, r *http.Request) {
 		}
 		if err != nil {
 			return err
+		}
+		if result.Kind == "center_install" {
+			result.Installation = new(installrecord.Record)
+			err := tx.QueryRow(ctx, `SELECT snapshot FROM installation_task_records WHERE task_id=$1
+				AND ($2::bigint=0 OR revision=$2) ORDER BY revision DESC LIMIT 1`, id, revision).Scan(result.Installation)
+			if errors.Is(err, pgx.ErrNoRows) {
+				return errTaskMissing
+			}
+			if err != nil {
+				return err
+			}
+		} else if revision != 0 {
+			return errTaskMissing
 		}
 		rows, err = tx.Query(ctx, `SELECT id,object_key,state,result_code,($2 AND retryable),version
 			FROM task_targets WHERE task_id=$1 ORDER BY object_key,id`, id, who.PlatformAdmin && result.Kind == "user_import")

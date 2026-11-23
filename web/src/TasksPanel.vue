@@ -6,7 +6,17 @@ import { taskKinds as kinds, taskProgress as progress, taskStates as states, typ
 
 type Target = { id: string; object_key: string; state: TaskState; result_code: string; can_retry: boolean; version: number }
 type Attempt = { id?: string; target_id: string; sequence: number; result_code?: string; started_at: string; finished_at?: string }
-type Task = TaskSummary & { targets: Target[]; attempts: Attempt[] }
+type InstallStep = {
+  name: 'images' | 'database' | 'services' | 'health'
+  state: 'pending' | 'running' | 'completed' | 'failed' | 'interrupted'
+  attempts: number
+  updated_at?: string
+}
+type Task = TaskSummary & {
+  targets: Target[]
+  attempts: Attempt[]
+  installation?: { deployment_id: string; revision: number; steps: InstallStep[] }
+}
 
 const props = defineProps<{ csrf: string }>()
 const emit = defineEmits<{ expired: [] }>()
@@ -15,11 +25,14 @@ const results: Record<string, string> = {
   approved: '设备已通过审批', rejected: '设备已被拒绝', retired: '待审批设备已退役',
   lease_expired: '执行租约已过期', authorization_changed: '重试申请人的管理员权限已变更',
 }
+const steps = { images: '准备镜像', database: '检查数据库', services: '启动服务', health: '验证服务健康' }
+const installStates = { pending: '待执行', running: '执行中', completed: '成功', failed: '失败', interrupted: '已中断' }
 const base = '/v1/admin/tasks'
 const retryOnly = new URLSearchParams(location.search).get('retry') === 'available'
 const tasks = ref<TaskSummary[]>([])
 const next = ref('')
 const task = ref<Task>()
+const viewedRevision = ref('')
 const selected = ref<string[]>([])
 const selection = computed(() => task.value?.targets.filter(target => target.can_retry && selected.value.includes(target.id)) ?? [])
 const error = ref('')
@@ -47,8 +60,10 @@ async function readList(after = '') {
   next.value = response.next_cursor ?? ''
 }
 
-async function readDetail(id: string) {
-  task.value = await api<Task>(base + '/' + encodeURIComponent(id))
+async function readDetail(id: string, revision = '') {
+  const query = revision ? '?' + new URLSearchParams({ revision }) : ''
+  task.value = await api<Task>(base + '/' + encodeURIComponent(id) + query)
+  viewedRevision.value = revision
   selected.value = []
 }
 
@@ -57,7 +72,7 @@ async function refresh(after = '') {
   error.value = ''
   try {
     await readList(after)
-    if (task.value && !after) await readDetail(task.value.id)
+    if (task.value && !after) await readDetail(task.value.id, viewedRevision.value)
   } catch (cause) {
     if (cause instanceof RequestError && cause.status === 404) task.value = undefined
     error.value = message(cause)
@@ -66,12 +81,12 @@ async function refresh(after = '') {
   }
 }
 
-async function openTask(id: string) {
+async function openTask(id: string, revision = '') {
   busy.value = true
   error.value = ''
   notice.value = ''
   try {
-    await readDetail(id)
+    await readDetail(id, revision)
     await nextTick()
     detailHeading.value?.focus()
   } catch (cause) {
@@ -107,8 +122,9 @@ async function retry() {
 
 onMounted(async () => {
   await refresh()
-  const id = new URLSearchParams(location.search).get('task')
-  if (id) await openTask(id)
+  const query = new URLSearchParams(location.search)
+  const id = query.get('task')
+  if (id) await openTask(id, query.get('revision') ?? '')
 })
 </script>
 
@@ -144,8 +160,21 @@ onMounted(async () => {
     <dl>
       <div><dt>任务 ID</dt><dd><code>{{ task.id }}</code></dd></div>
       <div v-if="task.device_id"><dt>设备 ID</dt><dd><code>{{ task.device_id }}</code></dd></div>
+      <div v-if="task.installation"><dt>部署 ID</dt><dd><code>{{ task.installation.deployment_id }}</code></dd></div>
+      <div v-if="task.installation"><dt>记录修订</dt><dd>{{ task.installation.revision }}</dd></div>
     </dl>
-    <div class="table-wrap">
+    <div v-if="task.installation" class="table-wrap">
+      <table>
+        <thead><tr><th>步骤</th><th>状态</th><th>尝试次数</th><th>更新时间</th></tr></thead>
+        <tbody>
+          <tr v-for="step in task.installation.steps" :key="step.name">
+            <td>{{ steps[step.name] }}</td><td>{{ installStates[step.state] }}</td>
+            <td>{{ step.attempts }}</td><td>{{ step.updated_at ? formatTime(step.updated_at) : '—' }}</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <div v-else class="table-wrap">
       <table>
         <thead><tr><th>对象</th><th>状态</th><th>结果</th><th>执行记录</th></tr></thead>
         <tbody>

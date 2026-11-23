@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -26,12 +27,14 @@ func main() {
 }
 
 func run(ctx context.Context, args []string) error {
+	const usage = "deskrealm migrate | bootstrap-ticket | oidc-bind USERNAME SUBJECT | import-install-record USERNAME | serve"
 	if len(args) == 1 && args[0] == "--help" {
-		fmt.Println("deskrealm migrate | bootstrap-ticket | oidc-bind USERNAME SUBJECT | serve")
+		fmt.Println(usage)
 		return nil
 	}
-	if len(args) != 1 && !(len(args) == 3 && args[0] == "oidc-bind") {
-		return errors.New("expected migrate, bootstrap-ticket, oidc-bind USERNAME SUBJECT or serve")
+	if len(args) != 1 && !(len(args) == 3 && args[0] == "oidc-bind") &&
+		!(len(args) == 2 && args[0] == "import-install-record") {
+		return errors.New(usage)
 	}
 	dsn := os.Getenv("DESKREALM_DATABASE_URL")
 	if args[0] == "migrate" {
@@ -46,16 +49,11 @@ func run(ctx context.Context, args []string) error {
 		}
 		return nil
 	}
-	if args[0] != "bootstrap-ticket" && args[0] != "oidc-bind" && args[0] != "serve" {
-		return errors.New("expected migrate, bootstrap-ticket, oidc-bind USERNAME SUBJECT or serve")
+	if args[0] != "bootstrap-ticket" && args[0] != "oidc-bind" && args[0] != "serve" && args[0] != "import-install-record" {
+		return errors.New(usage)
 	}
 	if dsn == "" {
 		return errors.New("DESKREALM_DATABASE_URL is required")
-	}
-	dev := os.Getenv("DESKREALM_DEV_HTTP") == "1"
-	origin, err := m1.ParseOrigin(os.Getenv("DESKREALM_PUBLIC_ORIGIN"), dev)
-	if err != nil {
-		return err
 	}
 	db, err := pgxpool.New(ctx, dsn)
 	if err != nil {
@@ -68,6 +66,25 @@ func run(ctx context.Context, args []string) error {
 		return errors.New("database unavailable")
 	}
 	store := m1.Store{DB: db}
+	if args[0] == "import-install-record" {
+		if len(args) != 2 {
+			return errors.New(usage)
+		}
+		result, err := store.ImportInstallation(check, args[1], os.Stdin)
+		if errors.Is(err, m1.ErrInstallationRecordActor) || errors.Is(err, m1.ErrInstallationRecordConflict) ||
+			errors.Is(err, m1.ErrInstallationRecordInvalid) {
+			return err
+		}
+		if err != nil {
+			return errors.New("cannot persist installation record; check the center database and migrations")
+		}
+		return json.NewEncoder(os.Stdout).Encode(result)
+	}
+	dev := os.Getenv("DESKREALM_DEV_HTTP") == "1"
+	origin, err := m1.ParseOrigin(os.Getenv("DESKREALM_PUBLIC_ORIGIN"), dev)
+	if err != nil {
+		return err
+	}
 	if args[0] == "oidc-bind" {
 		if len(args) != 3 {
 			return errors.New("usage: deskrealm oidc-bind USERNAME SUBJECT")

@@ -101,7 +101,15 @@ docker compose --env-file /dev/null -f /var/lib/deskrealm/compose.json \
 deskrealm-install install-record --config /absolute/path/to/center.json
 ```
 
-安装记录包含稳定的部署与任务 ID、递增修订号、镜像准备、数据库、服务启动和验活的步骤状态及尝试次数。记录使用固定故障码，便于后续导入任务中心。健康重跑核对服务实际状态并保持已完成的记录。
+安装记录包含稳定的部署与任务 ID、递增修订号、镜像准备、数据库、服务启动和验活的步骤状态及尝试次数。记录使用固定故障码。健康重跑核对服务实际状态并保持已完成的记录。
+
+中心运行并创建首位管理员后，有权操作部署主机的人员可以把当前记录导入任务中心。`--actor` 指定一位当前启用的平台管理员，用于审计归属。
+
+```sh
+deskrealm-install import-record --config /absolute/path/to/center.json --actor admin
+```
+
+导入返回任务 ID、修订号及是否新写入。同一修订可重复提交，新的修订更新原任务，冲突或从未导入的较旧修订会被拒绝。平台管理员可在任务中心查看最新步骤。查看已导入的某一历史修订时，打开 `/tasks?task=TASK_ID&revision=REVISION`。每个新修订都会产生一条关联任务的审计记录。
 
 ## 签名离线包
 
@@ -159,6 +167,7 @@ bash scripts/deskrealm-m3-test install-bootstrap
 bash scripts/deskrealm-m3-test install-offline
 bash scripts/deskrealm-m3-test install-resume
 bash scripts/deskrealm-m3-test install-relay
+bash scripts/deskrealm-m3-test install-task
 ```
 
 检查构建本机 Docker 架构的 Go 中心、生产 Vue 静态文件和锁定受管源码的会合服务。两个临时镜像经回环 Registry 取得摘要后写入测试配置。安装器使用 Compose 启动四项服务并验活，Chromium 用一次性链接完成首管登录。随后模拟迁移后的 HTTPS 校验失败和安装中断，重跑后核对数据库和原公钥，再验证数据缺失或标识不符会阻止服务启动。数据库、测试 CA、镜像及 Compose 项目均为临时资源。

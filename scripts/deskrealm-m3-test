@@ -3,6 +3,10 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 case "${1:-}" in
+  install-task)
+    GOFLAGS="${GOFLAGS:-} -race" bash scripts/deskrealm-m1-test install-task
+    exec python3 -B managed/tests/center_install.py --install-task
+    ;;
   install-bootstrap)
     exec python3 -B managed/tests/center_install.py "${@:2}"
     ;;
@@ -43,7 +47,7 @@ case "${1:-}" in
     )
     ;;
   *)
-    echo "usage: $0 install-preflight|install-prepare|install-bootstrap|install-offline|install-resume|install-relay" >&2
+    echo "usage: $0 install-preflight|install-prepare|install-bootstrap|install-offline|install-resume|install-relay|install-task" >&2
     exit 2
     ;;
 esac

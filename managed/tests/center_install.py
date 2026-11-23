@@ -161,15 +161,15 @@ def wait_for_center(origin, port, ca, initialized):
     raise RuntimeError(f"HTTPS readiness failed: {last_error}")
 
 
-def browser_bootstrap(scratch, origin, certificate, ticket):
+def browser_case(scratch, origin, certificate, script, title, settings):
     key = run("openssl", "x509", "-in", certificate, "-pubkey", "-noout", stdout=subprocess.PIPE)
     der = run("openssl", "pkey", "-pubin", "-outform", "DER", input=key.stdout, stdout=subprocess.PIPE)
     spki = base64.b64encode(hashlib.sha256(der.stdout).digest()).decode()
     report = scratch / "chromium.json"
-    run("npm", "--prefix", "web", "run", "test:install", env={
+    run("npm", "--prefix", "web", "run", script, env={
         **os.environ,
+        **settings,
         "DESKREALM_BROWSER_BASE": origin,
-        "DESKREALM_BROWSER_TICKET": ticket,
         "DESKREALM_BROWSER_TLS_SPKI": spki,
         "DESKREALM_BROWSER_LOCAL_HOST": HOST,
         "DESKREALM_BROWSER_OUTPUT": str(scratch / "playwright"),
@@ -177,12 +177,12 @@ def browser_bootstrap(scratch, origin, certificate, ticket):
     })
     suites = json.loads(report.read_text())["suites"]
     specs = [spec for suite in suites for spec in suite.get("specs", [])]
-    if len(specs) != 1 or specs[0]["title"] != "HTTPS 中心首次管理员初始化和登录":
-        raise RuntimeError("required Chromium bootstrap regression is missing")
+    if len(specs) != 1 or specs[0]["title"] != title:
+        raise RuntimeError(f"required Chromium regression is missing: {title}")
     tests = specs[0]["tests"]
     if not tests or any(t["expectedStatus"] != "passed" or not t["results"] or
                         any(r["status"] != "passed" for r in t["results"]) for t in tests):
-        raise RuntimeError("required Chromium bootstrap regression did not pass")
+        raise RuntimeError(f"required Chromium regression did not pass: {title}")
 
 
 def start_default_relay(scratch, resources, origin, ca, prepared, token_file, port):
@@ -211,7 +211,7 @@ def start_default_relay(scratch, resources, origin, ca, prepared, token_file, po
     return container
 
 
-def exercise(scratch, images, resources, offline=None, default_relay=False):
+def exercise(scratch, images, resources, offline=None, default_relay=False, install_task=False):
     api_port, check_port, route_port, *extra_ports = available_ports(default_relay)
     origin = f"https://{HOST}:{api_port}"
     ca, _ = tls_context(scratch, f"DNS:{HOST}")
@@ -295,7 +295,8 @@ def exercise(scratch, images, resources, offline=None, default_relay=False):
     ticket = output(installer, "bootstrap-ticket", *flags)
     if not re.fullmatch(re.escape(origin) + r"/initialize#ticket=[A-Za-z0-9_-]{43}", ticket):
         raise RuntimeError("host-side command did not produce a valid initialization link")
-    browser_bootstrap(scratch, origin, certificate, ticket)
+    browser_case(scratch, origin, certificate, "test:install", "HTTPS 中心首次管理员初始化和登录",
+                 {"DESKREALM_BROWSER_TICKET": ticket})
     wait_for_center(origin, api_port, ca, initialized=True)
     print("Chromium first-administrator initialization and login passed.", flush=True)
 
@@ -318,6 +319,9 @@ def exercise(scratch, images, resources, offline=None, default_relay=False):
     if interrupted["task_id"] != completed["task_id"] or interrupted_steps != {
             "images": "completed", "database": "completed", "services": "completed", "health": "interrupted"}:
         raise RuntimeError("rebuild did not record the actual interrupted step")
+    if install_task:
+        assert_import(installer, flags, interrupted, imported=True)
+        assert_import(installer, flags, interrupted, imported=False)
     migration = output(*compose, "ps", "--all", "--quiet", "migrate")
     if not migration:
         raise RuntimeError("cannot identify the completed migration container")
@@ -335,6 +339,14 @@ def exercise(scratch, images, resources, offline=None, default_relay=False):
         raise RuntimeError("the test did not rebuild the Compose services")
     print("Interrupted rebuild retained the database, deployment ID and both public keys.", flush=True)
     print("Installation journal preserved the task across interruption; migration was not re-run to recover rendezvous.", flush=True)
+    if install_task:
+        assert_import(installer, flags, resumed, imported=True)
+        assert_import(installer, flags, resumed, imported=False)
+        browser_case(scratch, origin, certificate, "test:install-task", "任务中心显示中心安装结果和已导入的中断记录", {
+            "DESKREALM_BROWSER_INSTALL_TASK": resumed["task_id"],
+            "DESKREALM_BROWSER_INSTALL_REVISION": str(interrupted["revision"]),
+        })
+        print("Host import and Chromium verified the same task for interrupted and completed snapshots.", flush=True)
 
     run(*compose, "down")
     journal = installation / "install-record.json"
@@ -377,6 +389,12 @@ def assert_install_refusal(installer, flags, compose, reason):
     if (not failed.returncode or failed.stdout or reason not in failed.stderr or
             output(*compose, "ps", "--all", "--quiet")):
         raise RuntimeError(f"installer did not stop at expected failed check: {reason}")
+
+
+def assert_import(installer, flags, record, imported):
+    result = json.loads(output(installer, "import-record", *flags, "--actor", "install-admin"))
+    if result != {"task_id": record["task_id"], "revision": record["revision"], "imported": imported}:
+        raise RuntimeError("installation task import changed the task identity or replay outcome")
 
 
 def assert_image_failure(scratch, installer, configuration):
@@ -439,12 +457,13 @@ def main():
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument("--offline", action="store_true")
     modes.add_argument("--default-relay", action="store_true")
+    modes.add_argument("--install-task", action="store_true")
     options = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix="deskrealm-center-", dir="/tmp") as directory, ExitStack() as resources:
         scratch = Path(directory).resolve()
         images, registry = publish_images(scratch, resources, options.offline, options.default_relay)
         offline = prepare_offline_bundle(scratch, images, registry, resources) if options.offline else None
-        exercise(scratch, images, resources, offline, options.default_relay)
+        exercise(scratch, images, resources, offline, options.default_relay, options.install_task)
 
 
 if __name__ == "__main__":

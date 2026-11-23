@@ -24,6 +24,7 @@ const usage = `DeskRealm center installer
   deskrealm-install install   --config FILE
   deskrealm-install status    --config FILE
   deskrealm-install install-record --config FILE
+  deskrealm-install import-record --config FILE --actor USERNAME
   deskrealm-install bootstrap-ticket --config FILE
 
 Preflight checks configuration, TLS materials, local Docker and host ports.
@@ -32,6 +33,7 @@ Prepare writes the persistent center identity and Compose configuration.
 Install starts the deployment and checks its HTTPS and rendezvous services.
 Status inspects the persisted deployment and running services.
 Install-record prints the versioned local installation task and step outcomes.
+Import-record submits the local task snapshot to the running center.
 Bootstrap-ticket prints a one-time initialization link for a ready center.
 `
 
@@ -197,13 +199,17 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		return encoder.Encode(result)
 	}
 	switch args[0] {
-	case "preflight", "prepare", "install", "status", "bootstrap-ticket", "install-record":
+	case "preflight", "prepare", "install", "status", "bootstrap-ticket", "install-record", "import-record":
 	default:
 		return errors.New("unknown installer command; see --help")
 	}
 	flags := flag.NewFlagSet(args[0], flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	path := flags.String("config", "", "path to the center installation JSON")
+	var actor string
+	if args[0] == "import-record" {
+		flags.StringVar(&actor, "actor", "", "active platform administrator to attribute in the audit log")
+	}
 	if err := flags.Parse(args[1:]); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
@@ -232,7 +238,7 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 			return err
 		}
 		return encoder.Encode(result)
-	case "install-record":
+	case "install-record", "import-record":
 		center, err := readPrepared(c)
 		if err != nil {
 			return err
@@ -240,6 +246,12 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		record, err := loadInstallRecord(c.Directory, center.ID)
 		if err != nil {
 			return errors.New("no valid local installation record; run install to record a legacy deployment")
+		}
+		if args[0] == "import-record" {
+			if actor == "" {
+				return errors.New("--actor is required for installation record import")
+			}
+			return importCenterRecord(ctx, center, actor, record, encoder)
 		}
 		return encoder.Encode(record)
 	case "status", "bootstrap-ticket":
