@@ -3,10 +3,10 @@ gsd_state_version: "1.0"
 current_phase: 3
 current_phase_name: M2 受管连接与策略
 status: executing
-last_updated: "2026-11-23T17:31:04Z"
+last_updated: "2026-11-23T18:07:25Z"
 last_activity: 2026-11-23
-last_activity_desc: 03-06 Task 1 通讯录条目发起已通过开发验证
-state_head: cad98bb44c03a74c9132653466cedbb0ca69e347
+last_activity_desc: 03-06 Task 2 本地开发验证通过，Windows 双架构构建进行中
+state_head: c37fde79c99c840cfc234b8e17e9fd15499665af
 progress:
   total_phases: 5
   completed_phases: 2
@@ -27,9 +27,9 @@ See: .planning/PROJECT.md (updated 2026-11-22)
 ## Current Position
 
 Phase: 3 — M2 受管连接与策略
-Plan: [03-06](phases/03-m2/03-06-PLAN.md) Task 1 已通过开发验证。
-Status: In progress，接续 Task 2 无人值守发起、有人值守权限缩减及新候选的双架构 Windows 构建。
-Last activity: 2026-11-23 — `cad98bb` 从中文通讯录传递原条目至受管客户端。真实数据库验证撤权，隔离直连和强制中继已核销并收到停止回执。
+Plan: [03-06](phases/03-m2/03-06-PLAN.md) Task 1 已通过开发验证，Task 2 进入候选构建与全量复验。
+Status: In progress，等待 `c37fde7` 双架构 Windows 构建及同候选全量门禁。
+Last activity: 2026-11-23 — 隔离直连及强制中继、14 项 Linux 桌面回归、M0/M1、受管数据库及 Chromium 通过。[Windows 构建](https://github.com/nodeox/DeskRealm/actions/runs/45233877838)
 
 ## Accumulated Context
 

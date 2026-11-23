@@ -74,8 +74,8 @@ M4 包括浏览器主控、原生 LDAP、邮件验证和恢复、更多平台、
 | FR-13 | Phase 2 | Complete (Phase 3 已验证会话与终端事件关联) |
 | FR-18 | Phase 2 | Partial (中文工作台与 ID 连接有开发证据，原生入口与 Phase 4 分发待补) |
 | FR-08 | Phase 3 | Complete (开发验证) |
-| FR-09 | Phase 3 | Partial (Windows 主控的无人值守发起待补) |
-| FR-10 | Phase 3 | Partial (Windows 本机确认中的逐项缩减待补) |
+| FR-09 | Phase 3 | Partial (已接入 Windows 无人值守发起，待候选双架构验证) |
+| FR-10 | Phase 3 | Partial (已接入 Windows 本机逐项缩减，待候选双架构验证) |
 | FR-11 | Phase 3 | Complete (开发验证，Phase 5 测量时序) |
 | FR-12 | Phase 3 | Complete (开发验证) |
 | NFR-01 | Phase 3 | Complete (开发验证) |
