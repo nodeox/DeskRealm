@@ -65,6 +65,10 @@ const connectionDeviceReady = managedDeviceOnline + ` AND d.managed_heartbeat_pr
 // sessions must derive the subject and controller from its authenticated
 // identity, serialize authorization mutations, and intersect the applied policy.
 func evaluateConnectionRules(ctx context.Context, tx pgx.Tx, org string, in connectionRequest) (connectionDecision, error) {
+	return evaluateConnectionRuleVersion(ctx, tx, org, in, "", 0)
+}
+
+func evaluateConnectionRuleVersion(ctx context.Context, tx pgx.Tx, org string, in connectionRequest, rule string, version int64) (connectionDecision, error) {
 	if !in.valid() {
 		return connectionDecision{}, errConnectionInput
 	}
@@ -112,8 +116,9 @@ func evaluateConnectionRules(ctx context.Context, tx pgx.Tx, org string, in conn
 		))
 		AND (v.controller_device_id IS NULL OR v.controller_device_id=$4)
 		AND (v.target_device_id=$5 OR v.target_group_id=$6)
-		AND (v.effect='deny' OR (role.id IS NOT NULL AND v.allowed_actions @> $7::text[] AND role.allowed_actions @> $7::text[]))
-		ORDER BY (v.effect='deny') DESC,r.id LIMIT 1`, org, in.Purpose, in.User, in.Controller, target, group, in.Actions).
+		AND (v.effect='deny' OR (role.id IS NOT NULL AND v.allowed_actions @> $7::text[] AND role.allowed_actions @> $7::text[]
+		AND ($8='' OR (v.rule_id=NULLIF($8,'')::uuid AND v.version=$9))))
+		ORDER BY (v.effect='deny') DESC,r.id LIMIT 1`, org, in.Purpose, in.User, in.Controller, target, group, in.Actions, rule, version).
 		Scan(&result.Allowed, &result.Rule, &result.RuleVersion, &result.Role, &result.RoleVersion)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return connectionDecision{Reason: "no_matching_allow"}, nil

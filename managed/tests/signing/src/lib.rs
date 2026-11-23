@@ -40,6 +40,7 @@ fn valid_values(kind: u8, f: &[Vec<u8>]) -> bool {
                 && ((f[6][0] == 1 && f[7][0] == 0)
                     || (f[6][0] == 2 && (1..=7).contains(&f[7][0])))
         }
+        6 => (1..=0x1f).contains(&f[4][0]),
         _ => false,
     }
 }
@@ -51,6 +52,7 @@ fn encode(kind: u8, fields: &[Vec<u8>]) -> Option<Vec<u8>> {
         3 => &[0, 16, 16, 16, 16, 16, 16, 32, 32, 8, 1, 1, 0, 8, 8],
         4 => &[1, 32, 16, 16, 32, 32, 32, 1],
         5 => &[16, 16, 16, 8, 32, 8, 1, 1],
+        6 => &[32, 16, 16, 32, 1],
         _ => return None,
     };
     if fields.len() != widths.len()
@@ -133,7 +135,7 @@ mod tests {
         }
         verified_kinds.sort_unstable();
         verified_kinds.dedup();
-        assert_eq!(verified_kinds, [1, 2, 3, 4, 5]);
-        assert_eq!(rejected, 15);
+        assert_eq!(verified_kinds, [1, 2, 3, 4, 5, 6]);
+        assert_eq!(rejected, 17);
     }
 }

@@ -359,21 +359,29 @@ type managedController struct {
 	Protocol     uint16 `json:"protocol_version"`
 }
 
+type managedIdentityReader interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
 // Callers that create grants must revalidate this identity inside the grant
-// transaction under the same locks as the affected user and device.
-func (s Store) managedControllerSession(ctx context.Context, hash []byte) (managedController, error) {
+// transaction. Account disablement and login replacement revoke this same
+// browser session row, so locking it also orders grants against those changes.
+func managedControllerSession(ctx context.Context, db managedIdentityReader, hash []byte, lock bool) (managedController, error) {
 	var result managedController
 	if hash == nil {
 		return result, errManagedIdentity
 	}
-	err := s.DB.QueryRow(ctx, `SELECT u.id,d.id,d.organization_id,k.protocol_version
+	query := `SELECT u.id,d.id,d.organization_id,k.protocol_version
 		FROM managed_controller_credentials c JOIN managed_device_credentials k ON k.digest=c.device_digest
 		JOIN devices d ON d.id=k.device_id JOIN browser_sessions s ON s.token_digest=c.browser_digest
 		JOIN users u ON u.id=s.user_id AND u.organization_id=d.organization_id
 		WHERE c.digest=$1 AND c.expires_at>clock_timestamp() AND k.expires_at>clock_timestamp()
 		AND s.expires_at>clock_timestamp() AND s.revoked_at IS NULL AND u.status='active'
-		AND d.registration_state='approved' AND d.device_key_epoch=k.key_epoch`, hash).
-		Scan(&result.User, &result.Device, &result.Organization, &result.Protocol)
+		AND d.registration_state='approved' AND d.device_key_epoch=k.key_epoch`
+	if lock {
+		query += " FOR SHARE OF s"
+	}
+	err := db.QueryRow(ctx, query, hash).Scan(&result.User, &result.Device, &result.Organization, &result.Protocol)
 	if errors.Is(err, pgx.ErrNoRows) {
 		err = errManagedIdentity
 	}
@@ -381,7 +389,7 @@ func (s Store) managedControllerSession(ctx context.Context, hash []byte) (manag
 }
 
 func (a *API) managedUserSession(w http.ResponseWriter, r *http.Request) {
-	who, err := a.store.managedControllerSession(r.Context(), managedBearer(r, managedUserPrefix))
+	who, err := managedControllerSession(r.Context(), a.store.DB, managedBearer(r, managedUserPrefix), false)
 	if err != nil {
 		failure(w, "read managed user session", err)
 		return

@@ -100,6 +100,11 @@ func run(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	transport, err := m1.ConfigureManagedTransport(os.Getenv("DESKREALM_MANAGED_RENDEZVOUS_TOKEN"),
+		os.Getenv("DESKREALM_MANAGED_RELAY_ID"), os.Getenv("DESKREALM_MANAGED_RELAY_TOKEN"))
+	if err != nil {
+		return err
+	}
 	provider, err := m1.OpenOIDC(check, os.Getenv("DESKREALM_OIDC_ISSUER"),
 		os.Getenv("DESKREALM_OIDC_CLIENT_ID"), os.Getenv("DESKREALM_OIDC_CLIENT_SECRET"), origin.String(), dev)
 	if err != nil {
@@ -123,7 +128,7 @@ func run(ctx context.Context, args []string) error {
 		}
 	}
 	server := &http.Server{
-		Addr: addr, Handler: m1.NewHandler(store, origin, web, m1.AuthConfig{TOTP: totp, OIDC: provider, ManagedKey: managedKey}),
+		Addr: addr, Handler: m1.NewHandler(store, origin, web, m1.AuthConfig{TOTP: totp, OIDC: provider, ManagedKey: managedKey, Transport: transport}),
 		ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second,
 		WriteTimeout: 20 * time.Second, IdleTimeout: time.Minute,
 	}

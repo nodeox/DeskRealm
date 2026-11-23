@@ -23,15 +23,35 @@ type controlRole struct {
 	Version int64    `json:"version"`
 }
 
+var controlActions = [...]string{"view", "input", "audio", "clipboard", "file_transfer"}
+
+func controlActionMask(actions []string) byte {
+	var mask byte
+	for i, action := range controlActions {
+		if slices.Contains(actions, action) {
+			mask |= 1 << i
+		}
+	}
+	return mask
+}
+
+func controlActionsFromMask(mask byte) []string {
+	var actions []string
+	for i, action := range controlActions {
+		if mask&(1<<i) != 0 {
+			actions = append(actions, action)
+		}
+	}
+	return actions
+}
+
 func distinctControlActions(actions []string) bool {
 	if len(actions) == 0 || len(actions) > 5 {
 		return false
 	}
 	seen := make(map[string]struct{}, len(actions))
 	for _, value := range actions {
-		switch value {
-		case "view", "input", "audio", "clipboard", "file_transfer":
-		default:
+		if !slices.Contains(controlActions[:], value) {
 			return false
 		}
 		if _, found := seen[value]; found {

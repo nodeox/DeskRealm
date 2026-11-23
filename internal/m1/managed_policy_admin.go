@@ -49,13 +49,7 @@ func (in *policyContent) normalize() bool {
 }
 
 func policyPayloadHash(content policyContent) [32]byte {
-	var actions byte
-	for i, item := range []string{"view", "input", "audio", "clipboard", "file_transfer"} {
-		if slices.Contains(content.Actions, item) {
-			actions |= 1 << i
-		}
-	}
-	payload := append([]byte("DR-M2-policy-v1\x00"), actions)
+	payload := append([]byte("DR-M2-policy-v1\x00"), controlActionMask(content.Actions))
 	for _, purpose := range content.Unattended {
 		payload = append(payload, purpose...)
 		payload = append(payload, 0)

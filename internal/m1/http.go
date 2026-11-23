@@ -29,6 +29,7 @@ type API struct {
 	totp       *TOTPKey
 	oidc       *OIDC
 	managedKey *ManagedSigningKey
+	transport  ManagedTransport
 }
 
 type attempt struct {
@@ -59,13 +60,14 @@ type AuthConfig struct {
 	TOTP       *TOTPKey
 	OIDC       *OIDC
 	ManagedKey *ManagedSigningKey
+	Transport  ManagedTransport
 }
 
 func NewHandler(store Store, origin *url.URL, web fs.FS, config ...AuthConfig) http.Handler {
 	api := &API{store: store, origin: origin.String(), secure: origin.Scheme == "https",
 		web: web, hashSlots: make(chan struct{}, 4), attempts: make(map[string]attempt)}
 	if len(config) > 0 {
-		api.totp, api.oidc, api.managedKey = config[0].TOTP, config[0].OIDC, config[0].ManagedKey
+		api.totp, api.oidc, api.managedKey, api.transport = config[0].TOTP, config[0].OIDC, config[0].ManagedKey, config[0].Transport
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/bootstrap/status", api.bootstrapStatus)
@@ -144,6 +146,10 @@ func NewHandler(store Store, origin *url.URL, web fs.FS, config ...AuthConfig) h
 	mux.HandleFunc("POST /v1/managed/users/challenge", api.managedChallenge)
 	mux.HandleFunc("POST /v1/managed/users/complete", api.managedComplete)
 	mux.HandleFunc("GET /v1/managed/users/session", api.managedUserSession)
+	mux.HandleFunc("POST /v1/sessions", api.issueSessionGrant)
+	mux.HandleFunc("POST /v1/sessions/{id}/redeem", api.redeemSessionGrant)
+	mux.HandleFunc("POST /v1/internal/managed/rendezvous/authorize", api.authorizeSessionRoute)
+	mux.HandleFunc("POST /v1/internal/managed/relay/paired", api.authorizeSessionRoute)
 	mux.HandleFunc("GET /v1/address-books", api.listBooks)
 	mux.HandleFunc("POST /v1/address-books", api.saveBook)
 	mux.HandleFunc("GET /v1/address-books/{book}", api.readBook)
@@ -182,23 +188,31 @@ func NewHandler(store Store, origin *url.URL, web fs.FS, config ...AuthConfig) h
 			w.Header().Set("Cache-Control", "no-store")
 			if r.Method == http.MethodPost {
 				origin := r.Header.Get("Origin")
-				switch r.URL.Path {
-				case "/v1/managed/devices/challenge", "/v1/managed/devices/complete", "/v1/managed/devices/heartbeat",
-					"/v1/managed/devices/policy-receipts":
+				if isManagedNativePost(r.URL.Path) {
 					if len(r.Header.Values("Cookie")) != 0 || (origin != "" && origin != api.origin) {
 						writeError(w, http.StatusForbidden, "origin_denied")
 						return
 					}
-				default:
-					if !isDeviceEnrollmentRequest(r) && origin != api.origin {
-						writeError(w, http.StatusForbidden, "origin_denied")
-						return
-					}
+				} else if !isDeviceEnrollmentRequest(r) && origin != api.origin {
+					writeError(w, http.StatusForbidden, "origin_denied")
+					return
 				}
 			}
 		}
 		mux.ServeHTTP(w, r)
 	})
+}
+
+func isManagedNativePost(path string) bool {
+	switch path {
+	case "/v1/managed/devices/challenge", "/v1/managed/devices/complete", "/v1/managed/devices/heartbeat",
+		"/v1/managed/devices/policy-receipts", "/v1/sessions",
+		"/v1/internal/managed/rendezvous/authorize", "/v1/internal/managed/relay/paired":
+		return true
+	}
+	tail, prefix := strings.CutPrefix(path, "/v1/sessions/")
+	id, redeem := strings.CutSuffix(tail, "/redeem")
+	return prefix && redeem && userIDPattern.MatchString(id)
 }
 
 func (a *API) frontend(w http.ResponseWriter, r *http.Request) {
@@ -245,6 +259,12 @@ func failure(w http.ResponseWriter, operation string, err error) {
 		writeError(w, http.StatusUnauthorized, errManagedIdentity.Error())
 	case errors.Is(err, errManagedUnavailable):
 		writeError(w, http.StatusServiceUnavailable, errManagedUnavailable.Error())
+	case errors.Is(err, errSessionInput):
+		writeError(w, http.StatusBadRequest, errSessionInput.Error())
+	case errors.Is(err, errSessionDenied):
+		writeError(w, http.StatusForbidden, errSessionDenied.Error())
+	case errors.Is(err, errSessionConflict):
+		writeError(w, http.StatusConflict, errSessionConflict.Error())
 	case errors.Is(err, errCredentials):
 		writeError(w, http.StatusUnauthorized, errCredentials.Error())
 	case errors.Is(err, errEnrollment), errors.Is(err, errDeviceRotation):

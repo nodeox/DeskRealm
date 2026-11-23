@@ -29,6 +29,7 @@ bash scripts/deskrealm-m2-test sources
 | `03` 会话授权 | 中心 | `kid`（1–32 字节）、组织 UUID、会话 UUID、凭据 UUID、主控用户 UUID、主控设备 UUID、受控设备 UUID、主控当前公钥 SHA-256、受控当前公钥 SHA-256、受控端已应用策略修订序号、一字节操作掩码、一字节确认模式、用途标识（1–64 字节）、签发时间、到期时间 |
 | `04` 连接证明 | 连接一方 | 一字节证明方角色、授权摘要、会话 UUID、连接 UUID、本次加密通道绑定摘要、主控随机数、受控随机数、一字节路径 |
 | `05` 策略应用回执 | 接收策略的设备 | 组织 UUID、设备 UUID、交付 UUID、策略版本、载荷 SHA-256、设备密钥版本、一字节应用结果、一字节失败字段掩码 |
+| `06` 有人值守确认 | 受控设备 | 授权摘要、会话 UUID、连接 UUID、本次通道绑定摘要、一字节本地确认操作掩码 |
 
 操作掩码从最低位开始依次为画面、键鼠、音频、剪贴板、文件传输，至少请求一项。确认模式 `01` 为有人值守，`02` 为经批准的无人值守。连接证明角色 `01` 为主控，`02` 为受控。路径 `01` 为实际直连，`02` 为实际中继，未知路径在证明前保持未确认。两端随机数必须独立。授权摘要为验证通过后同一签名帧与 64 字节签名直接拼接的 SHA-256。通道绑定摘要来自本次已认证加密连接的实际协商，具体传输适配和一致性证明由 03-04 交付。
 
@@ -42,7 +43,7 @@ bash scripts/deskrealm-m2-test sources
 | 状态冲突 | 授权同键异载荷或版本已变更，要求按入口重取。身份挑战的重放返回统一认证失败。 |
 | 中心不可用 | 无法安全签发、核销或续租，保持拒绝新会话及现有租约的截止时间。 |
 
-协议夹具 [vectors.json](../managed/tests/vectors.json) 包含设备挑战、用户绑定、中心授权、直连主控证明、中继受控证明和策略回执的签名，以及无效格式用例。所有测试种子仅供夹具使用。Go 使用标准库 Ed25519，Rust 测试使用与上游同版本的 `sodiumoxide`，测试和环境均通过锁文件或镜像摘要固定。运行 `bash scripts/deskrealm-m2-test vectors` 可单独复跑。端点实际加密通道、准入、操作执行与租约回执将在后续计划取证。
+协议夹具 [vectors.json](../managed/tests/vectors.json) 包含设备挑战、用户绑定、中心授权、直连主控证明、中继受控证明、策略回执及有人值守确认的签名，以及无效格式用例。所有测试种子仅供夹具使用。Go 使用标准库 Ed25519，Rust 测试使用与上游同版本的 `sodiumoxide`，测试和环境均通过锁文件或镜像摘要固定。运行 `bash scripts/deskrealm-m2-test vectors` 可单独复跑。端点实际加密通道、准入、操作执行与租约回执将在后续计划取证。
 
 ## 设备运行身份与主控绑定
 
@@ -52,7 +53,7 @@ bash scripts/deskrealm-m2-test sources
 
 | API | 请求、验证及结果 |
 | --- | --- |
-| `GET /v1/managed/signing-key` | 通过预配置的 HTTPS 中心返回 `kid`、`public_key`。中心的会话授权签发及轮换链路由后续计划接入。 |
+| `GET /v1/managed/signing-key` | 通过预配置的 HTTPS 中心返回 `kid`、`public_key`。授权签名使用该密钥，中心签名密钥轮换由后续计划接入。 |
 | `POST /v1/managed/devices/challenge` | 提交 `device_id`、`protocol_version`。当前支持版本 1，仅已批准设备取得 60 秒挑战。相同在途挑战的重试返回同一结果。 |
 | `POST /v1/managed/devices/complete` | 提交 `device_id`、`challenge_id`、`signature`，使用当前已注册设备密钥签种类 `01`。一次核销后返回 `credential`、`expires_at`，运行凭据前缀为 `drd_`，有效期 15 分钟。签发结果丢失时重新申请挑战。 |
 | `POST /v1/managed/users/challenge` | 使用已有登录 Cookie、同源 Origin 和 CSRF 值，提交 `device_id`、`device_credential`。返回额外的 `user_id` 和 `flow`，绑定同一设备凭据和该次登录。 |
@@ -79,7 +80,7 @@ bash scripts/deskrealm-m2-test sources
 
 预览目标可选 `target_device_id`、`target_rustdesk_id` 或 `book_id` 与 `entry_id`。通讯录入口按被模拟用户实时复查册权限和目标设备可见性。连接判定还检查用户活跃、两端已批准、当前密钥认证心跳及协议版本。任一匹配拒绝优先。允许时须有一条已发布规则和它引用的同版角色完整覆盖所申请动作，后台管理员身份不会跳过 ACL。预览及规则变更写入审计。
 
-当前预览只计算 ACL 结果。后续会话签发以已认证主控主体调用同一个事务评估函数，并结合设备实际应用策略、可信发布和本地确认。
+预览返回 ACL 判定。会话签发在同一事务评估已认证主控主体的 ACL 和受控设备已应用的策略。受信发布来源准入随原生接入交付。
 
 ## 设备策略、灰度与回执
 
@@ -103,6 +104,23 @@ bash scripts/deskrealm-m2-test sources
 策略格式版本 1 的载荷摘要为 `SHA-256`，输入依次为 ASCII `DR-M2-policy-v1`、零字节、一字节操作掩码、字典序排序的无人值守用途。每个用途以零字节结束，用途遵循协议标识格式。策略标题和显示字段不参与摘要。含无人值守用途的版本只能分配到明确指定的设备。
 
 `05` 帧的应用结果 `01` 表示 `applied`，失败字段掩码为零。`02` 表示 `failed`，掩码按从低到高依次记录 `allowed_actions`、`unattended_purposes`、`schema_version`，至少一位有效。签名以当前登记设备密钥生成。中心只接受当前交付的身份、版本和摘要。重复同一结果可重试，过期或冲突回执返回 409。失败回执保留上一已应用版本。会话判定所用策略只取当前交付且经同一密钥版本确认成功的能力，密钥轮换会重新交付。
+
+## 中心会话签发与核销
+
+会话入口使用无 Cookie 的 Bearer 请求。主控和受控端的实际钥匙来自中心设备登记。会合和中继各使用独立的凭据。在中心配置中，`DESKREALM_MANAGED_RENDEZVOUS_TOKEN` 和 `DESKREALM_MANAGED_RELAY_TOKEN` 各为独立随机的 32 字节，使用无填充 Base64url。启用中继时同时配置 `DESKREALM_MANAGED_RELAY_ID`，格式与 `kid` 一致。向会合和中继入口发送 Bearer 时，分别在配置值前加 `drr_` 和 `drl_`。省略中继两项时只支持直连会合。
+
+| API | 认证及结果 |
+| --- | --- |
+| `POST /v1/sessions` | 主控的 `dru_`。提交 `request_id` UUID、`purpose`、`requested_actions` 和一个目标选择方式，默认 `confirmation_mode` 为 `attended`。首次签发返回 201，同主体同绑定同载荷重试返回 200 和原签发结果。 |
+| `POST /v1/internal/managed/rendezvous/authorize` | 会合的 `drr_`。提交 `session_id`、`grant_id`、`grant_signature`、`controller_device_id`、`target_device_id`、`connection_id`、`path`，中继路径另提交 `relay_id`。中心核对授权与两端并保存候选路径，成功返回 204。 |
+| `POST /v1/internal/managed/relay/paired` | 中继的 `drl_`。以相同字段报告该中继已配对的双方，配对须对应已有的会合候选路径。成功返回 204。 |
+| `POST /v1/sessions/{id}/redeem` | 授权目标设备的 `drd_`。提交 `grant_id`、`grant_signature`、`connection_id`、`path`、可选 `relay_id`、`channel_sha256`、双方随机数 `controller_nonce` 和 `target_nonce`、双方种类 `04` 的签名 `controller_signature` 和 `target_signature`。有人值守还需 `confirmed_actions` 及种类 `06` 的 `consent_signature`。 |
+
+签发响应返回种类 `03` 的所有字段及 `signature`。两端公钥摘要和通道摘要使用小写十六进制，随机数与签名使用无填充 Base64url。响应中的 `controller_rustdesk_id` 和 `target_rustdesk_id` 作为 HTTPS 路由元数据返回。中心在会合与核销时复查登记，RustDesk ID 之外的会话身份绑定使用种类 `03` 签名内的 UUID 和公钥摘要。申请动作须先由一条 ACL 完整覆盖，再与当前已应用策略求交。无人值守须由受控设备应用的策略明确允许该用途。有人值守确认的有效动作是授权动作的非空子集。
+
+受控端核销成功返回 `session_id`、`connection_id`、`path`、`relay_id`、`allowed_actions`、`lease_sequence`、`redeemed_ms`、`lease_until_ms`。直连和中继均要求两端对同一次加密通道签名。中继另要求对应的配对记录。核销只允许一个连接 UUID。精确重试在权限和初始租约有效时返回原结果和截止时间。竞争连接或同连接不同有效载荷返回 409。签发、会合和首次核销都会复查当前账号、两端、ACL 和已应用策略。签发及核销结果与审计及 outbox 在同一事务提交。
+
+运行 `bash scripts/deskrealm-m2-test sessions` 可在本机 PostgreSQL 验证中心事务。测试使用两端的签名夹具和独立服务凭据。续租、主动撤销和实际停止回执由 03-03 Task 2 交付。真实 RustDesk 通道绑定及中继配对上报由 03-04 交付。
 
 ## 原生构建入口与证据
 
