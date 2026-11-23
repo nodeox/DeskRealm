@@ -90,6 +90,9 @@ func (s Store) redeemIdentityGrant(ctx context.Context, kind, value, password st
 	}
 	key := digest(value)
 	return pgx.BeginFunc(ctx, s.DB, func(tx pgx.Tx) error {
+		if err := lockSessionAuthorization(ctx, tx); err != nil {
+			return err
+		}
 		var orgID, userID string
 		err := tx.QueryRow(ctx, `SELECT organization_id,user_id FROM identity_grants
 			WHERE token_digest=$1 AND kind=$2 AND consumed_at IS NULL AND expires_at>clock_timestamp()`, key, kind).

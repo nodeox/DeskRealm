@@ -119,6 +119,9 @@ func (a *API) authorizeSessionRoute(w http.ResponseWriter, r *http.Request) {
 			return errSessionDenied
 		}
 		reason, group, err := g.revalidate(ctx, tx)
+		if err == nil {
+			reason, err = sessionTerminalReason(ctx, tx, g.ID, reason)
+		}
 		if err != nil {
 			return err
 		}

@@ -132,6 +132,13 @@ func (a *API) saveControlRole(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return err
 		}
+		if id != "" {
+			if err := recheckSessions(ctx, tx, `organization_id=$1 AND EXISTS(
+				SELECT 1 FROM connection_rule_versions v WHERE v.rule_id=managed_sessions.rule_id
+				AND v.version=managed_sessions.rule_version AND v.role_id=$2)`, org, id); err != nil {
+				return err
+			}
+		}
 		return audit(ctx, tx, org, actor, action, input.ID)
 	})
 	if err != nil {

@@ -156,6 +156,9 @@ func (a *API) revokeBook(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return err
 		}
+		if err := recheckSessions(ctx, tx, "book_id=$1", book); err != nil {
+			return err
+		}
 		return auditWithReason(ctx, tx, who.Organization, who.ID, "address_book.share_revoked", book,
 			fmt.Sprintf("%s %s %s %d", grant, kind, subject, permission))
 	})

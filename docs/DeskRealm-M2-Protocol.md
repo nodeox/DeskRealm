@@ -118,9 +118,26 @@ bash scripts/deskrealm-m2-test sources
 
 签发响应返回种类 `03` 的所有字段及 `signature`。两端公钥摘要和通道摘要使用小写十六进制，随机数与签名使用无填充 Base64url。响应中的 `controller_rustdesk_id` 和 `target_rustdesk_id` 作为 HTTPS 路由元数据返回。中心在会合与核销时复查登记，RustDesk ID 之外的会话身份绑定使用种类 `03` 签名内的 UUID 和公钥摘要。申请动作须先由一条 ACL 完整覆盖，再与当前已应用策略求交。无人值守须由受控设备应用的策略明确允许该用途。有人值守确认的有效动作是授权动作的非空子集。
 
-受控端核销成功返回 `session_id`、`connection_id`、`path`、`relay_id`、`allowed_actions`、`lease_sequence`、`redeemed_ms`、`lease_until_ms`。直连和中继均要求两端对同一次加密通道签名。中继另要求对应的配对记录。核销只允许一个连接 UUID。精确重试在权限和初始租约有效时返回原结果和截止时间。竞争连接或同连接不同有效载荷返回 409。签发、会合和首次核销都会复查当前账号、两端、ACL 和已应用策略。签发及核销结果与审计及 outbox 在同一事务提交。
+受控端核销成功返回 `session_id`、`connection_id`、`path`、`relay_id`、`allowed_actions`、`lease_sequence`、`redeemed_ms`、`lease_until_ms` 和 `session_credential`。直连和中继均要求两端对同一次加密通道签名。中继另要求对应的配对记录。核销只允许一个连接 UUID。精确重试在权限和初始租约有效时返回原结果和截止时间。竞争连接或同连接不同有效载荷返回 409。签发、会合和首次核销都会复查当前账号、两端、ACL 和已应用策略。签发及核销结果与审计及 outbox 在同一事务提交。
 
-运行 `bash scripts/deskrealm-m2-test sessions` 可在本机 PostgreSQL 验证中心事务。测试使用两端的签名夹具和独立服务凭据。续租、主动撤销和实际停止回执由 03-03 Task 2 交付。真实 RustDesk 通道绑定及中继配对上报由 03-04 交付。
+运行 `bash scripts/deskrealm-m2-test sessions` 可在本机 PostgreSQL 验证中心事务。测试使用两端的签名夹具和独立服务凭据。真实 RustDesk 通道绑定及中继配对上报由 03-04 交付。
+
+## 续租、撤销与停止回执
+
+成功核销后只向受控端返回以 `drc_` 开头的会话凭据。中心将其摘要绑定到已经核销的会话和连接，凭据可用于恢复状态查询和补交回执。设备停用或密钥轮换后仍可用它完成该连接的回执。中心的会话读取、审计和通知正文均省略凭据。
+
+| API | 认证及结果 |
+| --- | --- |
+| `POST /v1/sessions/{id}/renew` | 受控设备当前的 `drd_` Bearer，同时提交 `connection_id`、`session_credential` 和上一份已取得的 `lease_sequence`。返回递增的序号、`lease_until_ms` 和核销时确定的 `allowed_actions`。 |
+| `GET /v1/sessions/{id}/status?connection_id=…` | 连接的 `drc_` Bearer。持久查询可在中心重建或断线后恢复，返回当前状态、已发序号、截止时间和已登记的撤销及停止时间。 |
+| `POST /v1/sessions/{id}/stopped` | 连接的 `drc_` Bearer。受控端停止操作后提交 `connection_id`、最后应用的 `lease_sequence` 和 `reason`，原因可为 `local_end`、`revoked`、`lease_expired` 或 `connection_lost`。成功返回 204，同载荷可重试。 |
+| `POST /v1/sessions/{id}/file-events` | 连接的 `drc_` Bearer，并要求已核销的文件传输权限。提交 `connection_id`、`lease_sequence`、`event_id` UUID、`direction`（`upload` 或 `download`，以主控方向为准）、`result`（`completed`、`failed` 或 `cancelled`）和非负整数 `size_bytes`。成功返回 204，仅保存这些元数据和中心接收时间。 |
+| `GET /v1/admin/sessions` 或 `GET /v1/admin/sessions/{id}` | 登录 Cookie。平台管理员查看组织范围，设备组授权用户查看其组范围，主控用户查看本人会话。列表包含当前范围的总量、活动数和两路核销数。用 `before` 和响应的 `next` 分页。 |
+| `POST /v1/admin/sessions/{id}/revoke` | 登录 Cookie、同源 Origin 和 CSRF 值。平台管理员或具有目标组管理权限的用户提交 `reason`（1 至 120 字）。返回当前撤销或停止状态。 |
+
+活动租约只在有效期内续订。事务复查绑定的原登录、账号、两端当前密钥、ACL 和当前已应用策略。短时主控凭据的正常更新保留同一次原登录。权限扩大需重新申请。相同续租请求仅可在最近一次成功仍有效时重试，返回原截止时间。其他旧序号与超前序号返回 409。已撤销、已停止或已到期的会话拒绝续租。受控端根据首次发出该次租约请求的本地单调时间限制 30 秒窗口，只对新序号更新截止时间。状态查询不会延长租约。
+
+手动撤销和影响授权的业务变更在同一事务写入失效状态、审计及 outbox。原生端运行期间独立查询状态，读取撤销即停止操作并补交回执。中心查询分别保留撤销请求时间、已跨过的租约截止时间和实际停止回执的接收时间。晚到回执保留早先的到期事实。收到实际回执前，已核销会话的撤销审计保持待回执。续租、撤销和回执的 PostgreSQL 检查入口为 `bash scripts/deskrealm-m2-test leases`。03-04 接入原生定时器、可靠通知查询与实际停止执行。
 
 ## 原生构建入口与证据
 

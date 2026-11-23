@@ -112,7 +112,7 @@ func (s Store) completeDeviceRotation(ctx context.Context, in rotationRequest, k
 	var out rotationReceipt
 	hash := digest(in.Credential)
 	err := pgx.BeginFunc(ctx, s.DB, func(tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, "SELECT singleton FROM organizations WHERE singleton FOR SHARE"); err != nil {
+		if err := lockSessionAuthorization(ctx, tx); err != nil {
 			return err
 		}
 		var org, group, state string
@@ -194,6 +194,9 @@ func (s Store) completeDeviceRotation(ctx context.Context, in rotationRequest, k
 			return err
 		}
 
+		if err := recheckSessions(ctx, tx, "controller_device_id=$1 OR target_device_id=$1", in.DeviceID); err != nil {
+			return err
+		}
 		event := "device.key_rotated"
 		if restore {
 			event = "device.restored"

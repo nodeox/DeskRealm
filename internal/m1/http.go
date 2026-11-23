@@ -148,6 +148,13 @@ func NewHandler(store Store, origin *url.URL, web fs.FS, config ...AuthConfig) h
 	mux.HandleFunc("GET /v1/managed/users/session", api.managedUserSession)
 	mux.HandleFunc("POST /v1/sessions", api.issueSessionGrant)
 	mux.HandleFunc("POST /v1/sessions/{id}/redeem", api.redeemSessionGrant)
+	mux.HandleFunc("POST /v1/sessions/{id}/renew", api.renewSession)
+	mux.HandleFunc("GET /v1/sessions/{id}/status", api.sessionRuntimeStatus)
+	mux.HandleFunc("POST /v1/sessions/{id}/stopped", api.sessionStopped)
+	mux.HandleFunc("POST /v1/sessions/{id}/file-events", api.sessionFileEvent)
+	mux.HandleFunc("GET /v1/admin/sessions", api.getSessions)
+	mux.HandleFunc("GET /v1/admin/sessions/{id}", api.getSessions)
+	mux.HandleFunc("POST /v1/admin/sessions/{id}/revoke", api.revokeSession)
 	mux.HandleFunc("POST /v1/internal/managed/rendezvous/authorize", api.authorizeSessionRoute)
 	mux.HandleFunc("POST /v1/internal/managed/relay/paired", api.authorizeSessionRoute)
 	mux.HandleFunc("GET /v1/address-books", api.listBooks)
@@ -211,8 +218,9 @@ func isManagedNativePost(path string) bool {
 		return true
 	}
 	tail, prefix := strings.CutPrefix(path, "/v1/sessions/")
-	id, redeem := strings.CutSuffix(tail, "/redeem")
-	return prefix && redeem && userIDPattern.MatchString(id)
+	id, action, found := strings.Cut(tail, "/")
+	return prefix && found && userIDPattern.MatchString(id) &&
+		(action == "redeem" || action == "renew" || action == "stopped" || action == "file-events")
 }
 
 func (a *API) frontend(w http.ResponseWriter, r *http.Request) {
@@ -259,6 +267,8 @@ func failure(w http.ResponseWriter, operation string, err error) {
 		writeError(w, http.StatusUnauthorized, errManagedIdentity.Error())
 	case errors.Is(err, errManagedUnavailable):
 		writeError(w, http.StatusServiceUnavailable, errManagedUnavailable.Error())
+	case errors.Is(err, errSessionMissing):
+		writeError(w, http.StatusNotFound, errSessionMissing.Error())
 	case errors.Is(err, errSessionInput):
 		writeError(w, http.StatusBadRequest, errSessionInput.Error())
 	case errors.Is(err, errSessionDenied):

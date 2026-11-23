@@ -148,6 +148,9 @@ func applyDeviceChange(ctx context.Context, tx pgx.Tx, who actor, d *device, act
 			return err
 		}
 	}
+	if err := recheckSessions(ctx, tx, "controller_device_id=$1 OR target_device_id=$1", d.ID); err != nil {
+		return err
+	}
 	if action == "move" {
 		_, err := addAuditEvent(ctx, tx, auditEvent{OrganizationID: who.Organization, ActorID: who.ID,
 			ResourceID: d.ID, DeviceGroupID: originalGroup, Action: event, Result: "success", Reason: reason})

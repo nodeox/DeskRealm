@@ -72,17 +72,18 @@ func (in sessionRedeemInput) parse() (sessionProof, bool) {
 }
 
 type sessionRedemption struct {
-	Connection, Path, Relay string
-	Mask                    int16
-	ProofHash               []byte
-	Started, Until          time.Time
+	Connection, Path, Relay      string
+	Mask                         int16
+	ProofHash, ReceiptDigest     []byte
+	Started, Until, CurrentUntil time.Time
+	Sequence                     int64
 }
 
 func readSessionRedemption(ctx context.Context, tx pgx.Tx, id string) (sessionRedemption, error) {
 	var out sessionRedemption
-	err := tx.QueryRow(ctx, `SELECT connection_id,path,COALESCE(relay_id,''),allowed_mask,proof_hash,redeemed_at,lease_until
+	err := tx.QueryRow(ctx, `SELECT connection_id,path,COALESCE(relay_id,''),allowed_mask,proof_hash,receipt_digest,redeemed_at,lease_until,COALESCE(renewed_until,lease_until),lease_sequence
 		FROM managed_session_redemptions WHERE session_id=$1`, id).
-		Scan(&out.Connection, &out.Path, &out.Relay, &out.Mask, &out.ProofHash, &out.Started, &out.Until)
+		Scan(&out.Connection, &out.Path, &out.Relay, &out.Mask, &out.ProofHash, &out.ReceiptDigest, &out.Started, &out.Until, &out.CurrentUntil, &out.Sequence)
 	return out, err
 }
 
@@ -156,6 +157,7 @@ func (a *API) redeemSessionGrant(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx := r.Context()
 	var out sessionRedemption
+	var receipt string
 	var rejected error
 	err := pgx.BeginFunc(ctx, a.store.DB, func(tx pgx.Tx) error {
 		if err := lockSessionAuthorization(ctx, tx); err != nil {
@@ -198,6 +200,9 @@ func (a *API) redeemSessionGrant(w http.ResponseWriter, r *http.Request) {
 			return deny(errSessionDenied, "relay_not_configured")
 		}
 		reason, _, err = g.revalidate(ctx, tx)
+		if err == nil {
+			reason, err = sessionTerminalReason(ctx, tx, g.ID, reason)
+		}
 		if err != nil {
 			return err
 		}
@@ -208,13 +213,24 @@ func (a *API) redeemSessionGrant(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return err
 		}
+		receipt = sessionReceiptCredential(a.managedKey, g, in.Connection)
+		receiptDigest := digest(receipt)
 		prior, err := readSessionRedemption(ctx, tx, g.ID)
 		if err == nil {
 			if prior.Connection != in.Connection || !bytes.Equal(prior.ProofHash, hash[:]) {
 				return deny(errSessionConflict, "redemption_conflict")
 			}
-			if !now.Before(prior.Until) {
-				return deny(errSessionDenied, "lease_expired")
+			activity, err := readSessionActivity(ctx, tx, g.ID)
+			if err != nil {
+				return err
+			}
+			if activity.State != "active" || !now.Before(prior.Until) {
+				return deny(errSessionDenied, "initial_lease_unavailable")
+			}
+			if prior.ReceiptDigest == nil {
+				if _, err := tx.Exec(ctx, "UPDATE managed_session_redemptions SET receipt_digest=$2 WHERE session_id=$1", g.ID, receiptDigest); err != nil {
+					return err
+				}
 			}
 			out = prior
 			return nil
@@ -234,9 +250,9 @@ func (a *API) redeemSessionGrant(w http.ResponseWriter, r *http.Request) {
 			return err
 		}
 		out = sessionRedemption{Connection: in.Connection, Path: in.Path, Relay: in.Relay, Mask: int16(mask),
-			ProofHash: hash[:], Started: now, Until: now.Add(30 * time.Second)}
-		_, err = tx.Exec(ctx, `INSERT INTO managed_session_redemptions(session_id,connection_id,path,relay_id,allowed_mask,proof_hash,redeemed_at,lease_until)
-			VALUES($1,$2,$3,NULLIF($4,''),$5,$6,$7,$8)`, id, in.Connection, in.Path, in.Relay, out.Mask, out.ProofHash, out.Started, out.Until)
+			ProofHash: hash[:], Started: now, Until: now.Add(sessionLeaseDuration)}
+		_, err = tx.Exec(ctx, `INSERT INTO managed_session_redemptions(session_id,connection_id,path,relay_id,allowed_mask,proof_hash,redeemed_at,lease_until,receipt_digest)
+			VALUES($1,$2,$3,NULLIF($4,''),$5,$6,$7,$8,$9)`, id, in.Connection, in.Path, in.Relay, out.Mask, out.ProofHash, out.Started, out.Until, receiptDigest)
 		if err != nil {
 			return err
 		}
@@ -252,6 +268,6 @@ func (a *API) redeemSessionGrant(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"session_id": id, "connection_id": out.Connection, "path": out.Path, "relay_id": out.Relay,
 		"allowed_actions": controlActionsFromMask(byte(out.Mask)), "lease_sequence": 1,
-		"redeemed_ms": out.Started.UnixMilli(), "lease_until_ms": out.Until.UnixMilli(),
+		"redeemed_ms": out.Started.UnixMilli(), "lease_until_ms": out.Until.UnixMilli(), "session_credential": receipt,
 	})
 }

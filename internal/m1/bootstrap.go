@@ -253,6 +253,9 @@ func (s Store) session(ctx context.Context, value string) (principal, error) {
 
 func (s Store) logout(ctx context.Context, value string, user principal) error {
 	return pgx.BeginFunc(ctx, s.DB, func(tx pgx.Tx) error {
+		if err := lockSessionAuthorization(ctx, tx); err != nil {
+			return err
+		}
 		var orgID string
 		err := tx.QueryRow(ctx, `UPDATE browser_sessions s SET revoked_at = now()
 			FROM users u WHERE s.token_digest = $1 AND s.revoked_at IS NULL AND s.user_id = u.id
@@ -261,6 +264,9 @@ func (s Store) logout(ctx context.Context, value string, user principal) error {
 			return nil
 		}
 		if err != nil {
+			return err
+		}
+		if err := recheckSessions(ctx, tx, "user_id=$1 AND browser_digest=$2", user.UserID, digest(value)); err != nil {
 			return err
 		}
 		return audit(ctx, tx, orgID, user.UserID, "user.logout", user.UserID)

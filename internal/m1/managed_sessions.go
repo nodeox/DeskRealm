@@ -37,28 +37,28 @@ type sessionIssueRequest struct {
 }
 
 type sessionGrant struct {
-	ID, Grant, Organization, User, Controller, Target string
-	ControllerRustDeskID, TargetRustDeskID            string
-	Book, Entry, Purpose, Kid, Mode, Rule             string
-	Actions                                           []string
-	ControllerDigest, RequestHash, Signature          []byte
-	ControllerKey, TargetKey                          []byte
-	PolicyVersion, RuleVersion                        int64
-	Mask                                              int16
-	Issued, Expires                                   time.Time
+	ID, Grant, Organization, User, Controller, Target       string
+	ControllerRustDeskID, TargetRustDeskID                  string
+	Book, Entry, Purpose, Kid, Mode, Rule                   string
+	Actions                                                 []string
+	ControllerDigest, BrowserDigest, RequestHash, Signature []byte
+	ControllerKey, TargetKey                                []byte
+	PolicyVersion, RuleVersion                              int64
+	Mask                                                    int16
+	Issued, Expires                                         time.Time
 }
 
 const sessionGrantSelect = `SELECT id,grant_id,organization_id,user_id,controller_device_id,target_device_id,
 	controller_rustdesk_id,target_rustdesk_id,COALESCE(book_id::text,''),COALESCE(entry_id::text,''),purpose,signing_kid,
 	confirmation_mode,rule_id,requested_actions,controller_digest,request_hash,signature,controller_key,target_key,
-	policy_version,rule_version,allowed_mask,issued_at,expires_at FROM managed_sessions `
+	policy_version,rule_version,allowed_mask,issued_at,expires_at,browser_digest FROM managed_sessions `
 
 func readSessionGrant(row pgx.Row) (sessionGrant, error) {
 	var g sessionGrant
 	err := row.Scan(&g.ID, &g.Grant, &g.Organization, &g.User, &g.Controller, &g.Target, &g.ControllerRustDeskID,
 		&g.TargetRustDeskID, &g.Book, &g.Entry, &g.Purpose, &g.Kid, &g.Mode, &g.Rule, &g.Actions,
 		&g.ControllerDigest, &g.RequestHash, &g.Signature, &g.ControllerKey, &g.TargetKey,
-		&g.PolicyVersion, &g.RuleVersion, &g.Mask, &g.Issued, &g.Expires)
+		&g.PolicyVersion, &g.RuleVersion, &g.Mask, &g.Issued, &g.Expires, &g.BrowserDigest)
 	return g, err
 }
 
@@ -152,6 +152,10 @@ func (g sessionGrant) revalidate(ctx context.Context, tx pgx.Tx) (string, string
 	if err != nil {
 		return "", "", err
 	}
+	return g.revalidateAccess(ctx, tx)
+}
+
+func (g sessionGrant) revalidateAccess(ctx context.Context, tx pgx.Tx) (string, string, error) {
 	in := connectionRequest{User: g.User, Controller: g.Controller, Target: g.Target, Book: g.Book, Entry: g.Entry, Purpose: g.Purpose, Actions: g.Actions}
 	if g.Book != "" {
 		in.Target = ""
@@ -240,6 +244,9 @@ func (a *API) issueSessionGrant(w http.ResponseWriter, r *http.Request) {
 				return auditSession(ctx, tx, prior, "", "session.grant_denied", "denied", "idempotency_conflict")
 			}
 			reason, group, err := prior.revalidate(ctx, tx)
+			if err == nil {
+				reason, err = sessionTerminalReason(ctx, tx, prior.ID, reason)
+			}
 			if err != nil {
 				return err
 			}
@@ -288,7 +295,7 @@ func (a *API) issueSessionGrant(w http.ResponseWriter, r *http.Request) {
 		g := sessionGrant{Organization: who.Organization, User: who.User, Controller: who.Device, Target: decision.Target,
 			ControllerRustDeskID: e.ControllerRustDeskID, TargetRustDeskID: e.TargetRustDeskID, ControllerKey: e.ControllerKey, TargetKey: e.TargetKey,
 			Book: req.Book, Entry: req.Entry, Purpose: req.Purpose, Actions: req.Actions, Mode: req.Mode, ControllerDigest: hash,
-			RequestHash: reqHash[:], Rule: decision.Rule, RuleVersion: decision.RuleVersion, PolicyVersion: policy, Mask: int16(mask), Kid: a.managedKey.id}
+			BrowserDigest: who.BrowserDigest, RequestHash: reqHash[:], Rule: decision.Rule, RuleVersion: decision.RuleVersion, PolicyVersion: policy, Mask: int16(mask), Kid: a.managedKey.id}
 		if err := tx.QueryRow(ctx, "SELECT gen_random_uuid(),gen_random_uuid(),date_trunc('milliseconds',clock_timestamp())").
 			Scan(&g.ID, &g.Grant, &g.Issued); err != nil {
 			return err
@@ -301,12 +308,12 @@ func (a *API) issueSessionGrant(w http.ResponseWriter, r *http.Request) {
 		g.Signature = ed25519.Sign(a.managedKey.key, frame)
 		_, err = tx.Exec(ctx, `INSERT INTO managed_sessions(id,grant_id,organization_id,user_id,controller_device_id,target_device_id,
 			controller_rustdesk_id,target_rustdesk_id,controller_digest,request_id,request_hash,book_id,entry_id,purpose,
-			requested_actions,controller_key,target_key,policy_version,rule_id,rule_version,allowed_mask,confirmation_mode,signing_kid,signature,issued_at,expires_at)
+			requested_actions,controller_key,target_key,policy_version,rule_id,rule_version,allowed_mask,confirmation_mode,signing_kid,signature,issued_at,expires_at,browser_digest)
 			VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NULLIF($12,'')::uuid,NULLIF($13,'')::uuid,
-				$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26)`,
+				$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27)`,
 			g.ID, g.Grant, g.Organization, g.User, g.Controller, g.Target, g.ControllerRustDeskID, g.TargetRustDeskID,
 			g.ControllerDigest, req.RequestID, g.RequestHash, g.Book, g.Entry, g.Purpose, g.Actions, g.ControllerKey, g.TargetKey,
-			g.PolicyVersion, g.Rule, g.RuleVersion, g.Mask, g.Mode, g.Kid, g.Signature, g.Issued, g.Expires)
+			g.PolicyVersion, g.Rule, g.RuleVersion, g.Mask, g.Mode, g.Kid, g.Signature, g.Issued, g.Expires, g.BrowserDigest)
 		if err != nil {
 			return err
 		}

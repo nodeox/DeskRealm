@@ -286,6 +286,9 @@ func (a *API) removeEntry(w http.ResponseWriter, r *http.Request) {
 		if _, err := tx.Exec(ctx, "DELETE FROM address_book_entries WHERE id=$1", entry); err != nil {
 			return err
 		}
+		if err := recheckSessions(ctx, tx, "book_id=$1 AND entry_id=$2", book, entry); err != nil {
+			return err
+		}
 		return auditWithReason(ctx, tx, who.Organization, who.ID, "address_book.entry_removed", book, entry)
 	})
 	if err != nil {

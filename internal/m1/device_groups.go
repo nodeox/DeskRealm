@@ -187,6 +187,11 @@ func (a *API) setDeviceGroupGrant(w http.ResponseWriter, r *http.Request) {
 				return err
 			}
 		}
+		if in.Revoke {
+			if err := recheckSessions(ctx, tx, "user_id=$1 AND book_id IS NOT NULL", target); err != nil {
+				return err
+			}
+		}
 		return auditWithReason(ctx, tx, org, who, action, id, target)
 	})
 	if err != nil {

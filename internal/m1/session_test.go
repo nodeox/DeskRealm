@@ -27,7 +27,7 @@ type sessionFixture struct {
 	ctx                                     context.Context
 	store                                   Store
 	h                                       http.Handler
-	admin                                   *http.Cookie
+	admin, user                             *http.Cookie
 	signing                                 *ManagedSigningKey
 	rule                                    connectionRule
 	controller, target, userID              string
@@ -80,10 +80,10 @@ func newSessionFixture(t *testing.T) sessionFixture {
 	login = request(h, "POST", userCompleteURL, testOrigin, proof, user, csrfToken(user.Value))
 	checkCode(t, login, 201, managedUserPrefix)
 	userToken := responseValue[managedCredential](t, login.Body.Bytes()).Value
-	role := createTestControlRole(t, h, admin, "view", "input", "clipboard")
+	role := createTestControlRole(t, h, admin, "view", "input", "clipboard", "file_transfer")
 	rule := makeRule(t, h, admin, connectionRuleSpec{Name: "会话夹具", SourceUser: member.ID, Controller: controller,
 		Target: target, Purpose: "helpdesk", Effect: "allow", Role: role.ID, RoleVersion: role.Version, Actions: role.Actions})
-	return sessionFixture{ctx: ctx, store: store, h: h, admin: admin, signing: signing, rule: rule,
+	return sessionFixture{ctx: ctx, store: store, h: h, admin: admin, user: user, signing: signing, rule: rule,
 		controller: controller, target: target, userID: member.ID, controllerToken: controllerToken, targetToken: targetToken,
 		userToken: userToken, controllerKey: controllerKey, targetKey: targetKey,
 		rendezvous: rendezvousPrefix + rendezvous, relay: relayPrefix + relay}

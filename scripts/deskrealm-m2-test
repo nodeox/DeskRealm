@@ -19,6 +19,9 @@ case "${1:-}" in
   sessions)
     GOFLAGS="${GOFLAGS:-} -race" bash scripts/deskrealm-m1-test managed-sessions
     ;;
+  leases)
+    GOFLAGS="${GOFLAGS:-} -race" bash scripts/deskrealm-m1-test session-leases
+    ;;
   vectors)
     go_result=$(go test -count=1 -v ./internal/managedproto -run '^TestSharedSigningVectors$') || {
       printf '%s\n' "$go_result" >&2
@@ -36,5 +39,5 @@ case "${1:-}" in
     printf '%s\n' "$rust_result"
     [[ "$rust_result" == *'test tests::shared_signing_vectors ... ok'* ]] || { echo "missing Rust signing-vector test" >&2; exit 1; }
     ;;
-  *) echo "usage: $0 sources|vectors|identity|rules|policies|sessions" >&2; exit 2 ;;
+  *) echo "usage: $0 sources|vectors|identity|rules|policies|sessions|leases" >&2; exit 2 ;;
 esac

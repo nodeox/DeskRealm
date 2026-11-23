@@ -353,10 +353,11 @@ func (a *API) managedComplete(w http.ResponseWriter, r *http.Request) {
 }
 
 type managedController struct {
-	User         string `json:"user_id"`
-	Device       string `json:"device_id"`
-	Organization string `json:"organization_id"`
-	Protocol     uint16 `json:"protocol_version"`
+	User          string `json:"user_id"`
+	Device        string `json:"device_id"`
+	Organization  string `json:"organization_id"`
+	Protocol      uint16 `json:"protocol_version"`
+	BrowserDigest []byte `json:"-"`
 }
 
 type managedIdentityReader interface {
@@ -371,7 +372,7 @@ func managedControllerSession(ctx context.Context, db managedIdentityReader, has
 	if hash == nil {
 		return result, errManagedIdentity
 	}
-	query := `SELECT u.id,d.id,d.organization_id,k.protocol_version
+	query := `SELECT u.id,d.id,d.organization_id,k.protocol_version,s.token_digest
 		FROM managed_controller_credentials c JOIN managed_device_credentials k ON k.digest=c.device_digest
 		JOIN devices d ON d.id=k.device_id JOIN browser_sessions s ON s.token_digest=c.browser_digest
 		JOIN users u ON u.id=s.user_id AND u.organization_id=d.organization_id
@@ -381,7 +382,7 @@ func managedControllerSession(ctx context.Context, db managedIdentityReader, has
 	if lock {
 		query += " FOR SHARE OF s"
 	}
-	err := db.QueryRow(ctx, query, hash).Scan(&result.User, &result.Device, &result.Organization, &result.Protocol)
+	err := db.QueryRow(ctx, query, hash).Scan(&result.User, &result.Device, &result.Organization, &result.Protocol, &result.BrowserDigest)
 	if errors.Is(err, pgx.ErrNoRows) {
 		err = errManagedIdentity
 	}

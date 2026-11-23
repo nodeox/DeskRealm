@@ -232,6 +232,9 @@ func (a *API) groupMember(w http.ResponseWriter, r *http.Request) {
 		if err != nil || tag.RowsAffected() == 0 {
 			return err
 		}
+		if err := recheckSessions(ctx, tx, "user_id=$1", user); err != nil {
+			return err
+		}
 		return auditWithReason(ctx, tx, org, actor, action, id, user)
 	})
 	if err != nil {

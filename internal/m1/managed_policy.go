@@ -18,7 +18,7 @@ var (
 // The organization lock used by policy writers and device lifecycle mutations
 // serializes selections. Native receipts only lock their device row.
 func refreshManagedPolicyTargets(ctx context.Context, tx pgx.Tx, org, deviceID string, retry bool) error {
-	_, err := tx.Exec(ctx, `WITH desired AS MATERIALIZED (
+	rows, err := tx.Query(ctx, `WITH desired AS MATERIALIZED (
 		SELECT d.id,d.organization_id,d.device_key_epoch,c.policy_version,c.assignment_id,c.revision
 		FROM devices d
 		LEFT JOIN managed_policy_deliveries current ON current.id=d.managed_policy_delivery_id
@@ -47,8 +47,15 @@ func refreshManagedPolicyTargets(ctx context.Context, tx pgx.Tx, org, deviceID s
 		RETURNING id,device_id
 	)
 	UPDATE devices d SET managed_policy_delivery_id=issued.id,expected_policy_version=desired.policy_version
-	FROM desired LEFT JOIN issued ON issued.device_id=desired.id WHERE d.id=desired.id`, org, deviceID, retry)
-	return err
+	FROM desired LEFT JOIN issued ON issued.device_id=desired.id WHERE d.id=desired.id RETURNING d.id`, org, deviceID, retry)
+	if err != nil {
+		return err
+	}
+	changed, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil || len(changed) == 0 {
+		return err
+	}
+	return recheckSessions(ctx, tx, "organization_id=$1 AND target_device_id=ANY($2::uuid[])", org, changed)
 }
 
 type policyDelivery struct {

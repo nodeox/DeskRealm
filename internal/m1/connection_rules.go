@@ -285,6 +285,9 @@ func (a *API) changeConnectionRule(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return err
 		}
+		if err := recheckSessions(ctx, tx, "organization_id=$1", who.Organization); err != nil {
+			return err
+		}
 		return auditWithReason(ctx, tx, who.Organization, who.ID, action, id, strconv.FormatInt(in.Version, 10))
 	})
 	if err != nil {

@@ -17,8 +17,10 @@ func revokeUserLogins(ctx context.Context, tx pgx.Tx, id string) error {
 	if _, err := tx.Exec(ctx, "UPDATE api_tokens SET revoked_at=now() WHERE user_id=$1 AND revoked_at IS NULL", id); err != nil {
 		return err
 	}
-	_, err := tx.Exec(ctx, "UPDATE browser_sessions SET revoked_at=now() WHERE user_id=$1 AND revoked_at IS NULL", id)
-	return err
+	if _, err := tx.Exec(ctx, "UPDATE browser_sessions SET revoked_at=now() WHERE user_id=$1 AND revoked_at IS NULL", id); err != nil {
+		return err
+	}
+	return recheckSessions(ctx, tx, "user_id=$1", id)
 }
 
 func (s Store) confirmAdminPassword(ctx context.Context, session, password string, action func(pgx.Tx, string, string) error) error {

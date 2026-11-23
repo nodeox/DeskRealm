@@ -8,6 +8,7 @@ import (
 )
 
 type overviewMetrics struct {
+	ActiveSessions   int64  `json:"active_sessions"`
 	Users            *int64 `json:"users,omitempty"`
 	OnlineDevices    *int64 `json:"online_devices,omitempty"`
 	PendingApprovals *int64 `json:"pending_approvals,omitempty"`
@@ -51,6 +52,12 @@ func (a *API) overview(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return err
 		}
+		var counts sessionMetrics
+		if err := tx.QueryRow(ctx, scopedSessionMetrics, who.Organization, who.ID, who.PlatformAdmin).
+			Scan(&counts.Total, &counts.Active, &counts.Direct, &counts.Relayed); err != nil {
+			return err
+		}
+		result.Metrics.ActiveSessions = counts.Active
 		result.CanReadTasks = result.CanReadDevices || ownsImport
 		result.CanReadUsers = who.PlatformAdmin
 		if !result.CanReadUsers {
