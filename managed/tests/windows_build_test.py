@@ -23,6 +23,14 @@ def pe_header(machine):
     return dos + struct.pack("<4sH18xH", b"PE\0\0", machine, 0x20B)
 
 
+class FlutterVersionTests(unittest.TestCase):
+    def test_accepts_machine_json_among_flutter_notices(self):
+        report = {"frameworkVersion": "3.44.8", "engineRevision": "example"}
+        output = f"First-run notice\n{json.dumps(report)}\nSDK notice\n".encode()
+        with patch.object(build.subprocess, "check_output", return_value=output):
+            self.assertEqual(build.flutter_version(), report)
+
+
 class WindowsEvidenceTests(unittest.TestCase):
     def setUp(self):
         temp = tempfile.TemporaryDirectory()

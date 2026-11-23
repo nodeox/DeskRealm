@@ -140,7 +140,18 @@ def copy_files(source, destination, names):
 
 
 def flutter_version():
-    return json.loads(output(["flutter", "--version", "--machine"]))
+    # Flutter may print first-run notices even in machine mode.
+    stdout = subprocess.check_output(command_line(["flutter", "--version", "--machine"]),
+                                     cwd=ROOT).decode("utf-8")
+    decoder = json.JSONDecoder()
+    for start in re.finditer(r"^\s*\{", stdout, re.MULTILINE):
+        try:
+            report, _ = decoder.raw_decode(stdout, start.end() - 1)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(report, dict) and report.get("frameworkVersion") and report.get("engineRevision"):
+            return report
+    raise ValueError("Flutter did not report its framework version and engine revision")
 
 
 def apply_flutter_source(client, target):
