@@ -157,6 +157,12 @@ func NewHandler(store Store, origin *url.URL, web fs.FS, config ...AuthConfig) h
 	mux.HandleFunc("POST /v1/admin/sessions/{id}/revoke", api.revokeSession)
 	mux.HandleFunc("POST /v1/internal/managed/rendezvous/authorize", api.authorizeSessionRoute)
 	mux.HandleFunc("POST /v1/internal/managed/relay/paired", api.authorizeSessionRoute)
+	mux.HandleFunc("GET /v1/admin/relays", api.listRelayNodes)
+	mux.HandleFunc("POST /v1/admin/relays", api.issueRelayEnrollment)
+	mux.HandleFunc("POST /v1/admin/relays/{id}/credential", api.issueRelayEnrollment)
+	mux.HandleFunc("POST /v1/relays/enrollment/challenge", api.relayEnroll)
+	mux.HandleFunc("POST /v1/relays/enrollment/complete", api.relayEnroll)
+	mux.HandleFunc("POST /v1/relays/health", api.relayHealth)
 	mux.HandleFunc("GET /v1/address-books", api.listBooks)
 	mux.HandleFunc("POST /v1/address-books", api.saveBook)
 	mux.HandleFunc("GET /v1/address-books/{book}", api.readBook)
@@ -216,6 +222,7 @@ func isManagedNativePost(path string) bool {
 	switch path {
 	case "/v1/managed/devices/challenge", "/v1/managed/devices/complete", "/v1/managed/devices/heartbeat",
 		"/v1/managed/devices/policy-receipts", "/v1/sessions",
+		"/v1/relays/enrollment/challenge", "/v1/relays/enrollment/complete", "/v1/relays/health",
 		"/v1/internal/managed/rendezvous/authorize", "/v1/internal/managed/relay/paired":
 		return true
 	}

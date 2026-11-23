@@ -31,6 +31,7 @@ const results: Record<string, string> = {
   approved: '设备已通过审批', rejected: '设备已被拒绝', retired: '待审批设备已退役',
   lease_expired: '执行租约已过期', authorization_changed: '重试申请人的管理员权限已变更',
   delivery_succeeded: '外部执行成功', delivery_failed: '外部执行失败', canceled: '执行前已取消',
+  relay_pending_enrollment: '等待中继登记', relay_pending_probe: '已登记，等待验活',
 }
 const steps = { images: '准备镜像', database: '检查数据库', services: '启动服务', health: '验证服务健康' }
 const installStates = { pending: '待执行', running: '执行中', completed: '成功', failed: '失败', interrupted: '已中断' }
@@ -199,7 +200,8 @@ onMounted(async () => {
               <span v-else>{{ target.object_key }}</span>
               <div v-if="target.operation_id" class="muted">操作 ID <code>{{ target.operation_id }}</code></div>
             </td>
-            <td>{{ states[target.state] }}</td><td>{{ results[target.result_code] ?? '—' }}</td>
+            <td>{{ task.kind === 'relay_enrollment' && target.state === 'waiting' ? '待执行' : states[target.state] }}</td>
+            <td>{{ results[target.result_code] ?? '—' }}</td>
             <td>
               <div v-for="attempt in task.attempts.filter(row => row.target_id === target.id)" :key="attempt.sequence">
                 <details>

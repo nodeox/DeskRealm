@@ -1,7 +1,7 @@
 export type TaskState = 'waiting' | 'queued' | 'running' | 'succeeded' | 'failed' | 'canceled'
 export type TaskSummary = Record<TaskState, number> & {
   id: string
-  kind: 'user_import' | 'device_enrollment' | 'center_install' | 'delivery'
+  kind: 'user_import' | 'device_enrollment' | 'center_install' | 'delivery' | 'relay_enrollment'
   created_at: string
   device_id?: string
   group?: string
@@ -10,11 +10,14 @@ export type TaskSummary = Record<TaskState, number> & {
 export const taskStates: Record<TaskState, string> = {
   waiting: '待审批', queued: '待执行', running: '执行中', succeeded: '成功', failed: '失败', canceled: '已取消',
 }
-export const taskKinds = { user_import: '账号导入', device_enrollment: '设备入网', center_install: '中心安装', delivery: '交付任务' }
+export const taskKinds = {
+  user_import: '账号导入', device_enrollment: '设备入网', center_install: '中心安装',
+  delivery: '交付任务', relay_enrollment: '中继登记',
+}
 
 export function taskProgress(item: TaskSummary) {
   return (Object.keys(taskStates) as TaskState[]).filter(key => item[key] > 0).map(key => {
-    const label = key === 'waiting' && item.kind === 'center_install' ? '待执行' : taskStates[key]
+    const label = key === 'waiting' && (item.kind === 'center_install' || item.kind === 'relay_enrollment') ? '待执行' : taskStates[key]
     return `${label} ${item[key]}`
   }).join(' · ')
 }
