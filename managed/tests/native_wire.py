@@ -90,7 +90,7 @@ def run_fixture(server, client, admission):
     subprocess.run(args, check=True)
 
 
-def check_desktop(client, cache, scratch):
+def desktop_image(scratch):
     iid = scratch / "desktop-image"
     dockerfile = ROOT / "managed/tests/desktop-linux.Dockerfile"
     context = scratch / "desktop-context"
@@ -99,9 +99,27 @@ def check_desktop(client, cache, scratch):
         ["docker", "build", "--quiet", "--iidfile", iid, "--file", dockerfile, context],
         check=True,
     )
-    image = iid.read_text().strip()
-    cargo(client, cache, image, "check", "--locked", "--lib", "--no-default-features",
-          "--features", "deskrealm-managed,linux-pkg-config,use_dasp")
+    return iid.read_text().strip()
+
+
+DESKTOP_FEATURES = "deskrealm-managed,linux-pkg-config,use_dasp"
+
+
+def check_desktop(client, cache, scratch):
+    cargo(client, cache, desktop_image(scratch), "check", "--locked", "--lib",
+          "--no-default-features", "--features", DESKTOP_FEATURES)
+
+
+def check_view(client, cache, scratch):
+    in_source(
+        client, cache, desktop_image(scratch),
+        ["env", "RUSTDESK_FORCED_DISPLAY_SERVER=x11", "XDG_SESSION_TYPE=x11", "sh", "-ec",
+         'xvfb-run -a -s "-screen 0 640x480x24" "$@"\ntrue', "view",
+         "cargo", "test", "--locked", "--lib",
+         "--no-default-features", "--features", DESKTOP_FEATURES, "managed_view_",
+         "--", "--include-ignored", "--nocapture"],
+        required="test result: ok. 3 passed",
+    )
 
 
 def main():
@@ -110,6 +128,7 @@ def main():
     modes.add_argument("--coordination", action="store_true", help="build and run the managed server pair")
     modes.add_argument("--admission", action="store_true", help="run managed endpoint admission on both paths")
     modes.add_argument("--desktop", action="store_true", help="check desktop routing and run native interoperability")
+    modes.add_argument("--view", action="store_true", help="run the managed capture and message tests on X11")
     arguments = parser.parse_args()
     # Use a Docker-mountable path on macOS, even when TMPDIR is a per-user path.
     directory = os.environ.get("DESKREALM_NATIVE_TMPDIR", "/tmp")
@@ -123,6 +142,9 @@ def main():
             if actual.read_bytes() != canonical:
                 raise RuntimeError(f"{target}: managed protocol differs from the reviewed source")
         verify_schemas(source / "client", source / "server")
+        if arguments.view:
+            check_view(source / "client", scratch / "client-cache", scratch)
+            return
         if arguments.coordination or arguments.admission or arguments.desktop:
             admission = arguments.admission or arguments.desktop
             if admission:

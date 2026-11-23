@@ -7,7 +7,7 @@ RUN apt-get update -qq \
         libopus-dev libpam0g-dev libpulse-dev libudev-dev libvpx-dev libwayland-dev \
         libx11-dev libxcb1-dev libxcb-randr0-dev libxcb-shm0-dev libxcb-xfixes0-dev \
         libxdo-dev libxfixes-dev libxi-dev libxinerama-dev libxkbcommon-dev \
-        libxrandr-dev libxtst-dev libyuv-dev \
+        libxrandr-dev libxtst-dev libyuv-dev xauth xvfb \
     && rm -rf /var/lib/apt/lists/*
 
 # Debian Bookworm libyuv-dev has headers and a library without a .pc file.

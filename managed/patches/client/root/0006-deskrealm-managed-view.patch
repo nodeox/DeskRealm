@@ -1,0 +1,875 @@
+diff --git a/libs/base/src/deskrealm_endpoint/lease/supervisor.rs b/libs/base/src/deskrealm_endpoint/lease/supervisor.rs
+index ba1817e..301a69a 100644
+--- a/libs/base/src/deskrealm_endpoint/lease/supervisor.rs
++++ b/libs/base/src/deskrealm_endpoint/lease/supervisor.rs
+@@ -114,23 +114,26 @@ impl Authority {
+             device_bearer,
+             stopped,
+             |mut stream, _| async move { wait_for_peer_close(&mut stream).await },
++            || async { Ok(()) },
+         )
+         .await
+     }
+ 
+     /// Runs a target data-plane future for an already redeemed lease. The driver
+     /// owns its stream and uses the access handle at each execution boundary.
+-    /// On cancellation its owned resources must be released before returning.
+-    pub async fn run_target<F>(
++    /// After cancellation, cleanup joins any resource workers before the stop receipt.
++    pub async fn run_target<F, C>(
+         &self,
+         stream: Stream,
+         mut lease: Lease,
+         device_bearer: impl Fn() -> Option<String>,
+         stopped: impl Fn() -> bool,
+         driver: impl FnOnce(Stream, SessionAccess) -> F,
++        cleanup: impl FnOnce() -> C,
+     ) -> ResultType<StopReason>
+     where
+         F: Future<Output = StopReason>,
++        C: Future<Output = ResultType<()>>,
+     {
+         let end = {
+             let access = SessionAccess::new();
+@@ -146,6 +149,7 @@ impl Authority {
+             end
+         };
+ 
++        cleanup().await?;
+         let End::Stopped(reason) = end else {
+             return Ok(StopReason::LocalEnd);
+         };
+diff --git a/src/client.rs b/src/client.rs
+index a15b9b5..285f557 100644
+--- a/src/client.rs
++++ b/src/client.rs
+@@ -395,8 +395,9 @@ impl Client {
+             if conn_type != ConnType::DEFAULT_CONN {
+                 bail!("managed mode requires the desktop connection entry");
+             }
+-            crate::deskrealm_desktop::connect(peer, interface.is_force_relay()).await?;
+-            bail!("受管会话准入已通过，当前构建尚未启用远程操作。");
++            let (stream, direct) =
++                crate::deskrealm_desktop::connect(peer, interface.is_force_relay()).await?;
++            return Ok(((stream, direct, None, None, "TCP"), (0, String::new())));
+         }
+         match Self::_start(peer, key, token, conn_type, interface.clone()).await {
+             Err(err) => {
+diff --git a/src/client/io_loop.rs b/src/client/io_loop.rs
+index 1b197a8..e87ac12 100644
+--- a/src/client/io_loop.rs
++++ b/src/client/io_loop.rs
+@@ -71,6 +71,54 @@ use std::{
+     },
+ };
+ 
++#[cfg(not(any(target_os = "android", target_os = "ios")))]
++fn managed_view_refresh(message: &Message) -> bool {
++    matches!(
++        message.misc().union.as_ref(),
++        Some(misc::Union::RefreshVideo(true) | misc::Union::RefreshVideoDisplay(0))
++    )
++}
++
++fn managed_view_response(message: &Message, connected: bool) -> bool {
++    match message.union.as_ref() {
++        Some(message::Union::VideoFrame(frame)) => connected && frame.display == 0,
++        Some(message::Union::LoginResponse(response)) => !connected
++            && match response.union.as_ref() {
++                Some(login_response::Union::PeerInfo(info)) => info.displays.len() == 1
++                    && info.current_display == 0 && !info.sas_enabled
++                    && info.windows_sessions.is_none() && info.features.is_none()
++                    && info.platform_additions.is_empty(),
++                Some(login_response::Union::Error(_)) => true,
++                _ => false,
++            },
++        Some(message::Union::Misc(misc)) => match misc.union.as_ref() {
++            Some(misc::Union::CloseReason(_)) => true,
++            Some(misc::Union::PermissionInfo(permission)) => !permission.enabled,
++            _ => false,
++        },
++        _ => false,
++    }
++}
++
++#[cfg(test)]
++#[test]
++fn managed_view_does_not_dispatch_legacy_or_other_capabilities() {
++    let mut message = Message::new();
++    message.set_hash(Default::default());
++    assert!(!managed_view_response(&message, false));
++    message.set_clipboard(Default::default());
++    assert!(!managed_view_response(&message, true));
++    message.set_file_action(Default::default());
++    assert!(!managed_view_response(&message, true));
++    message.set_audio_frame(Default::default());
++    assert!(!managed_view_response(&message, true));
++    message.set_video_frame(Default::default());
++    assert!(!managed_view_response(&message, false));
++    assert!(managed_view_response(&message, true));
++    message.mut_video_frame().display = 1;
++    assert!(!managed_view_response(&message, true));
++}
++
+ pub struct Remote<T: InvokeUiSession> {
+     handler: Session<T>,
+     audio_sender: MediaSender,
+@@ -162,10 +210,12 @@ impl<T: InvokeUiSession> Remote<T> {
+     }
+ 
+     pub async fn io_loop(&mut self, key: &str, token: &str, round: u32) {
++        #[cfg(not(any(target_os = "android", target_os = "ios")))]
++        let managed = crate::deskrealm_desktop::enabled();
+         #[cfg(target_os = "windows")]
+         let _file_clip_context_holder = {
+             // `is_port_forward()` will not reach here, but we still check it for clarity.
+-            if self.handler.is_default() {
++            if self.handler.is_default() && !managed {
+                 // It is ok to call this function multiple times.
+                 ContextSend::enable(true);
+                 Some(crate::SimpleCallOnReturn {
+@@ -249,6 +299,12 @@ impl<T: InvokeUiSession> Remote<T> {
+                     return;
+                 }
+                 self.handler.update_direct(Some(direct));
++                #[cfg(not(any(target_os = "android", target_os = "ios")))]
++                if managed {
++                    self.managed_view_loop(&mut peer).await;
++                    self.handle_disconnected(round);
++                    return;
++                }
+                 if conn_type == ConnType::DEFAULT_CONN || conn_type == ConnType::VIEW_CAMERA {
+                     self.handler
+                         .set_fingerprint(crate::common::pk_to_fingerprint(pk.unwrap_or_default()));
+@@ -306,7 +362,7 @@ impl<T: InvokeUiSession> Remote<T> {
+                                             self.handler.update_received(true);
+                                         }
+                                         self.data_count.fetch_add(bytes.len(), Ordering::Relaxed);
+-                                        if !self.handle_msg_from_peer(bytes, &mut peer).await {
++                                        if !self.handle_msg_from_peer(bytes, &mut peer, false).await {
+                                             break
+                                         }
+                                     }
+@@ -1693,16 +1749,62 @@ impl<T: InvokeUiSession> Remote<T> {
+         return false;
+     }
+ 
+-    async fn handle_msg_from_peer(&mut self, data: &[u8], peer: &mut Stream) -> bool {
+-        if let Ok(msg_in) = Message::parse_from_bytes(&data) {
++    #[cfg(not(any(target_os = "android", target_os = "ios")))]
++    async fn managed_view_loop(&mut self, peer: &mut Stream) {
++        let mut deadline = Instant::now() + SEC30;
++        loop {
++            tokio::select! {
++                _ = time::sleep_until(deadline) => {
++                    self.handler.on_establish_connection_error("Timeout".to_owned());
++                    break;
++                }
++                frame = peer.next() => {
++                    let Some(Ok(bytes)) = frame else {
++                        self.handler.on_establish_connection_error("受管会话已断开".to_owned());
++                        break;
++                    };
++                    deadline = Instant::now() + SEC30;
++                    if !self.is_connected {
++                        self.handler.update_received(true);
++                    }
++                    if !self.handle_msg_from_peer(&bytes, peer, true).await {
++                        break;
++                    }
++                }
++                command = self.receiver.recv() => match command {
++                    None | Some(Data::Close) => {
++                        base::deskrealm_endpoint::send_controller_end(peer).await;
++                        break;
++                    }
++                    Some(Data::Message(message)) if managed_view_refresh(&message) => {
++                        if !matches!(time::timeout(Duration::from_secs(2), peer.send(&message)).await, Ok(Ok(()))) {
++                            break;
++                        }
++                    }
++                    Some(command @ Data::ResetDecoder(_)) => {
++                        self.handle_msg_from_ui(command, peer).await;
++                    }
++                    _ => {}
++                }
++            }
++        }
++    }
++
++    async fn handle_msg_from_peer(&mut self, data: &[u8], peer: &mut Stream, managed: bool) -> bool {
++        if let Ok(msg_in) = Message::parse_from_bytes(data) {
++            if managed && !managed_view_response(&msg_in, self.is_connected) {
++                return true;
++            }
+             match msg_in.union {
+                 Some(message::Union::VideoFrame(vf)) => {
+                     if !self.first_frame {
+                         self.first_frame = true;
+                         self.handler.close_success();
+                         self.handler.adapt_size();
+-                        self.send_toggle_virtual_display_msg(peer).await;
+-                        self.send_toggle_privacy_mode_msg(peer).await;
++                        if !managed {
++                            self.send_toggle_virtual_display_msg(peer).await;
++                            self.send_toggle_privacy_mode_msg(peer).await;
++                        }
+                     }
+                     self.video_format = CodecFormat::from(&vf);
+ 
+@@ -1771,8 +1873,10 @@ impl<T: InvokeUiSession> Remote<T> {
+                         }
+                         self.handler.handle_peer_info(pi);
+                         #[cfg(all(target_os = "windows", not(feature = "flutter")))]
+-                        self.check_clipboard_file_context();
+-                        if self.handler.is_default() {
++                        if !managed {
++                            self.check_clipboard_file_context();
++                        }
++                        if self.handler.is_default() && !managed {
+                             // Startup notifications must see the current sessions' clipboard requirements.
+                             #[cfg(feature = "flutter")]
+                             #[cfg(not(target_os = "ios"))]
+@@ -2476,7 +2580,7 @@ impl<T: InvokeUiSession> Remote<T> {
+                     }
+                     _ => {}
+                 },
+-                Some(message::Union::TestDelay(t)) => {
++                Some(message::Union::TestDelay(t)) if !managed => {
+                     self.handler.handle_test_delay(t, peer).await;
+                 }
+                 Some(message::Union::AudioFrame(frame)) => {
+diff --git a/src/deskrealm_desktop.rs b/src/deskrealm_desktop.rs
+index d2f52dc..759ecd9 100644
+--- a/src/deskrealm_desktop.rs
++++ b/src/deskrealm_desktop.rs
+@@ -2,8 +2,8 @@
+ 
+ use base::{
+     deskrealm_endpoint::{
+-        send_controller_end, AppliedPolicy, Authority, DeviceCredential, DeviceIdentity,
+-        InstalledPolicy, LocalConsent, TargetSession,
++        AppliedPolicy, Authority, DeviceCredential, DeviceIdentity, InstalledPolicy, LocalConsent,
++        ManagedAction, TargetSession,
+     },
+     deskrealm_transport::{Network, RelayNode},
+ };
+@@ -23,7 +23,7 @@ use hbb_common::{
+         time::{interval, timeout, MissedTickBehavior},
+     },
+     uuid::Uuid,
+-    ResultType,
++    ResultType, Stream,
+ };
+ use std::{
+     env, fs::File, io::Read, net::SocketAddr, path::Path as FilePath, sync::Arc, time::Duration,
+@@ -194,7 +194,7 @@ impl Desktop {
+     }
+ }
+ 
+-pub(crate) async fn connect(peer: &str, force_relay: bool) -> ResultType<()> {
++pub(crate) async fn connect(peer: &str, force_relay: bool) -> ResultType<(Stream, bool)> {
+     if hbb_common::config::is_incoming_only() {
+         bail!("managed controller is unavailable in incoming-only mode");
+     }
+@@ -225,7 +225,7 @@ pub(crate) async fn connect(peer: &str, force_relay: bool) -> ResultType<()> {
+             peer,
+             Uuid::new_v4(),
+             &purpose,
+-            3,
++            ManagedAction::View as u8,
+             true,
+         )
+         .await?;
+@@ -243,9 +243,9 @@ pub(crate) async fn connect(peer: &str, force_relay: bool) -> ResultType<()> {
+         .authority
+         .connect_controller(&mut stream, &route, &desktop.device, path)
+         .await?;
+-    // Close explicitly while the desktop operation dispatcher is unavailable.
+-    send_controller_end(&mut stream).await;
+-    Ok(())
++    // Only the controller reads encoded video frames after admission.
++    stream.set_max_packet_length(16 * 1024 * 1024);
++    Ok((stream, path == Path::Direct))
+ }
+ 
+ pub(crate) type CurrentCredential = watch::Receiver<Option<Arc<DeviceCredential>>>;
+@@ -278,6 +278,7 @@ pub(crate) async fn serve() -> ResultType<()> {
+     center_timer.set_missed_tick_behavior(MissedTickBehavior::Skip);
+     let pending = Arc::new(Semaphore::new(8));
+     let prompts = Arc::new(Semaphore::new(1));
++    let capture = Arc::new(Semaphore::new(1));
+     let mut runtime = None;
+     let (current_credential, credential_reader) = watch::channel(None);
+     let mut bytes = [0u8; 4096];
+@@ -315,9 +316,10 @@ pub(crate) async fn serve() -> ResultType<()> {
+                 let state = state.clone();
+                 let prompts = prompts.clone();
+                 let credentials = credential_reader.clone();
++                let capture = capture.clone();
+                 tokio::spawn(async move {
+                     let _permit = permit;
+-                    if let Err(error) = crate::server::create_managed_tcp_connection(desktop, state, signal, prompts, credentials).await {
++                    if let Err(error) = crate::server::create_managed_tcp_connection(desktop, state, signal, prompts, credentials, capture).await {
+                         hbb_common::log::debug!("managed connection closed: {}", error);
+                     }
+                 });
+@@ -337,6 +339,7 @@ pub(crate) async fn authorize_target(
+     signal: DeskRealmSignal,
+     prompts: Arc<Semaphore>,
+     credentials: CurrentCredential,
++    capture: Arc<Semaphore>,
+ ) -> ResultType<()> {
+     let route = signal
+         .route
+@@ -356,10 +359,17 @@ pub(crate) async fn authorize_target(
+         .as_ref()
+         .ok_or_else(|| anyhow!("no managed policy applied"))?;
+     if grant.policy_version() != policy.version()
++        || grant.allowed_mask() != ManagedAction::View as u8
+         || grant.allowed_mask() & !policy.allowed_mask() != 0
+     {
+         bail!("managed grant does not match locally applied policy");
+     }
++    #[cfg(windows)]
++    let console = crate::platform::deskrealm_unlocked_console()
++        .ok_or_else(|| anyhow!("managed view requires an unlocked console"))?;
++    let capture = capture
++        .try_acquire_owned()
++        .map_err(|_| anyhow!("managed display is busy"))?;
+     let (mut stream, route, path) = desktop
+         .network()
+         .accept_target(
+@@ -402,9 +412,11 @@ pub(crate) async fn authorize_target(
+             |request| async move { ask_local_user(request, prompts).await },
+         )
+         .await?;
++    let view = crate::server::managed_view::Capture::new(capture);
++    let worker = view.clone();
+     desktop
+         .authority
+-        .hold_target(
++        .run_target(
+             stream,
+             lease,
+             || {
+@@ -414,7 +426,15 @@ pub(crate) async fn authorize_target(
+                     .filter(|credential| !credential.expires_within(Duration::ZERO))
+                     .map(|credential| credential.bearer().to_owned())
+             },
+-            stopped,
++            || {
++                #[cfg(windows)]
++                if crate::platform::deskrealm_unlocked_console() != Some(console) {
++                    return true;
++                }
++                stopped() || crate::privacy_mode::is_in_privacy_mode()
++            },
++            move |stream, access| worker.run(stream, access),
++            || view.stop(),
+         )
+         .await?;
+     Ok(())
+diff --git a/src/platform/windows.rs b/src/platform/windows.rs
+index ed19368..a831c9b 100644
+--- a/src/platform/windows.rs
++++ b/src/platform/windows.rs
+@@ -4171,29 +4171,34 @@ pub fn try_kill_broker() {
+         .spawn());
+ }
+ 
+-// The RustDesk service may run in Session 0. Send the prompt to the
+-// unlocked physical console, and accept only an explicit Yes from that seat.
++pub(crate) fn deskrealm_unlocked_console() -> Option<u32> {
++    use windows::Win32::System::RemoteDesktop::WTSGetActiveConsoleSessionId;
++
++    let session = unsafe { WTSGetActiveConsoleSessionId() };
++    (session != 0
++        && session != u32::MAX
++        && is_session_prelogin(session) == Some(false)
++        && is_session_locked_flag(session) == Some(false)
++        && unsafe { WTSGetActiveConsoleSessionId() } == session)
++        .then_some(session)
++}
++
++// The RustDesk service can run in Session 0. Require an explicit Yes
++// from the same unlocked physical console before and after the dialog.
+ pub(crate) fn confirm_deskrealm_consent(message: &str) -> bool {
+     use windows::{
+         core::PCWSTR,
+         Win32::{
+-            System::RemoteDesktop::{WTSGetActiveConsoleSessionId, WTSSendMessageW},
++            System::RemoteDesktop::WTSSendMessageW,
+             UI::WindowsAndMessaging::{
+                 IDYES, MB_DEFBUTTON2, MB_ICONWARNING, MB_YESNO, MESSAGEBOX_RESULT,
+             },
+         },
+     };
+ 
+-    let session = unsafe { WTSGetActiveConsoleSessionId() };
+-    let available = || {
+-        session != 0 && session != u32::MAX
+-            && (unsafe { WTSGetActiveConsoleSessionId() }) == session
+-            && is_session_prelogin(session) == Some(false)
+-            && is_session_locked_flag(session) == Some(false)
+-    };
+-    if !available() {
++    let Some(session) = deskrealm_unlocked_console() else {
+         return false;
+-    }
++    };
+     let title: Vec<u16> = "DeskRealm 远程访问确认".encode_utf16().chain([0]).collect();
+     let body: Vec<u16> = message.encode_utf16().chain([0]).collect();
+     let title_bytes = ((title.len() - 1) * std::mem::size_of::<u16>()) as u32;
+@@ -4213,7 +4218,7 @@ pub(crate) fn confirm_deskrealm_consent(message: &str) -> bool {
+             true,
+         )
+     };
+-    displayed.is_ok() && response == IDYES && available()
++    displayed.is_ok() && response == IDYES && deskrealm_unlocked_console() == Some(session)
+ }
+ 
+ pub fn message_box(text: &str) {
+diff --git a/src/server.rs b/src/server.rs
+index 356700f..2b396aa 100644
+--- a/src/server.rs
++++ b/src/server.rs
+@@ -71,6 +71,8 @@ pub mod input_service {
+ }
+ 
+ mod connection;
++#[cfg(not(any(target_os = "android", target_os = "ios")))]
++pub(crate) mod managed_view;
+ mod login_failure_check;
+ pub(crate) mod port_forward_mux;
+ pub mod display_service;
+@@ -217,8 +219,9 @@ pub(crate) async fn create_managed_tcp_connection(
+     offer: DeskRealmSignal,
+     prompts: Arc<tokio::sync::Semaphore>,
+     credentials: crate::deskrealm_desktop::CurrentCredential,
++    capture: Arc<tokio::sync::Semaphore>,
+ ) -> ResultType<()> {
+-    crate::deskrealm_desktop::authorize_target(&desktop, &state, offer, prompts, credentials).await
++    crate::deskrealm_desktop::authorize_target(&desktop, &state, offer, prompts, credentials, capture).await
+ }
+ 
+ pub async fn create_tcp_connection(
+diff --git a/src/server/connection.rs b/src/server/connection.rs
+index 4b2eec8..3546ee0 100644
+--- a/src/server/connection.rs
++++ b/src/server/connection.rs
+@@ -244,6 +244,11 @@ pub struct ConnInner {
+     id: i32,
+     tx: Option<Sender>,
+     tx_video: Option<Sender>,
++    #[cfg(not(any(target_os = "android", target_os = "ios")))]
++    managed_view: Option<(
++        base::deskrealm_endpoint::SessionAccess,
++        mpsc::Sender<(Instant, Arc<Message>)>,
++    )>,
+ }
+ 
+ struct InputMouse {
+@@ -469,7 +474,20 @@ pub struct Connection {
+ 
+ impl ConnInner {
+     pub fn new(id: i32, tx: Option<Sender>, tx_video: Option<Sender>) -> Self {
+-        Self { id, tx, tx_video }
++        Self { id, tx, tx_video, ..Default::default() }
++    }
++
++    #[cfg(not(any(target_os = "android", target_os = "ios")))]
++    pub(super) fn managed_view(
++        id: i32,
++        access: base::deskrealm_endpoint::SessionAccess,
++        tx: mpsc::Sender<(Instant, Arc<Message>)>,
++    ) -> Self {
++        Self {
++            id,
++            managed_view: Some((access, tx)),
++            ..Default::default()
++        }
+     }
+ }
+ 
+@@ -481,6 +499,15 @@ impl Subscriber for ConnInner {
+ 
+     #[inline]
+     fn send(&mut self, msg: Arc<Message>) {
++        #[cfg(not(any(target_os = "android", target_os = "ios")))]
++        if let Some((access, tx)) = &self.managed_view {
++            if super::managed_view::is_video_packet(&msg)
++                && access.permits(base::deskrealm_endpoint::ManagedAction::View)
++            {
++                let _ = tx.try_send((Instant::now(), msg));
++            }
++            return;
++        }
+         // Send SwitchDisplay on the same channel as VideoFrame to avoid send order problems.
+         let tx_by_video = match &msg.union {
+             Some(message::Union::VideoFrame(_)) => true,
+@@ -569,6 +596,7 @@ impl Connection {
+                 id,
+                 tx: Some(tx),
+                 tx_video: Some(tx_video),
++                ..Default::default()
+             },
+             require_2fa: crate::auth_2fa::get_2fa(None),
+             awaiting_2fa: false,
+diff --git a/src/server/managed_view.rs b/src/server/managed_view.rs
+new file mode 100644
+index 0000000..4dbe56f
+--- /dev/null
++++ b/src/server/managed_view.rs
+@@ -0,0 +1,301 @@
++//! Read-only monitor sessions after a DeskRealm redemption.
++
++use super::{
++    display_service,
++    service::{GenericService, Service},
++    video_service, ConnInner,
++};
++use base::{
++    deskrealm_endpoint::{ManagedAction, SessionAccess, StopReason},
++    message_proto::{
++        message, misc, permission_info::Permission, LoginResponse, Message, Misc, PeerInfo,
++        PermissionInfo,
++    },
++};
++use hbb_common::tokio::{
++    self,
++    sync::{mpsc, OwnedSemaphorePermit},
++    time::{interval, sleep, timeout, MissedTickBehavior},
++};
++use hbb_common::{get_time, log, protobuf::Message as _, rand, ResultType, Stream};
++use scrap::codec::{Encoder, EncodingUpdate};
++use std::{
++    sync::{Arc, Mutex},
++    time::Duration,
++};
++
++const WRITE_LIMIT: Duration = Duration::from_secs(2);
++const FIRST_STATUS_LIMIT: Duration = Duration::from_secs(5);
++
++#[derive(Clone)]
++pub(crate) struct Capture(Arc<CaptureState>);
++
++struct CaptureState {
++    active: Mutex<Option<Monitor>>,
++    _exclusive: OwnedSemaphorePermit,
++}
++
++struct Monitor {
++    service: GenericService,
++    display: usize,
++    id: i32,
++}
++
++impl Drop for Monitor {
++    fn drop(&mut self) {
++        self.service.on_unsubscribe(self.id);
++        video_service::notify_video_frame_fetched(self.display, self.id, None);
++        self.service.join();
++        Encoder::update(EncodingUpdate::Remove(self.id));
++    }
++}
++
++impl Capture {
++    pub(crate) fn new(exclusive: OwnedSemaphorePermit) -> Self {
++        Self(Arc::new(CaptureState {
++            active: Mutex::new(None),
++            _exclusive: exclusive,
++        }))
++    }
++
++    pub(crate) async fn stop(self) -> ResultType<()> {
++        // Keep the exclusive permit until the capture worker is joined, even if
++        // the session task is cancelled while waiting for this blocking job.
++        tokio::task::spawn_blocking(move || {
++            let monitor = self.0.active.lock().unwrap().take();
++            drop(monitor);
++        })
++        .await?;
++        Ok(())
++    }
++
++    pub(crate) async fn run(self, mut stream: Stream, access: SessionAccess) -> StopReason {
++        match self.view(&mut stream, &access).await {
++            Ok(reason) => reason,
++            Err(err) => {
++                log::debug!("managed view ended: {err}");
++                StopReason::ConnectionLost
++            }
++        }
++    }
++
++    async fn view(&self, stream: &mut Stream, access: &SessionAccess) -> ResultType<StopReason> {
++        timeout(FIRST_STATUS_LIMIT, async {
++            while !access.permits(ManagedAction::View) {
++                sleep(Duration::from_millis(25)).await;
++            }
++        })
++        .await?;
++
++        let (primary, mut displays) = {
++            let native = scrap::Display::all()?;
++            (
++                display_service::get_primary_2(&native),
++                display_service::update_sync_displays(&native),
++            )
++        };
++        if primary >= displays.len() || !displays[primary].online {
++            let mut response = LoginResponse::new();
++            response.set_error("No active display".to_owned());
++            let mut message = Message::new();
++            message.set_login_response(response);
++            send(stream, &message).await?;
++            return Ok(StopReason::LocalEnd);
++        }
++        let display = displays.swap_remove(primary);
++        for permission in [
++            Permission::Keyboard,
++            Permission::Audio,
++            Permission::Clipboard,
++            Permission::File,
++            Permission::Restart,
++            Permission::Recording,
++            Permission::BlockInput,
++            Permission::PrivacyMode,
++        ] {
++            let mut control = Misc::new();
++            control.set_permission_info(PermissionInfo {
++                permission: permission.into(),
++                ..Default::default()
++            });
++            let mut message = Message::new();
++            message.set_misc(control);
++            send(stream, &message).await?;
++        }
++        let mut response = LoginResponse::new();
++        response.set_peer_info(PeerInfo {
++            hostname: crate::whoami_hostname(),
++            platform: hbb_common::whoami::platform().to_string(),
++            version: crate::VERSION.to_owned(),
++            displays: vec![display],
++            ..Default::default()
++        });
++        let mut message = Message::new();
++        message.set_login_response(response);
++        if !access.permits(ManagedAction::View) {
++            return Ok(StopReason::LocalEnd);
++        }
++        send(stream, &message).await?;
++        if !access.permits(ManagedAction::View) {
++            return Ok(StopReason::LocalEnd);
++        }
++
++        let id = rand::random::<i32>() & i32::MAX;
++        let (tx, mut rx) = mpsc::channel(4);
++        Encoder::update(EncodingUpdate::NewOnlyVP9(id));
++        let service = video_service::new_managed_view(primary);
++        service.on_subscribe(ConnInner::managed_view(id, access.clone(), tx));
++        *self.0.active.lock().unwrap() = Some(Monitor {
++            service: service.clone(),
++            display: primary,
++            id,
++        });
++
++        let mut probe = interval(Duration::from_secs(5));
++        probe.set_missed_tick_behavior(MissedTickBehavior::Skip);
++        loop {
++            tokio::select! {
++                packet = stream.next() => {
++                    let Some(Ok(packet)) = packet else { return Ok(StopReason::ConnectionLost) };
++                    let message = Message::parse_from_bytes(&packet)?;
++                    match request(&message) {
++                        ViewRequest::Close => return Ok(StopReason::LocalEnd),
++                        ViewRequest::Refresh if access.permits(ManagedAction::View) => {
++                            service.set_option_bool(video_service::OPTION_REFRESH, true);
++                        }
++                        _ => {}
++                    }
++                }
++                packet = rx.recv() => {
++                    let Some((queued_at, message)) = packet else { return Ok(StopReason::ConnectionLost) };
++                    video_service::notify_video_frame_fetched(primary, id, Some(queued_at.into()));
++                    if !access.permits(ManagedAction::View) || queued_at.elapsed() >= Duration::from_secs(1) {
++                        continue;
++                    }
++                    // The wire exposes a single display at index zero.
++                    let mut frame = message.video_frame().clone();
++                    frame.display = 0;
++                    let mut message = Message::new();
++                    message.set_video_frame(frame);
++                    send_video(stream, access, &message).await?;
++                }
++                _ = probe.tick() => {
++                    let mut message = Message::new();
++                    message.mut_test_delay().time = get_time();
++                    send(stream, &message).await?;
++                }
++            }
++            // Yield even when peer traffic and the queue are continuously ready.
++            tokio::task::yield_now().await;
++        }
++    }
++}
++
++async fn send(stream: &mut Stream, message: &Message) -> ResultType<()> {
++    timeout(WRITE_LIMIT, stream.send(message)).await??;
++    Ok(())
++}
++
++async fn send_video(
++    stream: &mut Stream,
++    access: &SessionAccess,
++    message: &Message,
++) -> ResultType<()> {
++    let permit_lost = async {
++        while access.permits(ManagedAction::View) {
++            sleep(Duration::from_millis(25)).await;
++        }
++    };
++    tokio::select! {
++        biased;
++        _ = permit_lost => hbb_common::bail!("managed display authorization changed"),
++        result = send(stream, message) => result,
++    }
++}
++
++pub(super) fn is_video_packet(message: &Message) -> bool {
++    matches!(message.union, Some(message::Union::VideoFrame(_)))
++}
++
++#[derive(Debug, PartialEq, Eq)]
++enum ViewRequest {
++    Close,
++    Refresh,
++    Ignore,
++}
++
++fn request(message: &Message) -> ViewRequest {
++    match message.union.as_ref() {
++        Some(message::Union::Misc(misc)) => match misc.union.as_ref() {
++            Some(misc::Union::CloseReason(_)) => ViewRequest::Close,
++            Some(misc::Union::RefreshVideo(true) | misc::Union::RefreshVideoDisplay(0)) => {
++                ViewRequest::Refresh
++            }
++            _ => ViewRequest::Ignore,
++        },
++        _ => ViewRequest::Ignore,
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn managed_view_requests_only_dispatch_refresh_and_close() {
++        let mut message = Message::new();
++        message.set_mouse_event(Default::default());
++        assert_eq!(request(&message), ViewRequest::Ignore);
++        message.set_key_event(Default::default());
++        assert_eq!(request(&message), ViewRequest::Ignore);
++        message.set_audio_frame(Default::default());
++        assert_eq!(request(&message), ViewRequest::Ignore);
++        message.set_clipboard(Default::default());
++        assert_eq!(request(&message), ViewRequest::Ignore);
++        message.set_file_action(Default::default());
++        assert_eq!(request(&message), ViewRequest::Ignore);
++        message.set_login_request(Default::default());
++        assert_eq!(request(&message), ViewRequest::Ignore);
++        message.set_misc(Misc::new());
++        message.mut_misc().set_refresh_video_display(1);
++        assert_eq!(request(&message), ViewRequest::Ignore);
++        message.mut_misc().set_refresh_video_display(0);
++        assert_eq!(request(&message), ViewRequest::Refresh);
++        message.mut_misc().set_close_reason(String::new());
++        assert_eq!(request(&message), ViewRequest::Close);
++    }
++    #[cfg(target_os = "linux")]
++    #[tokio::test]
++    #[ignore = "requires Xvfb or a real X11 display"]
++    async fn managed_view_captures_and_releases_monitor() -> ResultType<()> {
++        let id = i32::MAX;
++        let (tx, mut frames) = mpsc::unbounded_channel();
++        Encoder::update(EncodingUpdate::NewOnlyVP9(id));
++        let service = video_service::new_managed_view(0);
++        let monitor = Monitor {
++            service: service.clone(),
++            display: 0,
++            id,
++        };
++        service.on_subscribe(ConnInner::new(id, None, Some(tx)));
++        let frame = timeout(Duration::from_secs(10), async {
++            while let Some((queued_at, message)) = frames.recv().await {
++                if is_video_packet(&message) {
++                    video_service::notify_video_frame_fetched(0, id, Some(queued_at.into()));
++                    return Some(message);
++                }
++            }
++            None
++        })
++        .await?;
++        let frame = frame.expect("monitor service did not produce a frame");
++        assert!(!frame.video_frame().vp9s().frames.is_empty());
++
++        tokio::task::spawn_blocking(move || drop(monitor)).await?;
++        assert!(!service.active());
++        assert!(!service.is_subed(id));
++        while frames.try_recv().is_ok() {}
++        assert!(frames.recv().await.is_none());
++        Ok(())
++    }
++}
+diff --git a/src/server/video_service.rs b/src/server/video_service.rs
+index a13aebb..31dff20 100644
+--- a/src/server/video_service.rs
++++ b/src/server/video_service.rs
+@@ -277,6 +277,7 @@ pub struct VideoService {
+     sp: GenericService,
+     idx: usize,
+     source: VideoSource,
++    allow_recording: bool,
+     #[cfg(windows)]
+     dxgi_recovery_state: Arc<Mutex<DxgiRecoveryState>>,
+ }
+@@ -300,6 +301,15 @@ pub fn get_service_name(source: VideoSource, idx: usize) -> String {
+ }
+ 
+ pub fn new(source: VideoSource, idx: usize) -> GenericService {
++    start_service(source, idx, true)
++}
++
++#[cfg(not(any(target_os = "android", target_os = "ios")))]
++pub(super) fn new_managed_view(idx: usize) -> GenericService {
++    start_service(VideoSource::Monitor, idx, false)
++}
++
++fn start_service(source: VideoSource, idx: usize, allow_recording: bool) -> GenericService {
+     let _ = FRAME_FETCHED_NOTIFIERS
+         .lock()
+         .unwrap()
+@@ -312,6 +322,7 @@ pub fn new(source: VideoSource, idx: usize) -> GenericService {
+         sp: GenericService::new(get_service_name(source, idx), true),
+         idx,
+         source,
++        allow_recording,
+         #[cfg(windows)]
+         dxgi_recovery_state: Arc::new(Mutex::new(DxgiRecoveryState::new())),
+     };
+@@ -652,11 +663,11 @@ fn run(vs: VideoService) -> ResultType<()> {
+     let mut video_qos = VIDEO_QOS.lock().unwrap();
+     let mut spf = video_qos.spf();
+     let mut quality = video_qos.ratio();
+-    let record_incoming = config::option2bool(
++    let record_incoming = vs.allow_recording && config::option2bool(
+         "allow-auto-record-incoming",
+         &Config::get_option("allow-auto-record-incoming"),
+     );
+-    let client_record = video_qos.record();
++    let client_record = vs.allow_recording && video_qos.record();
+     drop(video_qos);
+     let (mut encoder, encoder_cfg, codec_format, use_i444, recorder) = match setup_encoder(
+         &c,
