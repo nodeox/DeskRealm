@@ -162,3 +162,17 @@ dialog::backdrop { background: rgb(25 32 51 / .35); }
   .section-heading { flex-wrap: wrap; }
   .groups-layout { grid-template-columns: 1fr; }
 }
+
+.managed-tabs { margin-bottom: 16px; }
+.managed-tabs [aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
+.managed-stack { display: grid; gap: 16px; min-width: 0; }
+.managed-stack > section { min-width: 0; }
+.managed-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 205px), 1fr)); gap: 12px; }
+.managed-form .field { min-width: 0; }
+.managed-result, .device-policy { border-top: 1px solid var(--line); padding-top: 14px; margin-bottom: 16px; }
+.managed-result p { margin: 8px 0 0; font-size: 14px; }
+.session-counts { display: grid; grid-template-columns: repeat(auto-fit, minmax(111px, 1fr)); gap: 12px; }
+.session-counts dt { color: var(--muted); font-size: 14px; }
+.session-counts dd { margin: 4px 0 0; font-size: 22px; font-weight: 600; }
+.session-timeline { padding-inline-start: 21px; line-height: 1.7; font-size: 14px; }
+.action-link { display: inline-flex; align-items: center; text-decoration: none; }

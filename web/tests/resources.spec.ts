@@ -128,8 +128,8 @@ test('共享通讯录、审计和任务中心按实际授权与结果运行', as
     await expect(viewer.getByRole('alert')).toContainText('无权访问')
     expect((await viewer.request.get('/v1/address-books/' + book.id + '/entries')).status()).toBe(404)
 
-    await expect(viewer.getByRole('link', { name: '会话与审计' })).toHaveCount(0)
-    await page.getByRole('link', { name: '会话与审计' }).click()
+    await expect(viewer.getByRole('link', { name: '审计事件' })).toHaveCount(0)
+    await page.getByRole('link', { name: '审计事件' }).click()
     await page.getByRole('button', { name: '审计设置' }).click()
     await page.getByLabel('审计员账号').fill(member)
     await page.getByLabel('设备组名称').fill('前台设备')
@@ -141,7 +141,7 @@ test('共享通讯录、审计和任务中心按实际授权与结果运行', as
     await expect(page.getByRole('status').filter({ hasText: '保留期已保存' })).toBeVisible()
 
     await viewer.reload()
-    await viewer.getByRole('link', { name: '会话与审计' }).click()
+    await viewer.getByRole('link', { name: '审计事件' }).click()
     await expect(viewer.getByRole('button', { name: '审计设置' })).toHaveCount(0)
     await viewer.getByLabel('事件名称').fill('device.approved')
     await viewer.getByRole('button', { name: '查询', exact: true }).click()

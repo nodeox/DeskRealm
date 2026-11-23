@@ -1,4 +1,13 @@
 const messages: Record<string, string> = {
+  invalid_connection_rule_request: '请检查规则范围、用途和所选操作。',
+  connection_rule_not_found: '规则不存在或已归档。',
+  connection_rule_stale: '规则版本已变更，请刷新后重新编辑。',
+  invalid_managed_policy_request: '请检查策略版本、目标范围和灰度设置。',
+  managed_policy_not_found: '该策略分配或修订不存在。',
+  managed_policy_stale: '分配或回执已变更，请刷新后重试。',
+  invalid_managed_session_request: '请检查会话 ID 或撤销原因。',
+  managed_session_not_found: '会话不存在或超出访问范围。',
+  managed_session_conflict: '会话状态已变更，请刷新详情。',
   already_initialized: '中心已完成初始化，请登录。',
   invalid_or_expired_ticket: '初始化链接无效或已过期。请在中心主机重新生成链接。',
   invalid_organization: '请输入 1 到 80 个字符的组织名称。',

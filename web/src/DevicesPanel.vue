@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { nextTick, onMounted, ref } from 'vue'
 import { api, json, RequestError } from './api'
+import { fieldLabels, localTime, receiptLabels, type PolicyReceipt } from './managed'
 
 type Group = { id: string; name: string; can_approve: boolean }
 type Grant = { username: string; can_approve: boolean }
@@ -43,6 +44,10 @@ const newID = ref('')
 const rotation = ref<Rotation>()
 const details = ref<Device>()
 const history = ref<History>()
+const policy = ref<PolicyReceipt>()
+const policyError = ref('')
+const ownerID = ref('')
+const policyNotice = ref('')
 const historyDialog = ref<HTMLDialogElement>()
 let detailTrigger: HTMLButtonElement | undefined
 const actions: Record<Decision, string> = {
@@ -138,17 +143,56 @@ async function ask(device: Device, action: Decision) {
   dialog.value?.showModal()
 }
 
-async function showDetails(device: Device, event: MouseEvent) {
-  const trigger = event.currentTarget as HTMLButtonElement
-  await execute(async () => {
-    const path = '/v1/admin/devices/' + device.id
-    const [current, records] = await Promise.all([api<Device>(path), api<History>(path + '/history')])
+function showDetails(id: string, event?: MouseEvent) {
+  const trigger = event?.currentTarget as HTMLButtonElement | undefined
+  return execute(async () => {
+    const path = '/v1/admin/devices/' + encodeURIComponent(id)
+    const [current, records, receipt] = await Promise.all([
+      api<Device>(path), api<History>(path + '/history'), api<PolicyReceipt>(path + '/policy'),
+    ])
     details.value = current
     history.value = records
+    policy.value = receipt
+    ownerID.value = receipt.owner_user_id ?? ''
+    policyError.value = ''
+    policyNotice.value = ''
     detailTrigger = trigger
     await nextTick()
     historyDialog.value?.showModal()
   })
+}
+
+async function updatePolicy(action: 'refresh' | 'retry' | 'owner') {
+  if (busy.value || !details.value || !policy.value) return
+  const id = details.value.id
+  const path = '/v1/admin/devices/' + encodeURIComponent(id)
+  const receipt = policy.value
+  policyError.value = ''
+  policyNotice.value = ''
+  busy.value = true
+  try {
+    if (action === 'retry') {
+      policy.value = await api<PolicyReceipt>(path + '/policy-retry', json({ delivery_id: receipt.delivery_id }, props.csrf))
+    } else if (action === 'owner') {
+      policy.value = await api<PolicyReceipt>(path + '/policy-owner', json({ device_version: receipt.device_version, owner_user_id: ownerID.value.trim() }, props.csrf))
+    } else {
+      const [current, result] = await Promise.all([api<Device>(path), api<PolicyReceipt>(path + '/policy')])
+      details.value = current
+      policy.value = result
+    }
+    ownerID.value = policy.value.owner_user_id ?? ''
+    if (details.value?.id === id) details.value.version = policy.value.device_version
+    policyNotice.value = action === 'retry' ? '已重新交付此设备的策略。' : action === 'owner' ? '策略归属已保存。' : '设备状态已刷新。'
+    await loadList()
+  } catch (cause) {
+    if (cause instanceof RequestError && cause.status === 401) emit('expired')
+    if (cause instanceof RequestError && [403, 404].includes(cause.status)) {
+      historyDialog.value?.close()
+      details.value = undefined
+      policy.value = undefined
+      report(cause)
+    } else policyError.value = cause instanceof RequestError ? cause.message : '无法连接中心，请重试。'
+  } finally { busy.value = false }
 }
 
 function restoreDetailFocus() {
@@ -181,10 +225,14 @@ function decide() {
   })
 }
 
-onMounted(() => execute(async () => {
-  groups.value = await api<Group[]>('/v1/admin/device-groups')
-  await loadList()
-}))
+onMounted(async () => {
+  await execute(async () => {
+    groups.value = await api<Group[]>('/v1/admin/device-groups')
+    await loadList()
+  })
+  const id = new URLSearchParams(location.search).get('device')
+  if (id) await showDetails(id)
+})
 </script>
 
 <template>
@@ -267,7 +315,7 @@ onMounted(() => execute(async () => {
             <td v-if="device.expected_policy_version === null">未下发</td>
             <td v-else>期望 {{ device.expected_policy_version }} · {{ device.applied_policy_version === null ? '待回执' : '已应用 ' + device.applied_policy_version }}</td>
             <td class="row-actions">
-              <button type="button" class="secondary" :disabled="busy" @click="showDetails(device, $event)">详情</button>
+              <button type="button" class="secondary" :disabled="busy" @click="showDetails(device.id, $event)">详情</button>
               <template v-if="device.can_approve && device.registration_state === 'pending'">
                 <button type="button" class="secondary" @click="ask(device, 'approve')">批准</button>
                 <button type="button" class="secondary" @click="ask(device, 'reject')">拒绝</button>
@@ -287,6 +335,28 @@ onMounted(() => execute(async () => {
       <p class="muted dialog-copy">{{ details.rustdesk_id }} · {{ details.group_name }} · {{ states[details.registration_state] }}
         <small class="device-identifier">设备 UUID {{ details.id }}</small>
       </p>
+      <section v-if="policy" aria-labelledby="device-policy-heading" class="device-policy">
+        <h3 id="device-policy-heading">设备策略与回执</h3>
+        <p v-if="policyError" class="error" role="alert">{{ policyError }}</p>
+        <p v-if="policyNotice" class="inline-success" role="status">{{ policyNotice }}</p>
+        <dl class="audit-detail">
+          <dt>认证心跳</dt><dd>{{ states[details.connection_state] }}</dd>
+          <dt>期望版本</dt><dd>{{ policy.expected_policy_version ?? '未分配' }}</dd>
+          <dt>已应用版本</dt><dd>{{ policy.applied_policy_version ?? '无' }}</dd>
+          <dt>回执状态</dt><dd>{{ receiptLabels[policy.state] }}</dd>
+          <dt>中心接收时间</dt><dd>{{ localTime(policy.received_at) }}</dd>
+          <dt>归属用户</dt><dd>{{ policy.owner_user_id ?? '未设置' }}</dd>
+          <template v-if="policy.failed_fields?.length"><dt>失败字段</dt><dd>{{ policy.failed_fields.map(field => fieldLabels[field] ?? field).join('、') }}</dd></template>
+        </dl>
+        <div class="user-tools">
+          <button type="button" class="secondary" :disabled="busy" @click="updatePolicy('refresh')">刷新设备策略</button>
+          <button v-if="admin && policy.state === 'failed' && policy.delivery_id" type="button" class="secondary" :disabled="busy" @click="updatePolicy('retry')">重试应用策略</button>
+        </div>
+        <form v-if="admin && details.registration_state !== 'retired'" class="link-form" @submit.prevent="updatePolicy('owner')">
+          <label class="field">归属用户 UUID<input v-model="ownerID" maxlength="36" placeholder="留空清除归属"></label>
+          <button class="secondary" :disabled="busy || ownerID.trim() === (policy.owner_user_id ?? '')">保存策略归属</button>
+        </form>
+      </section>
       <h3>RustDesk ID 历史</h3>
       <ul class="member-list">
         <li v-for="(entry, i) in history.rustdesk_ids" :key="i"><span>{{ entry.rustdesk_id }}</span><small>{{ new Date(entry.recorded_at).toLocaleString() }}</small></li>

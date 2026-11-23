@@ -16,7 +16,7 @@ const emit = defineEmits<{ expired: [] }>()
 const base = '/v1/admin/audit-events'
 const events = ref<Event[]>([])
 const cursor = ref('')
-const filters = ref({ action: '', status: '', association: 'session_id', id: '', from: '', to: '' })
+const filters = ref({ action: '', status: '', association: 'session_id', id: new URLSearchParams(location.search).get('session_id') ?? '', from: '', to: '' })
 const applied = ref('')
 const canExport = ref(false)
 const showSettings = ref(false)
@@ -101,7 +101,7 @@ function showDetail(id: string) {
 }
 
 onMounted(async () => {
-  await run(() => load(''))
+  await search()
   const id = new URLSearchParams(location.search).get('event')
   if (id) await showDetail(id)
 })

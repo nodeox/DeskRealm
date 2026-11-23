@@ -24,6 +24,7 @@ export type Overview = {
   can_read_audit: boolean
   can_read_tasks: boolean
   metrics: {
+    active_sessions: number
     users?: number
     online_devices?: number
     pending_approvals?: number

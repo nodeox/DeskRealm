@@ -22,6 +22,9 @@ case "${1:-}" in
   leases)
     GOFLAGS="${GOFLAGS:-} -race" bash scripts/deskrealm-m1-test session-leases
     ;;
+  managed-browser)
+    bash scripts/deskrealm-m1-test managed-browser
+    ;;
   native-coordination)
     python3 managed/tests/native_wire.py --coordination
     ;;
@@ -76,5 +79,5 @@ case "${1:-}" in
     [[ "$rust_result" == *'test tests::shared_signing_vectors ... ok'* ]] || { echo "missing Rust signing-vector test" >&2; exit 1; }
     [[ "$rust_result" == *'test tests::managed_peer_proofs_are_channel_and_role_bound ... ok'* ]] || { echo "missing Rust native-proof test" >&2; exit 1; }
     ;;
-  *) echo "usage: $0 sources|vectors|identity|rules|policies|sessions|leases|native-wire|native-coordination|native-admission|managed-interop|endpoint|windows-builds [directory]|managed-view|managed-input|managed-audio|managed-clipboard|managed-files" >&2; exit 2 ;;
+  *) echo "usage: $0 sources|vectors|identity|rules|policies|sessions|leases|managed-browser|native-wire|native-coordination|native-admission|managed-interop|endpoint|windows-builds [directory]|managed-view|managed-input|managed-audio|managed-clipboard|managed-files" >&2; exit 2 ;;
 esac

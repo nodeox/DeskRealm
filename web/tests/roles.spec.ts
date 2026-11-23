@@ -131,7 +131,7 @@ test('四类角色的概览、入口和操作遵守真实授权', async ({ page,
     await expect(operator.getByRole('button', { name: '添加设备条目' })).toHaveCount(0)
     expect((await operator.request.get('/v1/address-books/' + privateBook.id)).status()).toBe(404)
     await operator.goto('/audit')
-    await expect(operator.getByRole('alert')).toContainText('无权访问「会话与审计」')
+    await expect(operator.getByRole('alert')).toContainText('无权访问「审计事件」')
     expect((await operator.request.get('/v1/admin/audit-events')).status()).toBe(403)
   } finally {
     await operator.close()
@@ -145,7 +145,7 @@ test('四类角色的概览、入口和操作遵守真实授权', async ({ page,
   const auditor = await browser.newPage({ baseURL })
   try {
     await signIn(auditor, auditorName)
-    await expect(nav(auditor).getByRole('link', { name: '会话与审计' })).toBeVisible()
+    await expect(nav(auditor).getByRole('link', { name: '审计事件' })).toBeVisible()
     await expect(nav(auditor).getByRole('link', { name: '设备管理' })).toHaveCount(0)
     await expect(nav(auditor).getByRole('link', { name: '任务中心' })).toHaveCount(0)
     await expect(metric(auditor, '在线设备')).toHaveCount(0)

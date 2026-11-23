@@ -9,10 +9,12 @@ import DevicesPanel from './DevicesPanel.vue'
 import AddressBooksPanel from './AddressBooksPanel.vue'
 import AuditPanel from './AuditPanel.vue'
 import TasksPanel from './TasksPanel.vue'
+import PoliciesPanel from './PoliciesPanel.vue'
+import SessionsPanel from './SessionsPanel.vue'
 import OverviewPanel from './OverviewPanel.vue'
 import type { Overview } from './overview'
 
-type WorkspacePage = 'overview' | 'users' | 'groups' | 'devices' | 'address-books' | 'audit' | 'tasks' | 'api-tokens' | 'security'
+type WorkspacePage = 'overview' | 'users' | 'groups' | 'devices' | 'policies' | 'sessions' | 'address-books' | 'audit' | 'tasks' | 'api-tokens' | 'security'
 type Screen = WorkspacePage | 'loading' | 'initialize' | 'login' | 'accept-invitation' | 'recover' | 'unavailable'
 type Session = { username: string; csrf_token: string }
 type Capability = 'can_manage' | 'can_read_users' | 'can_read_devices' | 'can_read_audit' | 'can_read_tasks'
@@ -21,7 +23,9 @@ const navigation: { page: WorkspacePage; title: string; capability?: Capability 
   { page: 'overview', title: '概览' },
   { page: 'devices', title: '设备管理', capability: 'can_read_devices' },
   { page: 'address-books', title: '通讯录' },
-  { page: 'audit', title: '会话与审计', capability: 'can_read_audit' },
+  { page: 'policies', title: '访问策略', capability: 'can_manage' },
+  { page: 'sessions', title: '会话管理' },
+  { page: 'audit', title: '审计事件', capability: 'can_read_audit' },
   { page: 'tasks', title: '任务中心', capability: 'can_read_tasks' },
   { page: 'users', title: '用户与权限', capability: 'can_read_users' },
   { page: 'groups', title: '用户组与委派', capability: 'can_manage' },
@@ -215,6 +219,8 @@ onMounted(load)
       <UsersPanel v-if="screen === 'users'" :csrf="session.csrf_token" :admin="overview.can_manage" @expired="load" />
       <DevicesPanel v-else-if="screen === 'devices'" :csrf="session.csrf_token" :admin="overview.can_manage" @expired="load" />
       <AddressBooksPanel v-else-if="screen === 'address-books'" :csrf="session.csrf_token" @expired="load" />
+      <PoliciesPanel v-else-if="screen === 'policies'" :csrf="session.csrf_token" @expired="load" />
+      <SessionsPanel v-else-if="screen === 'sessions'" :csrf="session.csrf_token" :can-audit="overview.can_read_audit" :can-read-devices="overview.can_read_devices" @expired="load" />
       <AuditPanel v-else-if="screen === 'audit'" :csrf="session.csrf_token" :admin="overview.can_manage" @expired="load" />
       <TasksPanel v-else-if="screen === 'tasks'" :csrf="session.csrf_token" @expired="load" />
       <GroupsPanel v-else-if="screen === 'groups'" :csrf="session.csrf_token" @expired="load" />
