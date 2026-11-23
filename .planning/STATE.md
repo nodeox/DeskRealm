@@ -3,10 +3,10 @@ gsd_state_version: "1.0"
 current_phase: 3
 current_phase_name: M2 受管连接与策略
 status: executing
-last_updated: "2026-11-23T00:11:10Z"
+last_updated: "2026-11-23T00:29:33Z"
 last_activity: 2026-11-22
-last_activity_desc: 03-02 连接 ACL、设备策略和应用回执已验证
-state_head: 4ca819a70ebf04f2ff0344c9da23c638355cd4d3
+last_activity_desc: 03-03 Task 1 中心会话签发、会合校验和单次核销已验证
+state_head: 43cba088728ed3fa3285f06af7e810efa349038e
 progress:
   total_phases: 5
   completed_phases: 2
@@ -27,9 +27,9 @@ See: .planning/PROJECT.md (updated 2026-11-22)
 ## Current Position
 
 Phase: 3 — M2 受管连接与策略
-Plan: 03-03 of 5，03-02 已完成，接续会话签发、单次核销、续租与撤销。
+Plan: 03-03 of 5，Task 1 已完成，接续 Task 2 续租、撤销与实际回执。
 Status: In progress
-Last activity: 2026-11-22 — 连接规则、灰度、回滚与签名应用回执通过开发验证。
+Last activity: 2026-11-22 — 中心签发、独立中继配对和单次核销通过 PostgreSQL 竞态检查。
 
 ## Accumulated Context
 
