@@ -96,3 +96,16 @@ Task 1 的已有 Docker 首装开发验证通过。
 日志保存在本地 Git 目录的 `deskrealm-evidence/m3/4caf823ab5e3e3a9750f2fefa530f09d553bd86c/`。`install-relay.log` SHA-256 为 `f705f0544109932e486bf87faa9d6520467614e352fa0eb69bf84231c8a98428`，`install-resume.log` 为 `da95abbfd01da1d98c8607b49dc1f3e9625a632b25b5cd2d8e7132acff33d3fa`。首次复跑遇到 Rust 增量链接找不到目标文件，重跑通过链接。随后修正验活记录和中断测试的时序，以上使用修正后的提交取证。
 
 04-01 开发验证完成。04-02 接入安装记录导入。跨网中继认证与实际端点传输按后续计划验证，目标环境 Linux 中心、中继和双 Windows 仍按 Phase 5 顺序执行。
+
+## 04-02 安装结果导入
+
+2026-11-23，在候选 `69e9e41d601e8830c8df381b12b513543c4d2ae9` 运行 `bash scripts/deskrealm-m3-test install-task`，退出 0。
+
+| 检查 | 结果 |
+| --- | --- |
+| PostgreSQL 竞态 | 六项具名检查通过。六次并发导入相同记录只新增一次快照和审计。冲突修订、未导入的旧修订、缺失记录与未声明字段被拒绝。新的修订复用任务和步骤对象，管理员可读取历史修订，其他成员无法查看或作为导入审计人。 |
+| 实际主机命令 | 在 Linux ARM64 隔离 Compose 中，迁移后中断和恢复生成两个本地修订。分别通过 `deskrealm-install import-record` 导入，重复提交均保留原任务且不新增修订。 |
+| 同源 Chromium | 中文工作台显示一条中心安装任务。最新详情显示四步成功，历史修订及刷新显示验活已中断。安装步骤由本地安装器继续执行。 |
+| 现有路径 | M1 账号导入、任务租约、设备入网和审批 PostgreSQL 回归及资源工作台 Chromium 回归通过。全仓 Go 测试、vet 和 Vue 类型检查通过。 |
+
+日志保存于 `deskrealm-evidence/m3/69e9e41d601e8830c8df381b12b513543c4d2ae9/install-task.log`，SHA-256 为 `534334c6b1b26284e68b6f79333bafdce39f12d6baae9a16d5c8bc2313cec6f8`。Task 2 继续目标级租约、外部回执和取消。
