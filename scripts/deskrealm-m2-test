@@ -22,6 +22,10 @@ case "${1:-}" in
   leases)
     GOFLAGS="${GOFLAGS:-} -race" bash scripts/deskrealm-m1-test session-leases
     ;;
+  native-wire)
+    python3 managed/tests/native_wire.py
+    bash scripts/deskrealm-m2-test vectors
+    ;;
   vectors)
     go_result=$(go test -count=1 -v ./internal/managedproto -run '^TestSharedSigningVectors$') || {
       printf '%s\n' "$go_result" >&2
@@ -30,14 +34,15 @@ case "${1:-}" in
     printf '%s\n' "$go_result"
     [[ "$go_result" == *'--- PASS: TestSharedSigningVectors ('* ]] || { echo "missing Go signing-vector test" >&2; exit 1; }
     image=docker.io/library/rust:1.75.0-bookworm@sha256:87f3b2f93b82995443a1a558c234212dafe79cfdc3af956539610560369ddcd0
-    rust_result=$(docker run --rm --volume "$PWD/managed/tests:/fixture:ro" --workdir /fixture/signing \
+    rust_result=$(docker run --rm --volume "$PWD/managed:/fixture:ro" --workdir /fixture/tests/signing \
       --env CARGO_TARGET_DIR=/tmp/deskrealm-target "$image" \
-      cargo test --locked --lib -- tests::shared_signing_vectors --exact) || {
+      cargo test --locked --lib) || {
       printf '%s\n' "$rust_result" >&2
       exit 1
     }
     printf '%s\n' "$rust_result"
     [[ "$rust_result" == *'test tests::shared_signing_vectors ... ok'* ]] || { echo "missing Rust signing-vector test" >&2; exit 1; }
+    [[ "$rust_result" == *'test tests::managed_peer_proofs_are_channel_and_role_bound ... ok'* ]] || { echo "missing Rust native-proof test" >&2; exit 1; }
     ;;
-  *) echo "usage: $0 sources|vectors|identity|rules|policies|sessions|leases" >&2; exit 2 ;;
+  *) echo "usage: $0 sources|vectors|identity|rules|policies|sessions|leases|native-wire" >&2; exit 2 ;;
 esac

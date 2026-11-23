@@ -1,0 +1,214 @@
+diff --git a/protos/rendezvous.proto b/protos/rendezvous.proto
+index 54ec24b..030210a 100644
+--- a/protos/rendezvous.proto
++++ b/protos/rendezvous.proto
+@@ -280,6 +280,28 @@ message IceCandidate {
+   string candidate = 4;
+ }
+ 
++// DeskRealm signaling is separately tagged. A managed listener must check the
++// grant and path before dispatching any operation inside this envelope.
++message DeskRealmRoute {
++  bytes grant_frame = 1;
++  bytes grant_signature = 2;
++  bytes connection_uuid = 3;
++}
++
++message DeskRealmSignal {
++  DeskRealmRoute route = 1;
++  oneof operation {
++    PunchHoleRequest direct_request = 2;
++    PunchHole direct_candidate = 3;
++    PunchHoleSent direct_ready = 4;
++    FetchLocalAddr fetch_local = 5;
++    LocalAddr local_ready = 6;
++    PunchHoleResponse direct_response = 7;
++    RequestRelay relay_request = 8;
++    RelayResponse relay_response = 9;
++  }
++}
++
+ message RendezvousMessage {
+   oneof union {
+     RegisterPeer register_peer = 6;
+@@ -303,6 +325,7 @@ message RendezvousMessage {
+     OnlineResponse online_response = 24;
+     KeyExchange key_exchange = 25;
+     HealthCheck hc = 26;
++    DeskRealmSignal deskrealm_signal = 40;
+     HttpProxyRequest http_proxy_request = 27;
+     HttpProxyResponse http_proxy_response = 28;
+     IceCandidate ice_candidate = 29;
+diff --git a/src/lib.rs b/src/lib.rs
+index 5039545..f10fef9 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -1,4 +1,5 @@
+ pub mod compress;
++pub mod deskrealm_protocol;
+ pub mod protos;
+ pub use bytes;
+ use config::Config;
+diff --git a/src/stream.rs b/src/stream.rs
+index 126d08a..cea32e3 100644
+--- a/src/stream.rs
++++ b/src/stream.rs
+@@ -105,6 +105,15 @@ impl Stream {
+         }
+     }
+ 
++    /// A DeskRealm binding is currently defined for an authenticated directional
++    /// TCP stream. Relay forwarding preserves that end-to-end TCP stream.
++    pub fn managed_channel_binding(&self) -> Option<crate::deskrealm_protocol::ChannelBinding> {
++        match self {
++            Stream::Tcp(stream) => stream.managed_channel_binding(),
++            _ => None,
++        }
++    }
++
+     /// An opaque token that changes whenever bytes have arrived from the peer, a fragment of a
+     /// message that is still incomplete included. Compare successive samples; the value itself
+     /// means nothing. `None` where the transport reports no such thing.
+@@ -320,3 +329,65 @@ mod tests {
+         assert!(set(1).is_ok());
+     }
+ }
++
++#[cfg(test)]
++mod managed_tests {
++    use super::*;
++    use tokio::{io::copy_bidirectional, net::TcpListener, time::{timeout, Duration}};
++
++    async fn connected_pair(forwarded: bool) -> (Stream, Stream) {
++        let target = TcpListener::bind("127.0.0.1:0").await.unwrap();
++        let destination = target.local_addr().unwrap();
++        let address = if forwarded {
++            let forwarder = TcpListener::bind("127.0.0.1:0").await.unwrap();
++            let forward_address = forwarder.local_addr().unwrap();
++            tokio::spawn(async move {
++                let (mut left, _) = forwarder.accept().await.unwrap();
++                let mut right = TcpStream::connect(destination).await.unwrap();
++                let _ = copy_bidirectional(&mut left, &mut right).await;
++            });
++            forward_address
++        } else {
++            destination
++        };
++        let (left, right) = tokio::join!(TcpStream::connect(address), target.accept());
++        let left = left.unwrap();
++        let (right, _) = right.unwrap();
++        let left_addr = left.local_addr().unwrap();
++        let right_addr = right.local_addr().unwrap();
++        (
++            Stream::Tcp(tcp::FramedStream::from(left, left_addr)),
++            Stream::Tcp(tcp::FramedStream::from(right, right_addr)),
++        )
++    }
++
++    #[tokio::test]
++    async fn managed_channel_binding_direct_and_forwarded() {
++        sodiumoxide::init().unwrap();
++        timeout(Duration::from_secs(5), async {
++            for forwarded in [false, true] {
++                let (mut controller, mut target) = connected_pair(forwarded).await;
++                assert!(controller.managed_channel_binding().is_none());
++                let transcript = tcp::KxTranscript {
++                    initiator_pk: &[1; 32],
++                    responder_pk: &[2; 32],
++                    advertised: 1,
++                    picked: 1,
++                };
++                let key = Key([3; 32]);
++                controller.set_negotiated_key(key.clone(), true, &transcript).unwrap();
++                target.set_negotiated_key(key.clone(), false, &transcript).unwrap();
++                let binding = controller.managed_channel_binding().unwrap();
++                assert!(target.managed_channel_binding() == Some(binding));
++                controller.send_raw(b"controller".to_vec()).await.unwrap();
++                assert_eq!(&target.next().await.unwrap().unwrap()[..], b"controller");
++                target.send_raw(b"target".to_vec()).await.unwrap();
++                assert_eq!(&controller.next().await.unwrap().unwrap()[..], b"target");
++                controller.set_raw();
++                assert!(controller.managed_channel_binding().is_none());
++                target.set_key(key);
++                assert!(target.managed_channel_binding().is_none());
++            }
++        }).await.unwrap();
++    }
++}
+diff --git a/src/tcp.rs b/src/tcp.rs
+index b457bbe..3f5fe3a 100644
+--- a/src/tcp.rs
++++ b/src/tcp.rs
+@@ -60,7 +60,13 @@ pub struct KxTranscript<'a> {
+ 
+ /// The sending key, the send and receive counters, and the receiving key where it differs.
+ #[derive(Clone)]
+-pub struct Encrypt(pub Key, pub u64, pub u64, Option<Key>);
++pub struct Encrypt(
++    pub Key,
++    pub u64,
++    pub u64,
++    Option<Key>,
++    Option<crate::deskrealm_protocol::ChannelBinding>,
++);
+ 
+ pub struct FramedStream(
+     pub Framed<DynTcpStream, BytesCodec>,
+@@ -180,6 +186,10 @@ impl FramedStream {
+         self.2 = None;
+     }
+ 
++    pub(crate) fn managed_channel_binding(&self) -> Option<crate::deskrealm_protocol::ChannelBinding> {
++        self.2.as_ref().and_then(|encrypt| encrypt.4)
++    }
++
+     pub fn is_secured(&self) -> bool {
+         self.2.is_some()
+     }
+@@ -340,7 +350,7 @@ impl<R: AsyncRead + AsyncWrite + Unpin> TcpStreamTrait for R {}
+ 
+ impl Encrypt {
+     pub fn new(key: Key) -> Self {
+-        Self(key, 0, 0, None)
++        Self(key, 0, 0, None, None)
+     }
+ 
+     /// Version 1: the initiator, the side that sent the sealed key, sends under one subkey and
+@@ -348,10 +358,17 @@ impl Encrypt {
+     pub fn new_split(key: Key, is_initiator: bool, t: &KxTranscript) -> ResultType<Self> {
+         let initiator = Self::derive_subkey(&key, KX_SPLIT_INITIATOR, t)?;
+         let responder = Self::derive_subkey(&key, KX_SPLIT_RESPONDER, t)?;
++        let binding = crate::deskrealm_protocol::channel_binding(
++            &key.0,
++            t.initiator_pk,
++            t.responder_pk,
++            t.advertised,
++            t.picked,
++        );
+         Ok(if is_initiator {
+-            Self(initiator, 0, 0, Some(responder))
++            Self(initiator, 0, 0, Some(responder), binding)
+         } else {
+-            Self(responder, 0, 0, Some(initiator))
++            Self(responder, 0, 0, Some(initiator), binding)
+         })
+     }
+ 
+@@ -473,7 +490,7 @@ mod tests {
+             advertised: 1,
+             picked: 1,
+         };
+-        let Encrypt(send, _, _, recv) = Encrypt::new_split(key.clone(), true, &t).unwrap();
++        let Encrypt(send, _, _, recv, _) = Encrypt::new_split(key.clone(), true, &t).unwrap();
+         assert_eq!(
+             hex(&send.0),
+             "c189ec6e1935c0751cfc85a0f075405cae507d7925bb19687caf56cbb54e0ecf"
+@@ -484,7 +501,7 @@ mod tests {
+         );
+         // With the two versions equal, swapping their order in the derivation would go unseen.
+         t.advertised = 3;
+-        let Encrypt(send, _, _, recv) = Encrypt::new_split(key, true, &t).unwrap();
++        let Encrypt(send, _, _, recv, _) = Encrypt::new_split(key, true, &t).unwrap();
+         assert_eq!(
+             hex(&send.0),
+             "25b0778ae600f9731c7fa457d1cc5d40071b0aa3d34c90b53e1d5344b0e7123a"

@@ -1,0 +1,37 @@
+diff --git a/libs/base/protos/message.proto b/libs/base/protos/message.proto
+index 5f920bc..8bc4c17 100644
+--- a/libs/base/protos/message.proto
++++ b/libs/base/protos/message.proto
+@@ -1002,6 +1002,25 @@ message PortForwardChannel {
+   }
+ }
+ 
++// Exchanged after the stream installs directional encryption and before login.
++message DeskRealmHandshake {
++  bytes session_uuid = 1;
++  bytes connection_uuid = 2;
++  oneof phase {
++    bytes nonce = 3;
++    bytes proof_signature = 4;
++    DeskRealmAdmission admission = 5;
++  }
++}
++
++// Only the host sends admission after online redemption. The host's private
++// session credential stays with the host.
++message DeskRealmAdmission {
++  uint32 allowed_mask = 1;
++  uint64 lease_sequence = 2;
++  uint64 lease_until_ms = 3;
++}
++
+ message Message {
+   oneof union {
+     SignedId signed_id = 3;
+@@ -1037,5 +1056,6 @@ message Message {
+     PortForwardChannel port_forward_channel = 33;
+     // Auto Login: the peer types the password only if it is at its logon or lock screen.
+     OSLogin os_login = 34;
++    DeskRealmHandshake deskrealm_handshake = 40;
+   }
+ }

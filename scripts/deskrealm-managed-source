@@ -107,6 +107,17 @@ def apply_patches(repo, spec, patch_root):
         raise ValueError(f"{repo.name}: patch placed outside a recognized checkout")
 
 
+def install_managed_protocol(repo):
+    # Both pinned hbb_common trees consume the same reviewed Rust source.
+    common = repo / "libs/hbb_common"
+    relative = Path("src/deskrealm_protocol.rs")
+    target = common / relative
+    if target.exists() or target.is_symlink():
+        raise ValueError(f"{repo.name}: managed protocol would overwrite upstream source")
+    target.write_bytes((ROOT / "managed/native/deskrealm_protocol.rs").read_bytes())
+    git(common, "add", "--", str(relative))
+
+
 def prepare(destination, repositories, patched):
     if destination.exists() or destination.is_symlink():
         raise ValueError("destination must not already exist")
@@ -126,6 +137,7 @@ def prepare(destination, repositories, patched):
             verify_checkout(repo, spec, fetch_modules=True)
             if patched:
                 apply_patches(repo, spec, ROOT / "managed/patches" / name)
+                install_managed_protocol(repo)
         tree.rename(destination)
 
 

@@ -12,7 +12,7 @@ bash scripts/deskrealm-m2-test sources
 
 目标的父目录需已存在，目标目录由脚本创建。`prepare` 从远端取发布标签，再核对本地 HEAD、标签和递归子模块的 Git 提交及来源。借助临时目录完成检查后才移动到目标。重复准备时使用新目录。`verify` 核对已有的干净基线，适合在应用补丁和开始构建前运行。
 
-使用 `prepare <目录> --apply-patches` 在新检出的基线上顺序应用补丁。补丁按文件名升序放在 `managed/patches/<client|server>/root/`。子模块补丁放在对应的 `submodules/<子模块路径>/root/`。补丁应同时通过 index 和工作树检查。源清单保持原始 Git 对象，受管补丁不得修改 gitlink 或子模块配置。03-04 将交付实际受管补丁。
+使用 `prepare <目录> --apply-patches` 在新检出的基线上顺序应用补丁。补丁按文件名升序放在 `managed/patches/<client|server>/root/`。子模块补丁放在对应的 `submodules/<子模块路径>/root/`。补丁应同时通过 index 和工作树检查。源清单保持原始 Git 对象，受管补丁不得修改 gitlink 或子模块配置。03-04 的协议补丁已经接入源码准备脚本。脚本同时将同一份 Rust 协议实现装入两份固定的 `hbb_common`。
 
 客户端、服务端及各自的 `hbb_common` 由 [upstream.lock](../managed/upstream.lock) 固定。M0 的 RustDesk 镜像摘要和会合密钥继续使用试点配置。M2 的中心会话签名以单独的持久密钥和 `kid` 配置，后续服务从可信配置载入密钥及允许使用的验证公钥。
 
@@ -43,7 +43,7 @@ bash scripts/deskrealm-m2-test sources
 | 状态冲突 | 授权同键异载荷或版本已变更，要求按入口重取。身份挑战的重放返回统一认证失败。 |
 | 中心不可用 | 无法安全签发、核销或续租，保持拒绝新会话及现有租约的截止时间。 |
 
-协议夹具 [vectors.json](../managed/tests/vectors.json) 包含设备挑战、用户绑定、中心授权、直连主控证明、中继受控证明、策略回执及有人值守确认的签名，以及无效格式用例。所有测试种子仅供夹具使用。Go 使用标准库 Ed25519，Rust 测试使用与上游同版本的 `sodiumoxide`，测试和环境均通过锁文件或镜像摘要固定。运行 `bash scripts/deskrealm-m2-test vectors` 可单独复跑。端点实际加密通道、准入、操作执行与租约回执将在后续计划取证。
+协议夹具 [vectors.json](../managed/tests/vectors.json) 包含设备挑战、用户绑定、中心授权、直连主控证明、中继受控证明、策略回执及有人值守确认的签名，以及无效格式用例。所有测试种子仅供夹具使用。Go 使用标准库 Ed25519，Rust 测试使用与上游同版本的 `sodiumoxide`，测试和环境均通过锁文件或镜像摘要固定。运行 `bash scripts/deskrealm-m2-test vectors` 可单独复跑。当前还可复跑原生协议和 TCP 通道绑定检查。完整准入、操作执行与租约回执须由实际受管路径取证。
 
 ## 设备运行身份与主控绑定
 
@@ -139,6 +139,16 @@ bash scripts/deskrealm-m2-test sources
 
 手动撤销和影响授权的业务变更在同一事务写入失效状态、审计及 outbox。原生端运行期间独立查询状态，读取撤销即停止操作并补交回执。中心查询分别保留撤销请求时间、已跨过的租约截止时间和实际停止回执的接收时间。晚到回执保留早先的到期事实。收到实际回执前，已核销会话的撤销审计保持待回执。续租、撤销和回执的 PostgreSQL 检查入口为 `bash scripts/deskrealm-m2-test leases`。03-04 接入原生定时器、可靠通知查询与实际停止执行。
 
+## RustDesk 原生消息和通道绑定
+
+会合消息在两个锁定的 `hbb_common` 上使用同一 `DeskRealmSignal` 字段号 40。该消息使用 `DeskRealmRoute` 携带中心签名帧、签名和候选连接 UUID，并分别承载直连与中继协调消息。端点的 `Message` 使用字段号 40 携带 `DeskRealmHandshake`。加密后的握手按会话 UUID 和连接 UUID 交换随机数、角色证明和核销结果。会话凭据留在受控端。
+
+TCP 的绑定摘要使用 HMAC-SHA256，密钥为 RustDesk 方向密钥协商中生成的会话秘密。输入按顺序为 ASCII `DeskRealm/M2/RustDesk-channel/v1`、零字节、四字节无符号大端协商公布版本、四字节无符号大端选定版本、发起端临时公钥、响应端临时公钥。两把临时公钥各为 32 字节。原生代码当前只在选定版本 1 的 TCP 流暴露该绑定。流被改为原始模式或装入旧版单密钥时，绑定随之清除。直接 TCP 和经中继原样转发的 TCP 可以使用同一规则。
+
+验签用预先信任的中心 `kid` 和公钥检查标准帧及期限，然后依据授权中的公钥摘要核对端点角色。连接证明使用本地流的绑定摘要和双方随机数。改变连接 UUID、通道摘要、随机数或路径均使原证明失效。有人值守确认由受控设备签名，确认动作只能取授权动作的非空子集。
+
+`bash scripts/deskrealm-m2-test native-wire` 从锁定源码重放补丁，交叉解码两端的 protobuf，运行 Go/Rust 向量及原生 TCP 测试，并检查客户端基础库与 Linux 会合及中继二进制目标的编译。TCP 测试覆盖直接连通与原样转发的字节流。接下来需把授权和核销接入实际的会合、中继配对和客户端会话入口，再验证真实两路。
+
 ## 原生构建入口与证据
 
 受管 Windows 构建沿用固定客户端工作流的原生 MSVC 环境。先按工作流生成对应版本的 Flutter bridge 并安装锁定的 vcpkg 依赖。上游配置为 Rust 1.75、vcpkg `9e593bb18ea69cc5095e012465dcd675a822ed0d`，ARM64 用对应版本的原生 Dart 和 Windows engine，并将 `SODIUM_LIB_DIR` 指向 ARM64 vcpkg 库。 [固定 Windows 工作流](https://github.com/rustdesk/rustdesk/blob/95cca3f661f635b3cc85c04935fe8d96d8f432ef/.github/workflows/flutter-build.yml#L157-L339)
@@ -150,4 +160,4 @@ bash scripts/deskrealm-m2-test sources
 
 服务端从固定源码准备后，在对应 Linux 构建环境的服务端目录执行 `cargo build --locked --release --bin hbbs --bin hbbr`。工具链和依赖准备参考固定上游镜像构建配方。 [固定服务端构建配方](https://github.com/rustdesk/rustdesk-server/blob/73523b31cfd25d77dee862e6fc9f5e1fb5e485ef/docker-classic/Dockerfile)
 
-开发工件建议保存到 checkout 外的 `evidence/m2/builds/<target>/<deskrealm-commit>/`。每次记录 DeskRealm 提交、上游与子模块 SHA、补丁摘要、编译器及 SDK 版本、运行命令和工件 SHA-256。当前检查只包含运行在 Linux 容器中的 Rust 签名夹具。Windows x64、ARM64 原生制品与 Linux 受管服务端构建留待 03-04，目标环境注册和联网验收留待 Phase 5。
+开发工件建议保存到 checkout 外的 `evidence/m2/builds/<target>/<deskrealm-commit>/`。每次记录 DeskRealm 提交、上游与子模块 SHA、补丁摘要、编译器及 SDK 版本、运行命令和工件 SHA-256。本次原生协议检查使用 Linux ARM64 容器。Windows x64、ARM64 原生制品及接入会话授权后完整的 Linux 受管服务端构建留待 03-04，目标环境注册和联网验收留待 Phase 5。

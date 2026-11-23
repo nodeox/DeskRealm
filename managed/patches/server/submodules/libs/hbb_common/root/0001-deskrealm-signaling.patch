@@ -1,0 +1,50 @@
+diff --git a/protos/rendezvous.proto b/protos/rendezvous.proto
+index b9b8ed7..c09e449 100644
+--- a/protos/rendezvous.proto
++++ b/protos/rendezvous.proto
+@@ -170,6 +170,28 @@ message HealthCheck {
+   string token = 1;
+ }
+ 
++// DeskRealm signaling is separately tagged. A managed listener must check the
++// grant and path before dispatching any operation inside this envelope.
++message DeskRealmRoute {
++  bytes grant_frame = 1;
++  bytes grant_signature = 2;
++  bytes connection_uuid = 3;
++}
++
++message DeskRealmSignal {
++  DeskRealmRoute route = 1;
++  oneof operation {
++    PunchHoleRequest direct_request = 2;
++    PunchHole direct_candidate = 3;
++    PunchHoleSent direct_ready = 4;
++    FetchLocalAddr fetch_local = 5;
++    LocalAddr local_ready = 6;
++    PunchHoleResponse direct_response = 7;
++    RequestRelay relay_request = 8;
++    RelayResponse relay_response = 9;
++  }
++}
++
+ message RendezvousMessage {
+   oneof union {
+     RegisterPeer register_peer = 6;
+@@ -193,5 +215,6 @@ message RendezvousMessage {
+     OnlineResponse online_response = 24;
+     KeyExchange key_exchange = 25;
+     HealthCheck hc = 26;
++    DeskRealmSignal deskrealm_signal = 40;
+   }
+ }
+diff --git a/src/lib.rs b/src/lib.rs
+index 9475b96..1051cc3 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -1,4 +1,5 @@
+ pub mod compress;
++pub mod deskrealm_protocol;
+ pub mod platform;
+ pub mod protos;
+ pub use bytes;
