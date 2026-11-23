@@ -1,0 +1,36 @@
+diff --git a/protos/rendezvous.proto b/protos/rendezvous.proto
+index 030210a..a583511 100644
+--- a/protos/rendezvous.proto
++++ b/protos/rendezvous.proto
+@@ -286,10 +286,12 @@ message DeskRealmRoute {
+   bytes grant_frame = 1;
+   bytes grant_signature = 2;
+   bytes connection_uuid = 3;
++  string target_rustdesk_id = 4;
+ }
+ 
+ message DeskRealmSignal {
+   DeskRealmRoute route = 1;
++  bytes offer_nonce = 10;
+   oneof operation {
+     PunchHoleRequest direct_request = 2;
+     PunchHole direct_candidate = 3;
+@@ -299,9 +301,18 @@ message DeskRealmSignal {
+     PunchHoleResponse direct_response = 7;
+     RequestRelay relay_request = 8;
+     RelayResponse relay_response = 9;
++    bytes transport_challenge = 11;
++    DeskRealmTransportProof transport_proof = 12;
++    uint32 relay_join = 13; // PeerRole, 1 controller or 2 target.
++    bool relay_ready = 14;
+   }
+ }
+ 
++message DeskRealmTransportProof {
++  bytes public_key = 1;
++  bytes signature = 2;
++}
++
+ message RendezvousMessage {
+   oneof union {
+     RegisterPeer register_peer = 6;

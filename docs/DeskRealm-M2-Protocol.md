@@ -141,13 +141,30 @@ bash scripts/deskrealm-m2-test sources
 
 ## RustDesk 原生消息和通道绑定
 
-会合消息在两个锁定的 `hbb_common` 上使用同一 `DeskRealmSignal` 字段号 40。该消息使用 `DeskRealmRoute` 携带中心签名帧、签名和候选连接 UUID，并分别承载直连与中继协调消息。端点的 `Message` 使用字段号 40 携带 `DeskRealmHandshake`。加密后的握手按会话 UUID 和连接 UUID 交换随机数、角色证明和核销结果。会话凭据留在受控端。
+会合消息在两个锁定的 `hbb_common` 上使用同一 `DeskRealmSignal` 字段号 40。该消息使用 `DeskRealmRoute` 携带中心签名帧、签名、候选连接 UUID 和目标 RustDesk ID，并分别承载直连与中继协调消息。端点的 `Message` 使用字段号 40 携带 `DeskRealmHandshake`。加密后的握手按会话 UUID 和连接 UUID 交换随机数、角色证明和核销结果。会话凭据留在受控端。
 
 TCP 的绑定摘要使用 HMAC-SHA256，密钥为 RustDesk 方向密钥协商中生成的会话秘密。输入按顺序为 ASCII `DeskRealm/M2/RustDesk-channel/v1`、零字节、四字节无符号大端协商公布版本、四字节无符号大端选定版本、发起端临时公钥、响应端临时公钥。两把临时公钥各为 32 字节。原生代码当前只在选定版本 1 的 TCP 流暴露该绑定。流被改为原始模式或装入旧版单密钥时，绑定随之清除。直接 TCP 和经中继原样转发的 TCP 可以使用同一规则。
 
 验签用预先信任的中心 `kid` 和公钥检查标准帧及期限，然后依据授权中的公钥摘要核对端点角色。连接证明使用本地流的绑定摘要和双方随机数。改变连接 UUID、通道摘要、随机数或路径均使原证明失效。有人值守确认由受控设备签名，确认动作只能取授权动作的非空子集。
 
-`bash scripts/deskrealm-m2-test native-wire` 从锁定源码重放补丁，交叉解码两端的 protobuf，运行 Go/Rust 向量及原生 TCP 测试，并检查客户端基础库与 Linux 会合及中继二进制目标的编译。TCP 测试覆盖直接连通与原样转发的字节流。接下来需把授权和核销接入实际的会合、中继配对和客户端会话入口，再验证真实两路。
+`bash scripts/deskrealm-m2-test native-wire` 从锁定源码重放补丁，交叉解码两端的 protobuf，运行 Go/Rust 向量及原生 TCP 测试，并检查客户端基础库与 Linux 会合及中继二进制目标的编译。TCP 测试覆盖直接连通与原样转发的字节流。完整端点会话进入受控端核销后再验证。
+
+## 受管会合和中继
+
+用 `DESKREALM_MANAGED_MODE=1` 启动受管 `hbbs` 和 `hbbr`。两个进程分别配置 `DESKREALM_MANAGED_CENTER`（HTTPS 中心源站）、`DESKREALM_MANAGED_CENTER_KID` 和 `DESKREALM_MANAGED_CENTER_PUBLIC_KEY`（无填充 Base64url 的 Ed25519 公钥）。可选 `DESKREALM_MANAGED_CA_FILE` 指向 PEM 格式 CA。服务凭据只配置在各自进程，中心请求验证 HTTPS 且禁止重定向。两套运行配置使用独立的实例、监听地址或端口和数据目录。
+
+| 进程 | 额外配置和行为 |
+| --- | --- |
+| `hbbs` | 使用持久化 RustDesk 签名密钥和 `DESKREALM_MANAGED_RENDEZVOUS_TOKEN`。需要中继时设置 `DESKREALM_MANAGED_RELAY_ID` 以及 `DESKREALM_MANAGED_RELAY_ADDRESS`（主机与端口），两项均省略时仅协调 TCP 直连。 |
+| `hbbr` | 设置同一 `DESKREALM_MANAGED_RELAY_ID` 和独立的 `DESKREALM_MANAGED_RELAY_TOKEN`。只接受受管 TCP 配对。 |
+
+受管模式不处理原版连接请求、原版 UDP 打洞应答或 WebSocket 传输请求。UDP 仍用于设备地址登记和会合通知。主控申请 TCP 直连或中继协调。会合校验主控角色证明、调用中心复查，并核对受控设备登记公钥后才转发。在受控端从 TCP 返回应答时，会合再次复查授权，确认应答与同一个挂起通知绑定。会合从受控端 TCP 连接观察并返回直连候选地址，中继地址来自进程配置。独立试点实例可使用原有配置。
+
+每个会合或中继 TCP 入口生成独立的 32 字节挑战。Ed25519 持钥证明的签名输入依次为 ASCII `DeskRealm/M2/transport-proof/v1`、零字节、一字节用途、一字节角色、32 字节授权摘要、16 字节候选连接 UUID、32 字节挑战、32 字节会合通知随机数、目标 RustDesk ID 的 ASCII 字节。用途按直连申请、中继申请、直连应答、中继应答和加入中继依次为 1 至 5。角色值为主控 1 或受控 2。首次会合申请的通知随机数全零，受控应答和中继加入使用会合转发的随机数。发送端通过 `transport_proof` 传输其 32 字节公钥和 64 字节签名。
+
+中继要求两端分别证明其角色，核对授权、连接 UUID 和会合通知后请求中心登记配对。收到中心 204 后，中继向两端发送 `relay_ready`，随后开始原样转发。客户端必须等待 `relay_ready` 才能开始端到端数据握手。中心拒绝或超时会关闭两个连接。
+
+运行 `bash scripts/deskrealm-m2-test native-coordination` 可从锁定源码构建和运行两种服务。测试使用本机 TLS 中心夹具和签名端点，覆盖真实会合通知、直连候选回应、中继配对及双向字节转发。RustDesk 主控和受控端的接入及在线核销由 03-04 Task 1 的后续工作完成。
 
 ## 原生构建入口与证据
 

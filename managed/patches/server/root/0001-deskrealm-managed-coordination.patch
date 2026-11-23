@@ -1,0 +1,909 @@
+diff --git a/src/hbbr.rs b/src/hbbr.rs
+index 4c8a784..24258d2 100644
+--- a/src/hbbr.rs
++++ b/src/hbbr.rs
+@@ -1,3 +1,4 @@
++mod managed_transport;
+ use clap::App;
+ mod common;
+ mod relay_server;
+diff --git a/src/lib.rs b/src/lib.rs
+index 8da29a2..57e3c32 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -1,3 +1,4 @@
++mod managed_transport;
+ mod rendezvous_server;
+ pub use rendezvous_server::*;
+ pub mod common;
+diff --git a/src/managed_transport.rs b/src/managed_transport.rs
+new file mode 100644
+index 0000000..7e09d19
+--- /dev/null
++++ b/src/managed_transport.rs
+@@ -0,0 +1,349 @@
++use hbb_common::{
++    bail,
++    base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _},
++    bytes::Bytes,
++    deskrealm_protocol::{valid_rustdesk_id, Path, PeerRole, TransportPurpose, VerifiedGrant},
++    protobuf::{Message, MessageField},
++    rendezvous_proto::{
++        desk_realm_signal::Operation, rendezvous_message, DeskRealmRoute, DeskRealmSignal,
++        RendezvousMessage,
++    },
++    tcp::FramedStream,
++    tokio::{sync::Semaphore, time::timeout},
++    ResultType,
++};
++use sodiumoxide::{crypto::sign, randombytes::randombytes_into};
++use std::{
++    env,
++    net::SocketAddr,
++    time::{Duration, SystemTime, UNIX_EPOCH},
++};
++use uuid::Uuid;
++
++const NETWORK_TIMEOUT: Duration = Duration::from_secs(5);
++pub(crate) const OFFER_TIMEOUT: Duration = Duration::from_secs(20);
++const MAX_SIGNAL_BYTES: usize = 4096;
++pub(crate) const EMPTY_OFFER: [u8; 32] = [0; 32];
++
++#[derive(Clone, Copy, PartialEq, Eq)]
++pub(crate) enum Service {
++    Rendezvous,
++    Relay,
++}
++
++pub(crate) struct ManagedTransport {
++    pub(crate) relay_id: String,
++    pub(crate) relay_address: String,
++    pub(crate) slots: Semaphore,
++    center: reqwest::Url,
++    client: reqwest::Client,
++    bearer: String,
++    kid: String,
++    center_key: sign::PublicKey,
++    service: Service,
++}
++
++fn setting(name: &str) -> ResultType<String> {
++    match env::var(name) {
++        Ok(value) => Ok(value),
++        Err(env::VarError::NotPresent) => Ok(String::new()),
++        Err(_) => bail!("invalid managed configuration for {}", name),
++    }
++}
++
++fn identifier(value: &str) -> bool {
++    !value.is_empty()
++        && value.len() <= 32
++        && value.bytes().enumerate().all(|(i, b)| {
++            b.is_ascii_lowercase() || b.is_ascii_digit() || (i > 0 && matches!(b, b'-' | b'_'))
++        })
++}
++
++impl ManagedTransport {
++    pub(crate) fn from_env(service: Service) -> ResultType<Option<Self>> {
++        let mode = setting("DESKREALM_MANAGED_MODE")?;
++        let center = setting("DESKREALM_MANAGED_CENTER")?;
++        let kid = setting("DESKREALM_MANAGED_CENTER_KID")?;
++        let key = setting("DESKREALM_MANAGED_CENTER_PUBLIC_KEY")?;
++        let relay_id = setting("DESKREALM_MANAGED_RELAY_ID")?;
++        let relay_address = setting("DESKREALM_MANAGED_RELAY_ADDRESS")?;
++        let ca_file = setting("DESKREALM_MANAGED_CA_FILE")?;
++        let (token_name, prefix) = match service {
++            Service::Rendezvous => ("DESKREALM_MANAGED_RENDEZVOUS_TOKEN", "drr_"),
++            Service::Relay => ("DESKREALM_MANAGED_RELAY_TOKEN", "drl_"),
++        };
++        let token = setting(token_name)?;
++        if mode.is_empty()
++            && [
++                &center,
++                &kid,
++                &key,
++                &relay_id,
++                &relay_address,
++                &token,
++                &ca_file,
++            ]
++            .iter()
++            .all(|v| v.is_empty())
++        {
++            return Ok(None);
++        }
++        if mode != "1" || !identifier(&kid) || decode_32(&token).is_none() {
++            bail!("invalid or incomplete DeskRealm managed transport configuration");
++        }
++        match service {
++            Service::Rendezvous if relay_id.is_empty() && relay_address.is_empty() => {}
++            Service::Rendezvous if identifier(&relay_id) && socket_authority(&relay_address) => {}
++            Service::Relay if identifier(&relay_id) && relay_address.is_empty() => {}
++            _ => bail!("invalid DeskRealm managed relay configuration"),
++        }
++        let center = reqwest::Url::parse(&center)
++            .map_err(|_| hbb_common::anyhow::anyhow!("invalid managed center origin"))?;
++        if center.scheme() != "https"
++            || center.host().is_none()
++            || center.path() != "/"
++            || !center.username().is_empty()
++            || center.password().is_some()
++            || center.query().is_some()
++            || center.fragment().is_some()
++        {
++            bail!("managed center must be an HTTPS origin");
++        }
++        let Some(center_key) = decode_32(&key).map(sign::PublicKey) else {
++            bail!("invalid DeskRealm managed center public key");
++        };
++        sodiumoxide::init()
++            .map_err(|_| hbb_common::anyhow::anyhow!("cannot initialize managed cryptography"))?;
++        let mut client = reqwest::Client::builder()
++            .no_proxy()
++            .redirect(reqwest::redirect::Policy::none())
++            .timeout(NETWORK_TIMEOUT);
++        if !ca_file.is_empty() {
++            let pem = std::fs::read(ca_file)
++                .map_err(|_| hbb_common::anyhow::anyhow!("cannot read managed center CA"))?;
++            let ca = reqwest::Certificate::from_pem(&pem)
++                .map_err(|_| hbb_common::anyhow::anyhow!("invalid managed center CA"))?;
++            client = client.add_root_certificate(ca);
++        }
++        Ok(Some(Self {
++            relay_id,
++            relay_address,
++            slots: Semaphore::new(128),
++            center,
++            client: client.build()?,
++            bearer: format!("{prefix}{token}"),
++            kid,
++            center_key,
++            service,
++        }))
++    }
++
++    fn verify<'a>(&self, route: &'a DeskRealmRoute) -> ResultType<VerifiedGrant<'a>> {
++        if !valid_rustdesk_id(&route.target_rustdesk_id) || route.connection_uuid.len() != 16 {
++            bail!("invalid managed route");
++        }
++        let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64;
++        VerifiedGrant::verify(
++            &route.grant_frame,
++            &route.grant_signature,
++            &self.kid,
++            &self.center_key,
++            now,
++        )
++        .ok_or_else(|| hbb_common::anyhow::anyhow!("invalid or expired managed grant"))
++    }
++
++    pub(crate) fn check_target_registration(
++        &self,
++        route: &DeskRealmRoute,
++        public_key: &[u8],
++    ) -> ResultType<()> {
++        let grant = self.verify(route)?;
++        if !sign::PublicKey::from_slice(public_key)
++            .is_some_and(|key| grant.matches_device_key(PeerRole::Target, &key))
++        {
++            bail!("managed target registration does not match the grant");
++        }
++        Ok(())
++    }
++
++    pub(crate) async fn authenticate(
++        &self,
++        stream: &mut FramedStream,
++        route: &DeskRealmRoute,
++        purpose: TransportPurpose,
++        role: PeerRole,
++        offer: &[u8; 32],
++    ) -> ResultType<sign::PublicKey> {
++        let grant = self.verify(route)?;
++        let connection: &[u8; 16] = route.connection_uuid.as_ref().try_into()?;
++        let challenge = nonce();
++        write(
++            stream,
++            DeskRealmSignal {
++                operation: Some(Operation::TransportChallenge(Bytes::copy_from_slice(
++                    &challenge,
++                ))),
++                ..Default::default()
++            },
++        )
++        .await?;
++        let proof = match read_managed(stream).await? {
++            DeskRealmSignal {
++                route,
++                offer_nonce,
++                operation: Some(Operation::TransportProof(proof)),
++                ..
++            } if route.is_none() && offer_nonce.is_empty() => proof,
++            _ => bail!("invalid managed transport proof"),
++        };
++        let (Some(key), Ok(signature)) = (
++            sign::PublicKey::from_slice(&proof.public_key),
++            sign::Signature::from_bytes(&proof.signature),
++        ) else {
++            bail!("invalid managed transport proof");
++        };
++        let frame = grant.transport_proof_frame(
++            purpose,
++            role,
++            connection,
++            &route.target_rustdesk_id,
++            &challenge,
++            offer,
++        );
++        if !grant.matches_device_key(role, &key) || !sign::verify_detached(&signature, &frame, &key)
++        {
++            bail!("invalid managed transport proof");
++        }
++        self.verify(route)?;
++        Ok(key)
++    }
++
++    pub(crate) async fn authorize(&self, route: &DeskRealmRoute, path: Path) -> ResultType<()> {
++        let grant = self.verify(route)?;
++        let endpoint = match self.service {
++            Service::Rendezvous => "/v1/internal/managed/rendezvous/authorize",
++            Service::Relay => "/v1/internal/managed/relay/paired",
++        };
++        let (path, relay_id) = match path {
++            Path::Direct => ("direct", ""),
++            Path::Relay if !self.relay_id.is_empty() => ("relay", &self.relay_id[..]),
++            Path::Relay => bail!("managed relay is not configured"),
++        };
++        let response = self.client.post(self.center.join(endpoint)?)
++            .bearer_auth(&self.bearer)
++            .json(&serde_json::json!({
++                "session_id": Uuid::from_slice(grant.session_id())?.to_string(),
++                "grant_id": Uuid::from_slice(grant.grant_id())?.to_string(),
++                "grant_signature": URL_SAFE_NO_PAD.encode(&route.grant_signature),
++                "controller_device_id": Uuid::from_slice(grant.device_id(PeerRole::Controller))?.to_string(),
++                "target_device_id": Uuid::from_slice(grant.device_id(PeerRole::Target))?.to_string(),
++                "target_rustdesk_id": &route.target_rustdesk_id,
++                "connection_id": Uuid::from_slice(&route.connection_uuid)?.to_string(),
++                "path": path,
++                "relay_id": relay_id,
++            }))
++            .send().await.map_err(|_| hbb_common::anyhow::anyhow!("managed center is unavailable"))?;
++        if response.status() != reqwest::StatusCode::NO_CONTENT {
++            bail!("managed center denied route");
++        }
++        self.verify(route)?;
++        Ok(())
++    }
++}
++
++fn socket_authority(value: &str) -> bool {
++    if let Ok(addr) = value.parse::<SocketAddr>() {
++        return addr.port() != 0 && !addr.ip().is_unspecified();
++    }
++    let Some((name, port)) = value.rsplit_once(':') else {
++        return false;
++    };
++    !name.is_empty()
++        && name.len() <= 253
++        && name.split('.').all(|label| {
++            !label.is_empty()
++                && label.len() <= 63
++                && label
++                    .bytes()
++                    .all(|b| b.is_ascii_alphanumeric() || b == b'-')
++                && !label.starts_with('-')
++                && !label.ends_with('-')
++        })
++        && port.parse::<u16>().map_or(false, |p| p != 0)
++}
++
++fn decode_32(text: &str) -> Option<[u8; 32]> {
++    URL_SAFE_NO_PAD.decode(text).ok()?.try_into().ok()
++}
++
++pub(crate) fn nonce() -> [u8; 32] {
++    let mut value = [0; 32];
++    randombytes_into(&mut value);
++    value
++}
++
++pub(crate) type RouteKey = ([u8; 32], Uuid);
++
++pub(crate) fn route_key(route: &DeskRealmRoute) -> ResultType<RouteKey> {
++    // The full route stored against this key is checked again before use.
++    let connection = Uuid::from_slice(&route.connection_uuid)?;
++    // This stable key does not depend on untrusted protobuf field order.
++    let hash = sodiumoxide::crypto::hash::sha256::hash(&route.grant_signature);
++    Ok((hash.0, connection))
++}
++
++pub(crate) fn same_route(a: &DeskRealmRoute, b: &DeskRealmRoute) -> bool {
++    a.grant_frame == b.grant_frame
++        && a.grant_signature == b.grant_signature
++        && a.connection_uuid == b.connection_uuid
++        && a.target_rustdesk_id == b.target_rustdesk_id
++}
++
++pub(crate) fn signal(
++    route: DeskRealmRoute,
++    offer: [u8; 32],
++    operation: Operation,
++) -> DeskRealmSignal {
++    DeskRealmSignal {
++        route: MessageField::some(route),
++        offer_nonce: if offer == EMPTY_OFFER {
++            Bytes::new()
++        } else {
++            Bytes::copy_from_slice(&offer)
++        },
++        operation: Some(operation),
++        ..Default::default()
++    }
++}
++
++pub(crate) fn wrap(signal: DeskRealmSignal) -> RendezvousMessage {
++    let mut message = RendezvousMessage::new();
++    message.set_deskrealm_signal(signal);
++    message
++}
++
++pub(crate) fn stream(stream: hbb_common::tokio::net::TcpStream, addr: SocketAddr) -> FramedStream {
++    let mut stream = FramedStream::from(stream, addr);
++    stream.codec_mut().set_max_packet_length(MAX_SIGNAL_BYTES);
++    stream
++}
++
++pub(crate) async fn read(stream: &mut FramedStream) -> ResultType<RendezvousMessage> {
++    let Some(bytes) = timeout(NETWORK_TIMEOUT, stream.next()).await? else {
++        bail!("managed connection closed");
++    };
++    Ok(RendezvousMessage::parse_from_bytes(&bytes?)?)
++}
++
++pub(crate) async fn read_managed(stream: &mut FramedStream) -> ResultType<DeskRealmSignal> {
++    match read(stream).await?.union {
++        Some(rendezvous_message::Union::DeskrealmSignal(signal)) => Ok(signal),
++        _ => bail!("managed transport message required"),
++    }
++}
++
++pub(crate) async fn write(stream: &mut FramedStream, signal: DeskRealmSignal) -> ResultType<()> {
++    timeout(NETWORK_TIMEOUT, stream.send(&wrap(signal))).await??;
++    Ok(())
++}
+diff --git a/src/relay_server.rs b/src/relay_server.rs
+index 0ec190a..c061f7d 100644
+--- a/src/relay_server.rs
++++ b/src/relay_server.rs
+@@ -1,8 +1,11 @@
++use crate::managed_transport::{self as managed, ManagedTransport, RouteKey, Service, EMPTY_OFFER, OFFER_TIMEOUT};
+ use async_speed_limit::Limiter;
+ use async_trait::async_trait;
+ use hbb_common::{
+     allow_err, bail,
+     bytes::{Bytes, BytesMut},
++    deskrealm_protocol::{Path as ManagedPath, PeerRole, TransportPurpose},
++    rendezvous_proto::desk_realm_signal::Operation,
+     futures_util::{sink::SinkExt, stream::StreamExt},
+     log,
+     protobuf::Message as _,
+@@ -14,7 +17,7 @@ use hbb_common::{
+         self,
+         io::{AsyncReadExt, AsyncWriteExt},
+         net::{TcpListener, TcpStream},
+-        sync::{Mutex, RwLock},
++        sync::{oneshot, Mutex, RwLock},
+         time::{interval, Duration},
+     },
+     ResultType,
+@@ -25,9 +28,22 @@ use std::{
+     io::prelude::*,
+     io::Error,
+     net::SocketAddr,
+-    sync::atomic::{AtomicUsize, Ordering},
++    sync::{atomic::{AtomicUsize, Ordering}, Arc},
+ };
+ 
++struct PendingManagedPeer {
++    route: DeskRealmRoute,
++    offer: [u8; 32],
++    role: PeerRole,
++    id: [u8; 32],
++    second: oneshot::Sender<FramedStream>,
++}
++
++struct ManagedRelay {
++    service: ManagedTransport,
++    waiting: Mutex<HashMap<RouteKey, PendingManagedPeer>>,
++}
++
+ type Usage = (usize, usize, usize, usize);
+ 
+ lazy_static::lazy_static! {
+@@ -47,6 +63,8 @@ const BLOCKLIST_FILE: &str = "blocklist.txt";
+ 
+ #[tokio::main(flavor = "multi_thread")]
+ pub async fn start(port: &str, key: &str) -> ResultType<()> {
++    let managed = ManagedTransport::from_env(Service::Relay)?
++        .map(|service| Arc::new(ManagedRelay { service, waiting: Default::default() }));
+     let key = get_server_sk(key);
+     if let Ok(mut file) = std::fs::File::open(BLACKLIST_FILE) {
+         let mut contents = String::new();
+@@ -85,7 +103,7 @@ pub async fn start(port: &str, key: &str) -> ResultType<()> {
+     let main_task = async move {
+         loop {
+             log::info!("Start");
+-            io_loop(listen_any(port).await?, listen_any(port2).await?, &key).await;
++            io_loop(listen_any(port).await?, listen_any(port2).await?, &key, &managed).await;
+         }
+     };
+     let listen_signal = crate::common::listen_signal();
+@@ -323,7 +341,7 @@ async fn check_cmd(cmd: &str, limiter: Limiter) -> String {
+     res
+ }
+ 
+-async fn io_loop(listener: TcpListener, listener2: TcpListener, key: &str) {
++async fn io_loop(listener: TcpListener, listener2: TcpListener, key: &str, managed: &Option<Arc<ManagedRelay>>) {
+     check_params();
+     let limiter = <Limiter>::new(TOTAL_BANDWIDTH.load(Ordering::SeqCst) as _);
+     loop {
+@@ -332,7 +350,7 @@ async fn io_loop(listener: TcpListener, listener2: TcpListener, key: &str) {
+                 match res {
+                     Ok((stream, addr))  => {
+                         stream.set_nodelay(true).ok();
+-                        handle_connection(stream, addr, &limiter, key, false).await;
++                        handle_connection(stream, addr, &limiter, key, false, managed).await;
+                     }
+                     Err(err) => {
+                        log::error!("listener.accept failed: {}", err);
+@@ -344,7 +362,7 @@ async fn io_loop(listener: TcpListener, listener2: TcpListener, key: &str) {
+                 match res {
+                     Ok((stream, addr))  => {
+                         stream.set_nodelay(true).ok();
+-                        handle_connection(stream, addr, &limiter, key, true).await;
++                        handle_connection(stream, addr, &limiter, key, true, managed).await;
+                     }
+                     Err(err) => {
+                        log::error!("listener2.accept failed: {}", err);
+@@ -362,8 +380,29 @@ async fn handle_connection(
+     limiter: &Limiter,
+     key: &str,
+     ws: bool,
++    managed: &Option<Arc<ManagedRelay>>,
+ ) {
+     let ip = hbb_common::try_into_v4(addr).ip();
++    if let Some(managed) = managed {
++        if ws || BLOCKLIST.read().await.contains(&ip.to_string()) {
++            return;
++        }
++        let transport = managed.clone();
++        let limiter = limiter.clone();
++        tokio::spawn(async move {
++            let Ok(permit) = transport.service.slots.try_acquire() else { return };
++            let Ok(pair) = transport.pair(managed::stream(stream, addr)).await else { return };
++            drop(permit);
++            if let Some((mut first, second)) = pair {
++                let id = addr.to_string();
++                let mut peer: Box<dyn StreamTrait> = Box::new(second);
++                USAGE.write().await.insert(id.clone(), Default::default());
++                allow_err!(relay(addr, &mut first, &mut peer, limiter, id.clone()).await);
++                USAGE.write().await.remove(&id);
++            }
++        });
++        return;
++    }
+     if !ws && ip.is_loopback() {
+         let limiter = limiter.clone();
+         tokio::spawn(async move {
+@@ -390,6 +429,89 @@ async fn handle_connection(
+     });
+ }
+ 
++impl ManagedRelay {
++    async fn pair(
++        &self,
++        mut stream: FramedStream,
++    ) -> ResultType<Option<(FramedStream, FramedStream)>> {
++        let request = managed::read_managed(&mut stream).await?;
++        let Some(route) = request.route.into_option() else {
++            bail!("managed relay route missing")
++        };
++        let offer: [u8; 32] = request.offer_nonce.as_ref().try_into()?;
++        if offer == EMPTY_OFFER {
++            bail!("managed relay offer missing");
++        }
++        let role = match request.operation {
++            Some(Operation::RelayJoin(1)) => PeerRole::Controller,
++            Some(Operation::RelayJoin(2)) => PeerRole::Target,
++            _ => bail!("invalid managed relay role"),
++        };
++        let _ = self
++            .service
++            .authenticate(
++                &mut stream,
++                &route,
++                TransportPurpose::RelayJoin,
++                role,
++                &offer,
++            )
++            .await?;
++        let key = managed::route_key(&route)?;
++        let id = managed::nonce();
++        let (sender, receiver) = oneshot::channel();
++        {
++            let mut waiting = self.waiting.lock().await;
++            if let Some(peer) = waiting.get(&key) {
++                if peer.role == role
++                    || peer.offer != offer
++                    || !managed::same_route(&peer.route, &route)
++                {
++                    bail!("managed relay peer does not match");
++                }
++                let peer = waiting.remove(&key).expect("checked relay peer");
++                if peer.second.send(stream).is_err() {
++                    bail!("managed relay peer disconnected");
++                }
++                return Ok(None);
++            }
++            if waiting.len() >= 64 {
++                bail!("managed relay is busy");
++            }
++            waiting.insert(
++                key,
++                PendingManagedPeer {
++                    route: route.clone(),
++                    offer,
++                    role,
++                    id,
++                    second: sender,
++                },
++            );
++        }
++        let peer = tokio::select! {
++            received = tokio::time::timeout(OFFER_TIMEOUT, receiver) => received.ok().and_then(Result::ok),
++            _ = stream.next() => None,
++        };
++        {
++            let mut waiting = self.waiting.lock().await;
++            if waiting.get(&key).map(|entry| entry.id) == Some(id) {
++                waiting.remove(&key);
++            }
++        }
++        let Some(mut peer) = peer else {
++            bail!("managed relay peer unavailable")
++        };
++        self.service.authorize(&route, ManagedPath::Relay).await?;
++        let ready = managed::signal(route, offer, Operation::RelayReady(true));
++        managed::write(&mut stream, ready.clone()).await?;
++        managed::write(&mut peer, ready).await?;
++        stream.set_raw();
++        peer.set_raw();
++        Ok(Some((stream, peer)))
++    }
++}
++
+ async fn make_pair(
+     stream: TcpStream,
+     mut addr: SocketAddr,
+diff --git a/src/rendezvous_server.rs b/src/rendezvous_server.rs
+index dff45eb..ff51fee 100644
+--- a/src/rendezvous_server.rs
++++ b/src/rendezvous_server.rs
+@@ -1,10 +1,13 @@
+ use crate::common::*;
++use crate::managed_transport::{self as managed, ManagedTransport, RouteKey, Service, EMPTY_OFFER, OFFER_TIMEOUT};
+ use crate::peer::*;
+ use hbb_common::{
+     allow_err, bail,
+     bytes::{Bytes, BytesMut},
+     bytes_codec::BytesCodec,
+     config,
++    deskrealm_protocol::{Path as ManagedPath, PeerRole, TransportPurpose},
++    rendezvous_proto::desk_realm_signal::Operation,
+     futures::future::join_all,
+     futures_util::{
+         sink::SinkExt,
+@@ -22,7 +25,7 @@ use hbb_common::{
+         self,
+         io::{AsyncReadExt, AsyncWriteExt},
+         net::{TcpListener, TcpStream},
+-        sync::{mpsc, Mutex},
++        sync::{mpsc, oneshot, Mutex},
+         time::{interval, Duration},
+     },
+     tokio_util::codec::Framed,
+@@ -79,9 +82,18 @@ struct Inner {
+     sk: Option<sign::SecretKey>,
+ }
+ 
++struct ManagedOffer {
++    route: DeskRealmRoute,
++    nonce: [u8; 32],
++    path: ManagedPath,
++    answer: oneshot::Sender<DeskRealmSignal>,
++}
++
+ #[derive(Clone)]
+ pub struct RendezvousServer {
+     tcp_punch: Arc<Mutex<HashMap<SocketAddr, Sink>>>,
++    managed: Option<Arc<ManagedTransport>>,
++    managed_offers: Arc<Mutex<HashMap<RouteKey, ManagedOffer>>>,
+     pm: PeerMap,
+     tx: Sender,
+     relay_servers: Arc<RelayServers>,
+@@ -100,7 +112,11 @@ enum LoopFailure {
+ impl RendezvousServer {
+     #[tokio::main(flavor = "multi_thread")]
+     pub async fn start(port: i32, serial: i32, key: &str, rmem: usize) -> ResultType<()> {
++        let managed = ManagedTransport::from_env(Service::Rendezvous)?.map(Arc::new);
+         let (key, sk) = Self::get_server_sk(key);
++        if managed.is_some() && sk.is_none() {
++            bail!("managed rendezvous requires the RustDesk signing key");
++        }
+         let nat_port = port - 1;
+         let ws_port = port + 2;
+         let pm = PeerMap::new().await?;
+@@ -129,6 +145,8 @@ impl RendezvousServer {
+         };
+         let mut rs = Self {
+             tcp_punch: Arc::new(Mutex::new(HashMap::new())),
++            managed,
++            managed_offers: Default::default(),
+             pm,
+             tx: tx.clone(),
+             relay_servers: Default::default(),
+@@ -428,10 +446,10 @@ impl RendezvousServer {
+                     // UDP PunchHoleRequest is intentionally unsupported.
+                     // The supported client path sends PunchHoleRequest over TCP/WS.
+                 }
+-                Some(rendezvous_message::Union::PunchHoleSent(phs)) => {
++                Some(rendezvous_message::Union::PunchHoleSent(phs)) if self.managed.is_none() => {
+                     self.handle_hole_sent(phs, addr, Some(socket)).await?;
+                 }
+-                Some(rendezvous_message::Union::LocalAddr(la)) => {
++                Some(rendezvous_message::Union::LocalAddr(la)) if self.managed.is_none() => {
+                     self.handle_local_addr(la, addr, Some(socket)).await?;
+                 }
+                 Some(rendezvous_message::Union::ConfigureUpdate(mut cu)) => {
+@@ -1148,6 +1166,15 @@ impl RendezvousServer {
+         key: &str,
+         ws: bool,
+     ) -> ResultType<()> {
++        if let Some(service) = self.managed.clone() {
++            if ws {
++                return Ok(());
++            }
++            let Ok(_permit) = service.slots.try_acquire() else {
++                return Ok(());
++            };
++            return self.handle_managed_tcp(managed::stream(stream, addr), try_into_v4(addr), &service).await;
++        }
+         let mut sink;
+         if ws {
+             use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
+@@ -1192,6 +1219,225 @@ impl RendezvousServer {
+         Ok(())
+     }
+ 
++    async fn handle_managed_tcp(
++        &mut self,
++        mut stream: FramedStream,
++        addr: SocketAddr,
++        service: &ManagedTransport,
++    ) -> ResultType<()> {
++        let signal = match managed::read(&mut stream).await?.union {
++            Some(rendezvous_message::Union::DeskrealmSignal(signal)) => signal,
++            Some(rendezvous_message::Union::TestNatRequest(_)) => {
++                let mut message = RendezvousMessage::new();
++                message.set_test_nat_response(TestNatResponse {
++                    port: addr.port() as _,
++                    ..Default::default()
++                });
++                return Ok(timeout(5_000, stream.send(&message)).await??);
++            }
++            _ => bail!("managed rendezvous message required"),
++        };
++        let Some(route) = signal.route.into_option() else {
++            bail!("managed route missing")
++        };
++        let key = managed::route_key(&route)?;
++        match signal.operation {
++            Some(Operation::DirectRequest(req))
++                if signal.offer_nonce.is_empty()
++                    && req.id == route.target_rustdesk_id
++                    && req.conn_type.enum_value() == Ok(ConnType::DEFAULT_CONN) =>
++            {
++                self.managed_request(&mut stream, service, key, route, addr, ManagedPath::Direct)
++                    .await
++            }
++            Some(Operation::RelayRequest(req))
++                if signal.offer_nonce.is_empty()
++                    && req.id == route.target_rustdesk_id
++                    && req.conn_type.enum_value() == Ok(ConnType::DEFAULT_CONN) =>
++            {
++                self.managed_request(&mut stream, service, key, route, addr, ManagedPath::Relay)
++                    .await
++            }
++            Some(Operation::DirectReady(_)) => {
++                self.managed_reply(
++                    &mut stream,
++                    service,
++                    key,
++                    route,
++                    addr,
++                    ManagedPath::Direct,
++                    &signal.offer_nonce,
++                )
++                .await
++            }
++            Some(Operation::RelayResponse(_)) => {
++                self.managed_reply(
++                    &mut stream,
++                    service,
++                    key,
++                    route,
++                    addr,
++                    ManagedPath::Relay,
++                    &signal.offer_nonce,
++                )
++                .await
++            }
++            _ => bail!("invalid managed rendezvous operation"),
++        }
++    }
++
++    async fn managed_request(
++        &self,
++        stream: &mut FramedStream,
++        service: &ManagedTransport,
++        key: RouteKey,
++        route: DeskRealmRoute,
++        addr: SocketAddr,
++        path: ManagedPath,
++    ) -> ResultType<()> {
++        let purpose = match path {
++            ManagedPath::Direct => TransportPurpose::DirectRequest,
++            ManagedPath::Relay => TransportPurpose::RelayRequest,
++        };
++        let _ = service
++            .authenticate(stream, &route, purpose, PeerRole::Controller, &EMPTY_OFFER)
++            .await?;
++        service.authorize(&route, path).await?;
++        let Some(peer) = self.pm.get(&route.target_rustdesk_id).await else {
++            bail!("managed peer unavailable")
++        };
++        let (peer_addr, peer_key) = {
++            let peer = peer.read().await;
++            if peer.last_reg_time.elapsed().as_millis() >= REG_TIMEOUT as u128 {
++                bail!("managed peer unavailable");
++            }
++            (peer.socket_addr, peer.pk.clone())
++        };
++        service.check_target_registration(&route, &peer_key)?;
++        let offer = managed::nonce();
++        let (answer, reply) = oneshot::channel();
++        {
++            let mut pending = self.managed_offers.lock().await;
++            if pending.len() >= 64 || pending.contains_key(&key) {
++                bail!("managed request unavailable");
++            }
++            pending.insert(
++                key,
++                ManagedOffer {
++                    route: route.clone(),
++                    nonce: offer,
++                    path,
++                    answer,
++                },
++            );
++        }
++        let operation = match path {
++            ManagedPath::Direct => Operation::DirectCandidate(PunchHole {
++                socket_addr: AddrMangle::encode(addr).into(),
++                ..Default::default()
++            }),
++            ManagedPath::Relay => Operation::RelayRequest(RequestRelay {
++                id: route.target_rustdesk_id.clone(),
++                uuid: key.1.to_string(),
++                relay_server: service.relay_address.clone(),
++                secure: true,
++                ..Default::default()
++            }),
++        };
++        let candidate = managed::wrap(managed::signal(route, offer, operation));
++        let result = async {
++            self.tx.send(Data::Msg(candidate.into(), peer_addr))?;
++            let response = tokio::select! {
++                result = tokio::time::timeout(OFFER_TIMEOUT, reply) => result??,
++                _ = stream.next() => bail!("managed requester disconnected"),
++            };
++            managed::write(stream, response).await
++        }
++        .await;
++        let mut pending = self.managed_offers.lock().await;
++        if pending.get(&key).map(|entry| entry.nonce) == Some(offer) {
++            pending.remove(&key);
++        }
++        result
++    }
++
++    async fn managed_reply(
++        &self,
++        stream: &mut FramedStream,
++        service: &ManagedTransport,
++        key: RouteKey,
++        route: DeskRealmRoute,
++        addr: SocketAddr,
++        path: ManagedPath,
++        offer: &[u8],
++    ) -> ResultType<()> {
++        let offer: &[u8; 32] = offer.try_into()?;
++        let purpose = match path {
++            ManagedPath::Direct => TransportPurpose::DirectReply,
++            ManagedPath::Relay => TransportPurpose::RelayReply,
++        };
++        let target_key = service
++            .authenticate(stream, &route, purpose, PeerRole::Target, offer)
++            .await?;
++        let matches = |entry: &ManagedOffer| {
++            entry.nonce == *offer && entry.path == path && managed::same_route(&entry.route, &route)
++        };
++        if !self
++            .managed_offers
++            .lock()
++            .await
++            .get(&key)
++            .map_or(false, matches)
++        {
++            bail!("managed offer unavailable");
++        }
++        service.authorize(&route, path).await?;
++        let mut pending = self.managed_offers.lock().await;
++        if !pending.get(&key).map_or(false, matches) {
++            bail!("managed offer unavailable");
++        }
++        let reply = pending.remove(&key).expect("checked managed offer").answer;
++        drop(pending);
++
++        let signing_key = self
++            .inner
++            .sk
++            .as_ref()
++            .expect("managed signing key checked on startup");
++        let signed = sign::sign(
++            &hbb_common::message_proto::IdPk {
++                id: route.target_rustdesk_id.clone(),
++                pk: Bytes::copy_from_slice(target_key.as_ref()),
++                ..Default::default()
++            }
++            .write_to_bytes()?,
++            signing_key,
++        );
++        let operation = match path {
++            ManagedPath::Direct => Operation::DirectResponse(PunchHoleResponse {
++                socket_addr: AddrMangle::encode(addr).into(),
++                pk: signed.into(),
++                ..Default::default()
++            }),
++            ManagedPath::Relay => {
++                let mut response = RelayResponse {
++                    uuid: key.1.to_string(),
++                    relay_server: service.relay_address.clone(),
++                    ..Default::default()
++                };
++                response.set_pk(signed.into());
++                Operation::RelayResponse(response)
++            }
++        };
++        if reply
++            .send(managed::signal(route, *offer, operation))
++            .is_err()
++        {
++            bail!("managed requester disconnected");
++        }
++        Ok(())
++    }
++
+     #[inline]
+     async fn get_pk(&mut self, version: &str, id: String) -> Bytes {
+         if version.is_empty() || self.inner.sk.is_none() {

@@ -1,5 +1,6 @@
 """Replay the native patches and check both generated signaling schemas."""
 
+import argparse
 import json
 import os
 from pathlib import Path
@@ -30,9 +31,13 @@ def verify_schemas(client, server):
     frame = text_bytes(bytes.fromhex(grant["frame_hex"]))
     signature = text_bytes(bytes.fromhex(grant["signature_hex"]))
     connection = text_bytes(bytes(range(16)))
-    for operation in ('direct_request { id: "10700002" }', 'relay_request { id: "10700002" }'):
+    for operation in (
+        'direct_request { id: "10700002" }', 'relay_request { id: "10700002" }',
+        'transport_challenge: "challenge"', 'transport_proof { public_key: "key" signature: "proof" }',
+        'relay_join: 1', 'relay_ready: true',
+    ):
         request = f"""deskrealm_signal {{
-            route {{ grant_frame: {frame} grant_signature: {signature} connection_uuid: {connection} }}
+            route {{ grant_frame: {frame} grant_signature: {signature} connection_uuid: {connection} target_rustdesk_id: "10700002" }}
             {operation}
         }}""".encode()
         left = protobuf(client_proto, "encode", "RendezvousMessage", request)
@@ -50,21 +55,29 @@ def verify_schemas(client, server):
     print("Native signaling schemas agree on direct and relay; peer admission field numbers verified.", flush=True)
 
 
-def cargo(repo, cache, image, *args, required=None):
+def in_source(repo, cache, image, command, required=None, fixture=False):
     cache.mkdir(exist_ok=True)
+    mounts = ["--volume", f"{ROOT / 'managed/tests'}:/fixture:ro"] if fixture else []
     run = subprocess.run(
         ["docker", "run", "--rm", "--volume", f"{repo}:/source", "--volume", f"{cache}:/cargo-cache",
-         "--env", "CARGO_HOME=/cargo-cache", "--env", "CARGO_NET_GIT_FETCH_WITH_CLI=true",
-         "--workdir", "/source", image, "cargo", *args],
+         *mounts, "--env", "CARGO_HOME=/cargo-cache", "--env", "CARGO_NET_GIT_FETCH_WITH_CLI=true",
+         "--workdir", "/source", image, *command],
         text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
     )
     if run.returncode or (required and required not in run.stdout):
         print(run.stdout[-12000:], flush=True)
-        raise RuntimeError(f"{repo.name}: locked Cargo command did not pass")
+        raise RuntimeError(f"{repo.name}: locked native check did not pass")
     print(run.stdout[-1800:], flush=True)
 
 
+def cargo(repo, cache, image, *args, required=None):
+    in_source(repo, cache, image, ["cargo", *args], required=required)
+
+
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--coordination", action="store_true", help="build and run the managed server pair")
+    arguments = parser.parse_args()
     # Use a Docker-mountable path on macOS, even when TMPDIR is a per-user path.
     directory = os.environ.get("DESKREALM_NATIVE_TMPDIR", "/tmp")
     with tempfile.TemporaryDirectory(prefix="deskrealm-native-wire-", dir=Path(directory).resolve()) as tmp:
@@ -77,6 +90,14 @@ def main():
             if actual.read_bytes() != canonical:
                 raise RuntimeError(f"{target}: managed protocol differs from the reviewed source")
         verify_schemas(source / "client", source / "server")
+        if arguments.coordination:
+            in_source(
+                source / "server", scratch / "server-cache", SERVER_IMAGE,
+                ["sh", "-ec", "cargo build --locked --bin hbbs --bin hbbr && "
+                 "python3 /fixture/native_coord_fixture.py /source/target/debug"],
+                required="Managed hbbs routes and hbbr pairing passed", fixture=True,
+            )
+            return
         cargo(source / "client", scratch / "client-cache", CLIENT_IMAGE, "test", "--locked", "-p", "hbb_common",
               "--lib", "managed_channel_binding_direct_and_forwarded", required="managed_channel_binding_direct_and_forwarded ... ok")
         cargo(source / "client", scratch / "client-cache", CLIENT_IMAGE, "check", "--locked", "-p", "base", "--lib")

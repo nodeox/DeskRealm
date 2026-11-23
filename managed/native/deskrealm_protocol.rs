@@ -324,3 +324,47 @@ fn verify_signature(message: &[u8], signature: &[u8], public_key: &sign::PublicK
         .map(|sig| sign::verify_detached(&sig, message, public_key))
         .unwrap_or(false)
 }
+
+/// These purposes separate rendezvous initiation, target replies and relay joins.
+#[derive(Clone, Copy)]
+#[repr(u8)]
+pub enum TransportPurpose {
+    DirectRequest = 1,
+    RelayRequest = 2,
+    DirectReply = 3,
+    RelayReply = 4,
+    RelayJoin = 5,
+}
+
+impl VerifiedGrant<'_> {
+    pub fn transport_proof_frame(
+        &self,
+        purpose: TransportPurpose,
+        role: PeerRole,
+        connection: &[u8; 16],
+        target_rustdesk_id: &str,
+        challenge: &[u8; 32],
+        offer: &[u8; 32],
+    ) -> Vec<u8> {
+        let mut frame = b"DeskRealm/M2/transport-proof/v1\0".to_vec();
+        frame.extend_from_slice(&[purpose as u8, role as u8]);
+        frame.extend_from_slice(&self.digest);
+        frame.extend_from_slice(connection);
+        frame.extend_from_slice(challenge);
+        frame.extend_from_slice(offer);
+        // The sole variable-length field is last. Its ASCII form is checked
+        // by the transport ingress before a route can reach the center.
+        frame.extend_from_slice(target_rustdesk_id.as_bytes());
+        frame
+    }
+}
+
+/// Check the RustDesk routing address separately from the stable signed UUID.
+pub fn valid_rustdesk_id(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    (3..=32).contains(&bytes.len())
+        && bytes
+            .iter()
+            .enumerate()
+            .all(|(i, b)| b.is_ascii_alphanumeric() || (i > 0 && matches!(b, b'-' | b'_')))
+}
