@@ -46,6 +46,10 @@ CLIENT_TESTS = (
     "managed_clipboard_validates_text_and_discards_stale_epochs",
     "managed_file_paths_and_publication_fail_closed",
     "managed_file_driver_moves_bytes_and_audits_cancel_and_failure",
+    "managed_local_consent_preserves_only_selected_actions",
+    "managed_local_consent_cancels_partial_approval",
+    "managed_local_consent_rejects_invalid_permission_masks",
+    "managed_unattended_mode_is_explicit_and_session_local",
 )
 LEASE_TESTS = (
     "managed_lease_checks_each_action_and_denies_all_at_expiry",

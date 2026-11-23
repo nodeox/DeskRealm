@@ -1,0 +1,545 @@
+diff --git a/flutter/lib/desktop/pages/connection_page.dart b/flutter/lib/desktop/pages/connection_page.dart
+index e552a77..597d1fc 100644
+--- a/flutter/lib/desktop/pages/connection_page.dart
++++ b/flutter/lib/desktop/pages/connection_page.dart
+@@ -328,12 +328,14 @@ class _ConnectionPageState extends State<ConnectionPage>
+   /// Callback for the connect button.
+   /// Connects to the selected peer.
+   void onConnect(
+-      {bool isFileTransfer = false,
++      {bool managedUnattended = false,
++      bool isFileTransfer = false,
+       bool isViewCamera = false,
+       bool isTerminal = false,
+       bool isTcpTunneling = false}) {
+     var id = _idController.id;
+     connect(context, id,
++        loginMethod: managedUnattended ? 'deskrealm-unattended' : '',
+         isFileTransfer: isFileTransfer,
+         isViewCamera: isViewCamera,
+         isTerminal: isTerminal,
+@@ -591,6 +593,14 @@ class _ConnectionPageState extends State<ConnectionPage>
+                                   context: context,
+                                   position: RelativeRect.fromLTRB(x, y, x, y),
+                                   items: [
++                                    if (isWindows &&
++                                        bind.mainGetBuildinOption(
++                                                key: 'deskrealm-managed-mode') ==
++                                            'Y')
++                                      (
++                                        '申请无人值守连接',
++                                        () => onConnect(managedUnattended: true)
++                                      ),
+                                     (
+                                       'Transfer file',
+                                       () => onConnect(isFileTransfer: true)
+diff --git a/libs/base/src/deskrealm_endpoint.rs b/libs/base/src/deskrealm_endpoint.rs
+index 33e13c8..e7b7846 100644
+--- a/libs/base/src/deskrealm_endpoint.rs
++++ b/libs/base/src/deskrealm_endpoint.rs
+@@ -446,15 +446,17 @@ impl Authority {
+     }
+ 
+     /// The managed target never falls back to a legacy or plaintext exchange.
+-    pub async fn connect_target<'a, F, R>(
++    pub async fn connect_target<'a, F, R, A>(
+         &self,
+         stream: &mut Stream,
+         target: TargetSession<'a>,
+         consent: F,
++        available: A,
+     ) -> ResultType<Lease>
+     where
+         F: FnOnce(LocalConsent) -> R,
+         R: Future<Output = Option<u8>>,
++        A: Fn() -> bool,
+     {
+         let grant = self.verify(target.route, target.device, PeerRole::Target)?;
+         require_unkeyed_tcp(stream)?;
+@@ -495,7 +497,7 @@ impl Authority {
+                 picked: 1,
+             },
+         )?;
+-        self.admit_target(stream, target, consent).await
++        self.admit_target(stream, target, consent, available).await
+     }
+ 
+     /// No login or remote operations are allowed until this succeeds.
+@@ -554,15 +556,17 @@ impl Authority {
+ 
+     /// The caller supplies the locally applied policy and trusted on-device consent.
+     /// The returned lease keeps the private session credential on the target.
+-    pub async fn admit_target<'a, F, R>(
++    pub async fn admit_target<'a, F, R, A>(
+         &self,
+         stream: &mut Stream,
+         target: TargetSession<'a>,
+         consent: F,
++        available: A,
+     ) -> ResultType<Lease>
+     where
+         F: FnOnce(LocalConsent) -> R,
+         R: Future<Output = Option<u8>>,
++        A: Fn() -> bool,
+     {
+         let TargetSession {
+             route,
+@@ -626,6 +630,9 @@ impl Authority {
+         } else {
+             bail!("unattended access is not approved by local policy");
+         };
++        if !available() {
++            bail!("managed target became unavailable before redemption");
++        }
+         self.verify(route, device, PeerRole::Target)?;
+         let session_id = Uuid::from_slice(grant.session_id())?;
+         let connection_id = Uuid::from_bytes(connection);
+diff --git a/libs/base/tests/deskrealm_interop.rs b/libs/base/tests/deskrealm_interop.rs
+index 3acb807..16f769e 100644
+--- a/libs/base/tests/deskrealm_interop.rs
++++ b/libs/base/tests/deskrealm_interop.rs
+@@ -108,7 +108,12 @@ async fn managed_endpoint_admission_on_direct_and_relay() -> ResultType<()> {
+         (Path::Relay, "relay-file", Some(16), true),
+         (Path::Direct, "direct-supervised", Some(1), true),
+         (Path::Relay, "relay-supervised", Some(1), true),
++        (Path::Direct, "direct-unattended", Some(3), true),
++        (Path::Relay, "relay-unattended", Some(3), true),
++        (Path::Direct, "direct-unattended-local-denied", None, false),
++        (Path::Direct, "direct-console-unavailable", Some(1), false),
+     ] {
++        let attended = !purpose.contains("-unattended");
+         let requested = if purpose.ends_with("-file") {
+             16
+         } else if purpose.ends_with("-clipboard") {
+@@ -131,7 +136,7 @@ async fn managed_endpoint_admission_on_direct_and_relay() -> ResultType<()> {
+                     Uuid::new_v4(),
+                     purpose,
+                     requested,
+-                    true,
++                    attended,
+                 )
+                 .await?;
+             let mut stream = network
+@@ -176,14 +181,16 @@ async fn managed_endpoint_admission_on_direct_and_relay() -> ResultType<()> {
+                         policy: AppliedPolicy {
+                             version: if purpose == "policy-mismatch" { 2 } else { 1 },
+                             allowed_mask: requested,
+-                            unattended_purposes: &[],
++                            unattended_purposes: &["direct-unattended", "relay-unattended"],
+                         },
+                     },
+                     |request| async move {
++                        assert!(attended, "unattended grants cannot trigger local confirmation");
+                         assert_eq!(request.purpose, purpose);
+                         assert_eq!(request.allowed_mask, requested);
+                         selection
+                     },
++                    || purpose != "direct-console-unavailable",
+                 )
+                 .await?;
+             Ok::<_, hbb_common::anyhow::Error>((lease, stream))
+@@ -199,13 +206,23 @@ async fn managed_endpoint_admission_on_direct_and_relay() -> ResultType<()> {
+             }
+             let (client, mut controller_stream) = client?;
+             let (mut host, mut target_stream) = host?;
+-            let expected = selection.expect("successful fixture declares consent");
++            let expected = selection.expect("successful fixture declares effective actions");
+             assert_eq!(client.allowed_mask, u32::from(expected));
+             assert_eq!(host.allowed_mask, expected);
+             assert_eq!(client.lease_sequence, host.sequence);
+             assert_eq!(client.lease_until_ms, host.until_ms);
+             assert_eq!(host.credential(), bearer("drc_", 13));
+             use base::deskrealm_endpoint::{ManagedAction, SessionStatus, StopReason};
++            if !attended {
++                assert!(host.permits(ManagedAction::View));
++                assert!(host.permits(ManagedAction::Input));
++                assert!(!host.permits(ManagedAction::Clipboard));
++                drop(target_stream);
++                let closed = controller_stream.next_timeout(2000).await;
++                assert!(closed.is_none() || closed.is_some_and(|frame| frame.is_err()));
++                authority.report_local_end(&host).await?;
++                continue;
++            }
+             if purpose.ends_with("-audio") {
+                 assert!(host.permits(ManagedAction::Audio));
+                 assert!(!host.permits(ManagedAction::Input));
+diff --git a/src/client.rs b/src/client.rs
+index b0a64a8..f267776 100644
+--- a/src/client.rs
++++ b/src/client.rs
+@@ -396,10 +396,13 @@ impl Client {
+             if !matches!(conn_type, ConnType::DEFAULT_CONN | ConnType::FILE_TRANSFER) {
+                 bail!("managed mode supports desktop and file connections");
+             }
++            let attended = interface.get_lch().read().unwrap().get_login_method()
++                != "deskrealm-unattended";
+             let (stream, direct, allowed) = crate::deskrealm_desktop::connect(
+                 peer,
+                 interface.is_force_relay(),
+                 conn_type == ConnType::FILE_TRANSFER,
++                attended,
+             )
+             .await?;
+             return Ok(((stream, direct, None, None, "TCP"), (0, String::new()), allowed));
+diff --git a/src/client/login_method.rs b/src/client/login_method.rs
+index 4d74dc6..e0e048f 100644
+--- a/src/client/login_method.rs
++++ b/src/client/login_method.rs
+@@ -5,12 +5,18 @@ pub(super) enum LoginMethod {
+     #[default]
+     Automatic,
+     RequestApproval,
++    #[cfg(windows)]
++    ManagedUnattended,
+ }
+ 
+ impl LoginConfigHandler {
+     pub(crate) fn set_login_method(&mut self, method: &str) -> bool {
+         self.login_method = match method {
+             "request-approval" => LoginMethod::RequestApproval,
++            #[cfg(windows)]
++            "deskrealm-unattended" if crate::deskrealm_desktop::enabled() => {
++                LoginMethod::ManagedUnattended
++            }
+             _ => return false,
+         };
+         true
+@@ -24,10 +30,25 @@ impl LoginConfigHandler {
+         match self.login_method {
+             LoginMethod::Automatic => "",
+             LoginMethod::RequestApproval => "request-approval",
++            #[cfg(windows)]
++            LoginMethod::ManagedUnattended => "deskrealm-unattended",
+         }
+     }
+ }
+ 
++#[cfg(all(test, windows, feature = "deskrealm-managed"))]
++#[test]
++fn managed_unattended_mode_is_explicit_and_session_local() {
++    let mut selected = LoginConfigHandler::default();
++    assert!(selected.set_login_method("deskrealm-unattended"));
++    assert_eq!(selected.get_login_method(), "deskrealm-unattended");
++    assert!(selected.skips_saved_password());
++    let mut standard = LoginConfigHandler::default();
++    assert_eq!(standard.get_login_method(), "");
++    assert!(standard.set_login_method("request-approval"));
++    assert_eq!(standard.get_login_method(), "request-approval");
++}
++
+ #[cfg(all(test, feature = "flutter"))]
+ mod tests {
+     use crate::{client, flutter::FlutterHandler, ui_session_interface::Session};
+diff --git a/src/deskrealm_desktop.rs b/src/deskrealm_desktop.rs
+index a2bb17a..3be5bed 100644
+--- a/src/deskrealm_desktop.rs
++++ b/src/deskrealm_desktop.rs
+@@ -1,8 +1,11 @@
+ //! Wires the desktop process to managed admission without legacy transport fallback.
+ 
++#[cfg(any(windows, test))]
++mod consent;
++
+ use base::{
+     deskrealm_endpoint::{
+-        AppliedPolicy, Authority, DeviceCredential, DeviceIdentity, InstalledPolicy, LocalConsent,
++        AppliedPolicy, Authority, DeviceCredential, DeviceIdentity, InstalledPolicy,
+         ManagedAction, SessionTarget, TargetSession,
+     },
+     deskrealm_transport::{Network, RelayNode},
+@@ -215,6 +218,7 @@ pub(crate) async fn connect(
+     peer: &str,
+     force_relay: bool,
+     file_session: bool,
++    attended: bool,
+ ) -> ResultType<(Stream, bool, u8)> {
+     if hbb_common::config::is_incoming_only() {
+         bail!("managed controller is unavailable in incoming-only mode");
+@@ -258,7 +262,7 @@ pub(crate) async fn connect(
+             Uuid::new_v4(),
+             &purpose,
+             requested,
+-            true,
++            attended,
+         )
+         .await?;
+     let grant = desktop
+@@ -456,6 +460,13 @@ pub(crate) async fn authorize_target(
+     } else {
+         ""
+     };
++    let unavailable = || {
++        #[cfg(windows)]
++        if crate::platform::deskrealm_unlocked_console() != Some(console) {
++            return true;
++        }
++        stopped() || crate::privacy_mode::is_in_privacy_mode()
++    };
+     let lease = desktop
+         .authority
+         .connect_target(
+@@ -472,7 +483,19 @@ pub(crate) async fn authorize_target(
+                     unattended_purposes: &unattended,
+                 },
+             },
+-            |request| async move { ask_local_user(request, prompts).await },
++            |request| async move {
++                #[cfg(windows)]
++                return ask_local_user(
++                    request, prompts, console, if file_session { FILES } else { VIEW },
++                )
++                .await;
++                #[cfg(not(windows))]
++                {
++                    let _ = (request, prompts);
++                    None
++                }
++            },
++            || !unavailable(),
+         )
+         .await?;
+     let device_bearer = || {
+@@ -482,13 +505,6 @@ pub(crate) async fn authorize_target(
+             .filter(|credential| !credential.expires_within(Duration::ZERO))
+             .map(|credential| credential.bearer().to_owned())
+     };
+-    let unavailable = || {
+-        #[cfg(windows)]
+-        if crate::platform::deskrealm_unlocked_console() != Some(console) {
+-            return true;
+-        }
+-        stopped() || crate::privacy_mode::is_in_privacy_mode()
+-    };
+     if let Some(root) = file_root {
+         use crate::server::managed_files;
+         use base::deskrealm_endpoint::{FileResult, SessionFileReceipts};
+@@ -543,35 +559,43 @@ pub(crate) async fn authorize_target(
+     Ok(())
+ }
+ 
+-async fn ask_local_user(request: LocalConsent, prompts: Arc<Semaphore>) -> Option<u8> {
+-    if stopped() {
+-        return None;
+-    }
++#[cfg(windows)]
++async fn ask_local_user(
++    request: base::deskrealm_endpoint::LocalConsent,
++    prompts: Arc<Semaphore>,
++    console: u32,
++    required: u8,
++) -> Option<u8> {
+     let permit = prompts.try_acquire_owned().ok()?;
++    let deadline = std::time::Instant::now() + Duration::from_secs(25);
+     tokio::task::spawn_blocking(move || {
+-        // Keep the permit until the native dialog has closed, even if the
+-        // networking task is cancelled while waiting for it.
++        // Keep the prompt slot until the native dialog closes, including on timeout.
+         let _permit = permit;
+-        #[cfg(target_os = "windows")]
+-        {
+-            let names = ["查看画面", "键鼠控制", "音频", "剪贴板", "文件传输"];
+-            let operations = names
+-                .iter()
+-                .enumerate()
+-                .filter_map(|(bit, name)| (request.allowed_mask & (1 << bit) != 0).then_some(*name))
+-                .collect::<Vec<_>>()
+-                .join("、");
++        consent::select_permissions(request.allowed_mask, required, |operation, required| {
++            if stopped() || crate::privacy_mode::is_in_privacy_mode() {
++                return None;
++            }
++            let seconds = deadline
++                .checked_duration_since(std::time::Instant::now())?
++                .as_secs();
++            if seconds == 0 {
++                return None;
++            }
++            let decline = if required {
++                "选择「否」将拒绝会话。"
++            } else {
++                "选择「否」将跳过此权限。"
++            };
+             let text = format!(
+-                "是否允许本次受管会话？\n\n主控用户 {}\n主控设备 {}\n用途 {}\n操作 {}",
+-                request.user_id, request.controller_device_id, request.purpose, operations
++                "主控用户 {}\n主控设备 {}\n用途 {}\n\n授予「{}」权限？\n{} 选择「取消」将拒绝会话。",
++                request.user_id, request.controller_device_id, request.purpose, operation, decline
+             );
+-            if crate::platform::confirm_deskrealm_consent(&text) && !stopped() {
+-                return Some(request.allowed_mask);
+-            }
+-        }
+-        #[cfg(not(target_os = "windows"))]
+-        let _ = request;
+-        None
++            let selected =
++                crate::platform::confirm_deskrealm_consent(console, &text, seconds as u32)?;
++            (std::time::Instant::now() < deadline
++                && !stopped()
++                && !crate::privacy_mode::is_in_privacy_mode()).then_some(selected)
++        })
+     })
+     .await
+     .ok()
+diff --git a/src/deskrealm_desktop/consent.rs b/src/deskrealm_desktop/consent.rs
+new file mode 100644
+index 0000000..57bd7fb
+--- /dev/null
++++ b/src/deskrealm_desktop/consent.rs
+@@ -0,0 +1,79 @@
++use super::{AUDIO, CLIPBOARD, FILES, INPUT, VIEW};
++
++pub(super) fn select_permissions(
++    requested: u8,
++    required: u8,
++    mut ask: impl FnMut(&str, bool) -> Option<bool>,
++) -> Option<u8> {
++    const OPERATIONS: [(u8, &str); 5] = [
++        (VIEW, "查看画面"),
++        (INPUT, "键鼠控制"),
++        (AUDIO, "音频"),
++        (CLIPBOARD, "剪贴板"),
++        (FILES, "文件传输"),
++    ];
++    if requested == 0
++        || requested & !(VIEW | INPUT | AUDIO | CLIPBOARD | FILES) != 0
++        || required == 0
++        || required & !requested != 0
++    {
++        return None;
++    }
++    let mut selected = 0;
++    for (bit, label) in OPERATIONS {
++        if requested & bit == 0 {
++            continue;
++        }
++        let mandatory = required & bit != 0;
++        if ask(label, mandatory)? {
++            selected |= bit;
++        } else if mandatory {
++            return None;
++        }
++    }
++    Some(selected)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn managed_local_consent_preserves_only_selected_actions() {
++        let mut visits = Vec::new();
++        let selected = select_permissions(VIEW | INPUT | CLIPBOARD, VIEW, |operation, mandatory| {
++            visits.push((operation.to_owned(), mandatory));
++            Some(operation != "键鼠控制")
++        });
++        assert_eq!(selected, Some(VIEW | CLIPBOARD));
++        assert_eq!(
++            visits,
++            [
++                ("查看画面".to_owned(), true),
++                ("键鼠控制".to_owned(), false),
++                ("剪贴板".to_owned(), false),
++            ]
++        );
++    }
++
++    #[test]
++    fn managed_local_consent_cancels_partial_approval() {
++        assert_eq!(
++            select_permissions(VIEW | INPUT, VIEW, |_, mandatory| mandatory.then_some(true)),
++            None
++        );
++        for base in [VIEW, FILES] {
++            assert_eq!(select_permissions(base, base, |_, _| Some(false)), None);
++        }
++    }
++
++    #[test]
++    fn managed_local_consent_rejects_invalid_permission_masks() {
++        for (requested, required) in [(0, VIEW), (VIEW, 0), (INPUT, VIEW), (VIEW | 32, VIEW)] {
++            assert_eq!(
++                select_permissions(requested, required, |_, _| panic!("invalid prompt")),
++                None
++            );
++        }
++    }
++}
+diff --git a/src/flutter_ffi.rs b/src/flutter_ffi.rs
+index 0d6ca0a..50bbd5d 100644
+--- a/src/flutter_ffi.rs
++++ b/src/flutter_ffi.rs
+@@ -2675,6 +2675,14 @@ pub fn main_get_hard_option(key: String) -> SyncReturn<String> {
+ }
+ 
+ pub fn main_get_buildin_option(key: String) -> SyncReturn<String> {
++    #[cfg(windows)]
++    if key == "deskrealm-managed-mode" {
++        return SyncReturn(if crate::deskrealm_desktop::enabled() {
++            "Y".into()
++        } else {
++            String::new()
++        });
++    }
+     SyncReturn(get_builtin_option(&key))
+ }
+ 
+diff --git a/src/platform/windows.rs b/src/platform/windows.rs
+index a831c9b..2a9c416 100644
+--- a/src/platform/windows.rs
++++ b/src/platform/windows.rs
+@@ -4183,22 +4183,22 @@ pub(crate) fn deskrealm_unlocked_console() -> Option<u32> {
+         .then_some(session)
+ }
+ 
+-// The RustDesk service can run in Session 0. Require an explicit Yes
+-// from the same unlocked physical console before and after the dialog.
+-pub(crate) fn confirm_deskrealm_consent(message: &str) -> bool {
++// The service can run in Session 0. Route every prompt to the original
++// unlocked physical console. Cancellation and timeout abandon the whole request.
++pub(crate) fn confirm_deskrealm_consent(session: u32, message: &str, timeout_secs: u32) -> Option<bool> {
+     use windows::{
+         core::PCWSTR,
+         Win32::{
+             System::RemoteDesktop::WTSSendMessageW,
+             UI::WindowsAndMessaging::{
+-                IDYES, MB_DEFBUTTON2, MB_ICONWARNING, MB_YESNO, MESSAGEBOX_RESULT,
++                IDNO, IDYES, MB_DEFBUTTON2, MB_ICONWARNING, MB_YESNOCANCEL, MESSAGEBOX_RESULT,
+             },
+         },
+     };
+ 
+-    let Some(session) = deskrealm_unlocked_console() else {
+-        return false;
+-    };
++    if timeout_secs == 0 || deskrealm_unlocked_console() != Some(session) {
++        return None;
++    }
+     let title: Vec<u16> = "DeskRealm 远程访问确认".encode_utf16().chain([0]).collect();
+     let body: Vec<u16> = message.encode_utf16().chain([0]).collect();
+     let title_bytes = ((title.len() - 1) * std::mem::size_of::<u16>()) as u32;
+@@ -4212,13 +4212,20 @@ pub(crate) fn confirm_deskrealm_consent(message: &str) -> bool {
+             title_bytes,
+             PCWSTR(body.as_ptr()),
+             body_bytes,
+-            MB_YESNO | MB_DEFBUTTON2 | MB_ICONWARNING,
+-            25,
++            MB_YESNOCANCEL | MB_DEFBUTTON2 | MB_ICONWARNING,
++            timeout_secs,
+             &mut response,
+             true,
+         )
+     };
+-    displayed.is_ok() && response == IDYES && deskrealm_unlocked_console() == Some(session)
++    if displayed.is_err() || deskrealm_unlocked_console() != Some(session) {
++        return None;
++    }
++    match response {
++        IDYES => Some(true),
++        IDNO => Some(false),
++        _ => None,
++    }
+ }
+ 
+ pub fn message_box(text: &str) {

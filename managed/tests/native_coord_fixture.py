@@ -130,11 +130,12 @@ class SigningKey:
 
 
 class Route:
-    def __init__(self, fixture, path, *, expired=False, target=TARGET, allowed=1, purpose="helpdesk"):
+    def __init__(self, fixture, path, *, expired=False, target=TARGET, allowed=1, purpose="helpdesk", attended=True):
         self.center = fixture
         self.path = path
         self.target = target
         self.allowed, self.purpose = allowed, purpose
+        self.attended = attended
         self.session, self.grant, self.connection = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
         now = time.time_ns() // 1_000_000
         self.issued = now - (120_000 if expired else 5_000)
@@ -142,7 +143,8 @@ class Route:
         fields = [
             b"fixture-center", fixture.org.bytes, self.session.bytes, self.grant.bytes, fixture.user.bytes,
             fixture.controller_id.bytes, fixture.target_id.bytes, hashlib.sha256(fixture.controller.public).digest(),
-            hashlib.sha256(fixture.target.public).digest(), struct.pack(">Q", 1), bytes([allowed]), b"\x01", purpose.encode(),
+            hashlib.sha256(fixture.target.public).digest(), struct.pack(">Q", 1), bytes([allowed]),
+            bytes([1 if attended else 2]), purpose.encode(),
             struct.pack(">Q", self.issued), struct.pack(">Q", self.expires),
         ]
         self.frame = b"DR-M2\0\x01\x03" + b"".join(struct.pack(">H", len(v)) + v for v in fields)

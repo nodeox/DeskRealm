@@ -162,6 +162,9 @@ X11_REQUIRED_TESTS = {
     "managed_clipboard_x11_applies_text_only_under_current_permission",
     "managed_file_paths_and_publication_fail_closed",
     "managed_file_driver_moves_bytes_and_audits_cancel_and_failure",
+    "managed_local_consent_preserves_only_selected_actions",
+    "managed_local_consent_cancels_partial_approval",
+    "managed_local_consent_rejects_invalid_permission_masks",
 }
 
 

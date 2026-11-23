@@ -36,6 +36,8 @@ def confirmed_mask(purpose):
         return 5, ["view", "audio"]
     if purpose.endswith("-input"):
         return 3, ["view", "input"]
+    if purpose.endswith("-unattended"):
+        return 3, ["view", "input"]
     return 1, ["view"]
 
 
@@ -249,13 +251,15 @@ class SessionFixture(Fixture):
                     return 403, {}
             elif keys != {"target_rustdesk_id"} or body["target_rustdesk_id"] != TARGET:
                 return 403, {}
-            if body["confirmation_mode"] != "attended":
+            attended = "-unattended" not in purpose
+            mode = "attended" if attended else "unattended"
+            if body["confirmation_mode"] != mode:
                 return 403, {}
             allowed, actions = confirmed_mask(purpose) if purpose.endswith(("-audio", "-clipboard", "-file")) else (3, ["view", "input"])
             if body["requested_actions"] != actions:
                 return 403, {}
             route = Route(self, "relay" if purpose.startswith("relay-") or purpose == "deny-redeem" else "direct",
-                          allowed=allowed, purpose=purpose, expired=purpose == "expired")
+                          allowed=allowed, purpose=purpose, expired=purpose == "expired", attended=attended)
             # The controller chooses its connection UUID on grant receipt.
             route.connection = None
             return 201, {
@@ -266,7 +270,7 @@ class SessionFixture(Fixture):
                 "target_key_sha256": hashlib.sha256(self.target.public).hexdigest(),
                 "controller_rustdesk_id": "10700001", "target_rustdesk_id": TARGET,
                 "policy_version": 1, "allowed_actions": actions,
-                "confirmation_mode": "attended", "purpose": purpose,
+                "confirmation_mode": mode, "purpose": purpose,
                 "issued_ms": route.issued, "expires_ms": route.expires, "signature": b64(route.signature),
             }
         if not path.startswith("/v1/sessions/") or not path.endswith("/redeem"):
@@ -309,6 +313,8 @@ class SessionFixture(Fixture):
             return False
         if decoded(body["target_signature"]) != self.target.sign(signed_frame(4, [b"\x02", *common])):
             return False
+        if not route.attended:
+            return route.purpose.endswith("-unattended") and body["confirmed_actions"] == [] and body["consent_signature"] == ""
         mask, confirmed = confirmed_mask(route.purpose)
         consent = signed_frame(6, [route.bound, route.session.bytes, route.connection.bytes, channel, bytes([mask])])
         return body["confirmed_actions"] == confirmed and decoded(body["consent_signature"]) == self.target.sign(consent)
@@ -343,8 +349,9 @@ def main():
                                            ("relay-audio", True), ("direct-clipboard", True),
                                            ("relay-clipboard", True), ("direct-file", True),
                                            ("relay-file", True), ("direct-supervised", True),
-                                           ("relay-supervised", True)]
-                assert len(fixture.redemptions) == 14 and len(fixture.renewals) == 3
+                                           ("relay-supervised", True), ("direct-unattended", True),
+                                           ("relay-unattended", True)]
+                assert len(fixture.redemptions) == 16 and len(fixture.renewals) == 3
                 assert fixture.stopped == fixture.redemptions.keys()
                 file_sessions = {route.session for route in fixture.routes.values() if route.purpose.endswith("-file")}
                 assert fixture.file_events.keys() == file_sessions
