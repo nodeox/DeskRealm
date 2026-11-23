@@ -55,12 +55,11 @@ def verify_schemas(client, server):
     print("Native signaling schemas agree on direct and relay; peer admission field numbers verified.", flush=True)
 
 
-def in_source(repo, cache, image, command, required=None, fixture=False):
+def in_source(repo, cache, image, command, required=None):
     cache.mkdir(exist_ok=True)
-    mounts = ["--volume", f"{ROOT / 'managed/tests'}:/fixture:ro"] if fixture else []
     run = subprocess.run(
         ["docker", "run", "--rm", "--volume", f"{repo}:/source", "--volume", f"{cache}:/cargo-cache",
-         *mounts, "--env", "CARGO_HOME=/cargo-cache", "--env", "CARGO_NET_GIT_FETCH_WITH_CLI=true",
+         "--env", "CARGO_HOME=/cargo-cache", "--env", "CARGO_NET_GIT_FETCH_WITH_CLI=true",
          "--workdir", "/source", image, *command],
         text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
     )
@@ -74,9 +73,28 @@ def cargo(repo, cache, image, *args, required=None):
     in_source(repo, cache, image, ["cargo", *args], required=required)
 
 
+def run_fixture(server, client, admission):
+    binary = server / "target/debug"
+    args = ["docker", "run", "--rm", "--network", "none",
+            "--volume", f"{ROOT / 'managed/tests'}:/fixture:ro",
+            "--volume", f"{binary}:/server:ro"]
+    if admission:
+        candidates = sorted(path for path in (client / "target/debug/deps").glob("deskrealm_interop-*")
+                            if path.is_file() and os.access(path, os.X_OK))
+        if len(candidates) != 1:
+            raise RuntimeError("expected exactly one native interoperability test executable")
+        args += ["--volume", f"{candidates[0]}:/endpoint:ro", SERVER_IMAGE,
+                 "python3", "/fixture/native_endpoint_fixture.py", "/server", "/endpoint"]
+    else:
+        args += [SERVER_IMAGE, "python3", "/fixture/native_coord_fixture.py", "/server"]
+    subprocess.run(args, check=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--coordination", action="store_true", help="build and run the managed server pair")
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument("--coordination", action="store_true", help="build and run the managed server pair")
+    modes.add_argument("--admission", action="store_true", help="run managed endpoint admission on both paths")
     arguments = parser.parse_args()
     # Use a Docker-mountable path on macOS, even when TMPDIR is a per-user path.
     directory = os.environ.get("DESKREALM_NATIVE_TMPDIR", "/tmp")
@@ -90,13 +108,13 @@ def main():
             if actual.read_bytes() != canonical:
                 raise RuntimeError(f"{target}: managed protocol differs from the reviewed source")
         verify_schemas(source / "client", source / "server")
-        if arguments.coordination:
-            in_source(
-                source / "server", scratch / "server-cache", SERVER_IMAGE,
-                ["sh", "-ec", "cargo build --locked --bin hbbs --bin hbbr && "
-                 "python3 /fixture/native_coord_fixture.py /source/target/debug"],
-                required="Managed hbbs routes and hbbr pairing passed", fixture=True,
-            )
+        if arguments.coordination or arguments.admission:
+            if arguments.admission:
+                cargo(source / "client", scratch / "client-cache", CLIENT_IMAGE, "test", "--locked",
+                      "-p", "base", "--test", "deskrealm_interop", "--no-run")
+            cargo(source / "server", scratch / "server-cache", SERVER_IMAGE, "build", "--locked",
+                  "--bin", "hbbs", "--bin", "hbbr")
+            run_fixture(source / "server", source / "client", arguments.admission)
             return
         cargo(source / "client", scratch / "client-cache", CLIENT_IMAGE, "test", "--locked", "-p", "hbb_common",
               "--lib", "managed_channel_binding_direct_and_forwarded", required="managed_channel_binding_direct_and_forwarded ... ok")

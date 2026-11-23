@@ -130,18 +130,20 @@ class SigningKey:
 
 
 class Route:
-    def __init__(self, fixture, path, *, expired=False, target=TARGET):
+    def __init__(self, fixture, path, *, expired=False, target=TARGET, allowed=1, purpose="helpdesk"):
         self.center = fixture
         self.path = path
         self.target = target
+        self.allowed, self.purpose = allowed, purpose
         self.session, self.grant, self.connection = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
         now = time.time_ns() // 1_000_000
-        issued = now - (120_000 if expired else 5_000)
+        self.issued = now - (120_000 if expired else 5_000)
+        self.expires = self.issued + 60_000
         fields = [
             b"fixture-center", fixture.org.bytes, self.session.bytes, self.grant.bytes, fixture.user.bytes,
             fixture.controller_id.bytes, fixture.target_id.bytes, hashlib.sha256(fixture.controller.public).digest(),
-            hashlib.sha256(fixture.target.public).digest(), struct.pack(">Q", 1), b"\x01", b"\x01", b"helpdesk",
-            struct.pack(">Q", issued), struct.pack(">Q", issued + 60_000),
+            hashlib.sha256(fixture.target.public).digest(), struct.pack(">Q", 1), bytes([allowed]), b"\x01", purpose.encode(),
+            struct.pack(">Q", self.issued), struct.pack(">Q", self.expires),
         ]
         self.frame = b"DR-M2\0\x01\x03" + b"".join(struct.pack(">H", len(v)) + v for v in fields)
         self.signature = fixture.center.sign(self.frame)
@@ -199,6 +201,9 @@ class Fixture:
         self.allow_pair_response.set()
         self.directory = directory
 
+    def session_request(self, path, authorization, body):
+        return None
+
     @contextlib.contextmanager
     def center_server(self):
         fixture = self
@@ -209,10 +214,23 @@ class Fixture:
 
             def do_POST(self):
                 request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                session_result = fixture.session_request(self.path, self.headers.get("Authorization"), request)
+                if session_result is not None:
+                    status, body = session_result
+                    payload = json.dumps(body).encode()
+                    self.send_response(status)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(payload)))
+                    self.end_headers()
+                    self.wfile.write(payload)
+                    return
                 route = fixture.routes.get(request.get("session_id"))
                 token = b64(RENDEZVOUS_TOKEN) if self.path == ROUTE_ENDPOINT else b64(RELAY_TOKEN)
                 prefix = "drr_" if self.path == ROUTE_ENDPOINT else "drl_"
                 status = 403
+                if (self.path == ROUTE_ENDPOINT and route and route.connection is None and
+                        self.headers.get("Authorization") == "Bearer drr_" + b64(RENDEZVOUS_TOKEN)):
+                    route.connection = uuid.UUID(request["connection_id"])
                 if self.path in (ROUTE_ENDPOINT, PAIR_ENDPOINT) and route and (
                     self.headers.get("Authorization") == "Bearer " + prefix + token
                     and request == route.request() and route.target == TARGET and route.session not in fixture.denied

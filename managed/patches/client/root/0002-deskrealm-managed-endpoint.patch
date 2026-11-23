@@ -1,0 +1,1461 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index 56cbcae..a8faffd 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -663,6 +663,7 @@ dependencies = [
+  "osascript",
+  "protobuf",
+  "protobuf-codegen",
++ "reqwest",
+  "serde 1.0.228",
+  "serde_derive",
+  "serde_json 1.0.118",
+diff --git a/libs/base/Cargo.toml b/libs/base/Cargo.toml
+index 2890f00..916d6e7 100644
+--- a/libs/base/Cargo.toml
++++ b/libs/base/Cargo.toml
+@@ -23,6 +23,7 @@ tokio = { version = "1.44", features = ["full"] }
+ serde_derive = "1.0"
+ serde = "1.0"
+ serde_json = "1.0"
++reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
+ filetime = "0.2"
+ libc = "0.2"
+ backtrace = "0.3"
+diff --git a/libs/base/protos/message.proto b/libs/base/protos/message.proto
+index 8bc4c17..a4b4a4b 100644
+--- a/libs/base/protos/message.proto
++++ b/libs/base/protos/message.proto
+@@ -1006,13 +1006,23 @@ message PortForwardChannel {
+ message DeskRealmHandshake {
+   bytes session_uuid = 1;
+   bytes connection_uuid = 2;
++  bytes device_public_key = 6; // Present only with the nonce.
+   oneof phase {
+     bytes nonce = 3;
+     bytes proof_signature = 4;
+     DeskRealmAdmission admission = 5;
++    DeskRealmKeyOffer key_offer = 7;
++    PublicKey key_exchange = 8;
+   }
+ }
+ 
++// The target signs an ephemeral key before the initiating side seals the stream key.
++message DeskRealmKeyOffer {
++  bytes ephemeral_public_key = 1;
++  uint32 version = 2;
++  bytes signature = 3;
++}
++
+ // Only the host sends admission after online redemption. The host's private
+ // session credential stays with the host.
+ message DeskRealmAdmission {
+diff --git a/libs/base/src/deskrealm_endpoint.rs b/libs/base/src/deskrealm_endpoint.rs
+new file mode 100644
+index 0000000..178dca2
+--- /dev/null
++++ b/libs/base/src/deskrealm_endpoint.rs
+@@ -0,0 +1,848 @@
++//! Managed admission over an already encrypted RustDesk TCP stream.
++
++use crate::message_proto::{
++    desk_realm_handshake::Phase, message, DeskRealmAdmission, DeskRealmHandshake,
++    DeskRealmKeyOffer, Message, PublicKey,
++};
++use hbb_common::{
++    anyhow::{anyhow, bail},
++    base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _},
++    bytes::Bytes,
++    deskrealm_protocol::{
++        encode, valid_rustdesk_id, BoundConnection, Path, PeerRole, TransportPurpose,
++        VerifiedGrant, SESSION_GRANT,
++    },
++    rendezvous_proto::DeskRealmRoute,
++    sodiumoxide::{
++        crypto::{box_, secretbox, sign},
++        randombytes::randombytes_into,
++    },
++    tcp::{Encrypt, KxTranscript},
++    uuid::Uuid,
++    ResultType, Stream,
++};
++use protobuf::Message as _;
++use serde_derive::Deserialize;
++use std::{
++    convert::{TryFrom, TryInto},
++    future::Future,
++    time::{Duration, SystemTime, UNIX_EPOCH},
++};
++use tokio::time::{timeout, Instant};
++
++const HTTP_TIMEOUT: Duration = Duration::from_secs(5);
++const PROOF_TIMEOUT: Duration = Duration::from_secs(8);
++const CONSENT_TIMEOUT: Duration = Duration::from_secs(30);
++const INITIAL_LEASE: Duration = Duration::from_secs(30);
++const MAX_HTTP_BODY: usize = 8192;
++const MAX_HANDSHAKE_FRAME: usize = 1024;
++
++const ACTIONS: [&str; 5] = ["view", "input", "audio", "clipboard", "file_transfer"];
++
++pub struct Authority {
++    center: reqwest::Url,
++    client: reqwest::Client,
++    kid: String,
++    center_key: sign::PublicKey,
++}
++
++pub struct DeviceIdentity {
++    pub id: Uuid,
++    pub public_key: sign::PublicKey,
++    secret_key: sign::SecretKey,
++}
++
++impl DeviceIdentity {
++    pub fn from_seed(id: Uuid, seed: &sign::Seed) -> ResultType<Self> {
++        hbb_common::sodiumoxide::init().map_err(|_| anyhow!("cannot initialize device signing"))?;
++        let (public_key, secret_key) = sign::keypair_from_seed(seed);
++        Ok(Self {
++            id,
++            public_key,
++            secret_key,
++        })
++    }
++
++    pub fn sign(&self, frame: &[u8]) -> [u8; 64] {
++        sign::sign_detached(frame, &self.secret_key).to_bytes()
++    }
++}
++
++#[derive(Deserialize)]
++struct GrantResponse {
++    kid: String,
++    organization_id: String,
++    session_id: String,
++    grant_id: String,
++    user_id: String,
++    controller_device_id: String,
++    target_device_id: String,
++    target_rustdesk_id: String,
++    controller_key_sha256: String,
++    target_key_sha256: String,
++    policy_version: u64,
++    allowed_actions: Vec<String>,
++    confirmation_mode: String,
++    purpose: String,
++    issued_ms: u64,
++    expires_ms: u64,
++    signature: String,
++}
++
++/// Local policy version and capabilities that the target has applied.
++/// The target must obtain this value from its authenticated policy lifecycle.
++pub struct AppliedPolicy<'a> {
++    pub version: u64,
++    pub allowed_mask: u8,
++    pub unattended_purposes: &'a [&'a str],
++}
++
++pub struct LocalConsent {
++    pub user_id: Uuid,
++    pub controller_device_id: Uuid,
++    pub purpose: String,
++    pub allowed_mask: u8,
++}
++
++pub struct Lease {
++    pub session_id: Uuid,
++    pub connection_id: Uuid,
++    pub path: Path,
++    pub allowed_mask: u8,
++    pub sequence: u64,
++    pub until_ms: u64,
++    pub deadline: Instant,
++    credential: String,
++}
++
++impl Lease {
++    pub fn credential(&self) -> &str {
++        &self.credential
++    }
++}
++
++#[derive(Deserialize)]
++struct Redemption {
++    session_id: String,
++    connection_id: String,
++    path: String,
++    relay_id: String,
++    allowed_actions: Vec<String>,
++    lease_sequence: u64,
++    redeemed_ms: u64,
++    lease_until_ms: u64,
++    session_credential: String,
++}
++
++pub struct TargetSession<'a> {
++    pub route: &'a DeskRealmRoute,
++    pub device: &'a DeviceIdentity,
++    pub device_credential: &'a str,
++    pub path: Path,
++    pub relay_id: &'a str,
++    pub policy: AppliedPolicy<'a>,
++}
++
++impl Authority {
++    pub fn new(
++        origin: &str,
++        kid: String,
++        center_key: sign::PublicKey,
++        ca_pem: Option<&[u8]>,
++    ) -> ResultType<Self> {
++        let center = reqwest::Url::parse(origin).map_err(|_| anyhow!("invalid center origin"))?;
++        if center.scheme() != "https"
++            || center.host().is_none()
++            || center.path() != "/"
++            || !center.username().is_empty()
++            || center.password().is_some()
++            || center.query().is_some()
++            || center.fragment().is_some()
++        {
++            bail!("managed center must be an HTTPS origin");
++        }
++        if !valid_identifier(&kid, 32) {
++            bail!("invalid managed signing key ID");
++        }
++        let mut builder = reqwest::Client::builder()
++            .use_rustls_tls()
++            .no_proxy()
++            .redirect(reqwest::redirect::Policy::none())
++            .timeout(HTTP_TIMEOUT);
++        if let Some(pem) = ca_pem {
++            builder = builder.add_root_certificate(reqwest::Certificate::from_pem(pem)?);
++        }
++        Ok(Self {
++            center,
++            client: builder.build()?,
++            kid,
++            center_key,
++        })
++    }
++
++    async fn post(
++        &self,
++        endpoint: &str,
++        bearer: &str,
++        body: serde_json::Value,
++        allowed: &[u16],
++    ) -> ResultType<Vec<u8>> {
++        let mut response = self
++            .client
++            .post(self.center.join(endpoint)?)
++            .bearer_auth(bearer)
++            .json(&body)
++            .send()
++            .await
++            .map_err(|_| anyhow!("managed center is unavailable"))?;
++        if !allowed.contains(&response.status().as_u16()) {
++            bail!("managed center denied the request");
++        }
++        let mut data = Vec::new();
++        while let Some(chunk) = response
++            .chunk()
++            .await
++            .map_err(|_| anyhow!("managed center response is incomplete"))?
++        {
++            if chunk.len() > MAX_HTTP_BODY - data.len() {
++                bail!("managed center response is too large");
++            }
++            data.extend_from_slice(&chunk);
++        }
++        Ok(data)
++    }
++
++    pub async fn issue(
++        &self,
++        controller: &DeviceIdentity,
++        credential: &str,
++        target_rustdesk_id: &str,
++        request_id: Uuid,
++        purpose: &str,
++        allowed_mask: u8,
++        attended: bool,
++    ) -> ResultType<DeskRealmRoute> {
++        check_credential(credential, "dru_")?;
++        if !valid_rustdesk_id(target_rustdesk_id)
++            || !valid_identifier(purpose, 64)
++            || allowed_mask == 0
++            || allowed_mask & !0x1f != 0
++        {
++            bail!("invalid managed session request");
++        }
++        let mode = if attended { "attended" } else { "unattended" };
++        let data = self.post("/v1/sessions", credential, serde_json::json!({
++            "request_id": request_id.to_string(), "target_rustdesk_id": target_rustdesk_id,
++            "purpose": purpose, "requested_actions": actions(allowed_mask), "confirmation_mode": mode,
++        }), &[200, 201]).await?;
++        let grant: GrantResponse =
++            serde_json::from_slice(&data).map_err(|_| anyhow!("invalid managed grant response"))?;
++        let granted_mask = mask(&grant.allowed_actions)?;
++        if grant.target_rustdesk_id != target_rustdesk_id
++            || grant.purpose != purpose
++            || grant.confirmation_mode != mode
++            || granted_mask & !allowed_mask != 0
++        {
++            bail!("grant does not match the requested session");
++        }
++        let frame = encode(
++            SESSION_GRANT,
++            &[
++                grant.kid.as_bytes(),
++                uuid_bytes(&grant.organization_id)?.as_bytes(),
++                uuid_bytes(&grant.session_id)?.as_bytes(),
++                uuid_bytes(&grant.grant_id)?.as_bytes(),
++                uuid_bytes(&grant.user_id)?.as_bytes(),
++                uuid_bytes(&grant.controller_device_id)?.as_bytes(),
++                uuid_bytes(&grant.target_device_id)?.as_bytes(),
++                &decode_hex_32(&grant.controller_key_sha256)?,
++                &decode_hex_32(&grant.target_key_sha256)?,
++                &grant.policy_version.to_be_bytes(),
++                &[granted_mask],
++                &[if attended { 1 } else { 2 }],
++                grant.purpose.as_bytes(),
++                &grant.issued_ms.to_be_bytes(),
++                &grant.expires_ms.to_be_bytes(),
++            ],
++        )
++        .ok_or_else(|| anyhow!("invalid managed grant frame"))?;
++        let route = DeskRealmRoute {
++            grant_frame: frame.into(),
++            grant_signature: URL_SAFE_NO_PAD.decode(grant.signature)?.into(),
++            connection_uuid: Bytes::copy_from_slice(Uuid::new_v4().as_bytes()),
++            target_rustdesk_id: grant.target_rustdesk_id,
++            ..Default::default()
++        };
++        self.verify(&route, controller, PeerRole::Controller)?;
++        Ok(route)
++    }
++
++    pub fn verify<'a>(
++        &self,
++        route: &'a DeskRealmRoute,
++        device: &DeviceIdentity,
++        role: PeerRole,
++    ) -> ResultType<VerifiedGrant<'a>> {
++        if !valid_rustdesk_id(&route.target_rustdesk_id) || route.connection_uuid.len() != 16 {
++            bail!("invalid managed route");
++        }
++        let grant = VerifiedGrant::verify(
++            &route.grant_frame,
++            &route.grant_signature,
++            &self.kid,
++            &self.center_key,
++            now_ms()?,
++        )
++        .ok_or_else(|| anyhow!("invalid or expired managed grant"))?;
++        if grant.device_id(role) != device.id.as_bytes()
++            || !grant.matches_device_key(role, &device.public_key)
++        {
++            bail!("managed grant does not bind this device");
++        }
++        Ok(grant)
++    }
++
++    pub fn transport_proof(
++        &self,
++        route: &DeskRealmRoute,
++        device: &DeviceIdentity,
++        purpose: TransportPurpose,
++        role: PeerRole,
++        challenge: &[u8; 32],
++        offer: &[u8; 32],
++    ) -> ResultType<hbb_common::rendezvous_proto::DeskRealmTransportProof> {
++        let g = self.verify(route, device, role)?;
++        let frame = g.transport_proof_frame(
++            purpose,
++            role,
++            route.connection_uuid.as_ref().try_into()?,
++            &route.target_rustdesk_id,
++            challenge,
++            offer,
++        );
++        Ok(hbb_common::rendezvous_proto::DeskRealmTransportProof {
++            public_key: Bytes::copy_from_slice(device.public_key.as_ref()),
++            signature: Bytes::copy_from_slice(&device.sign(&frame)),
++            ..Default::default()
++        })
++    }
++
++    /// Selects the directional RustDesk TCP key exchange, then proves both peers.
++    pub async fn connect_controller(
++        &self,
++        stream: &mut Stream,
++        route: &DeskRealmRoute,
++        controller: &DeviceIdentity,
++        path: Path,
++    ) -> ResultType<DeskRealmAdmission> {
++        let grant = self.verify(route, controller, PeerRole::Controller)?;
++        require_unkeyed_tcp(stream)?;
++        let offer = read_handshake(stream, &grant, route, PROOF_TIMEOUT).await?;
++        let target_key = sign::PublicKey::from_slice(&offer.device_public_key)
++            .ok_or_else(|| anyhow!("invalid managed target key"))?;
++        let Some(Phase::KeyOffer(offer)) = offer.phase else {
++            bail!("managed directional exchange required");
++        };
++        let other = box_::PublicKey::from_slice(&offer.ephemeral_public_key)
++            .ok_or_else(|| anyhow!("invalid managed ephemeral key"))?;
++        let signature = sign::Signature::from_bytes(&offer.signature)
++            .map_err(|_| anyhow!("invalid managed key signature"))?;
++        let frame = kx_offer(&grant, route, path, &other, offer.version);
++        if offer.version != 1
++            || !grant.matches_device_key(PeerRole::Target, &target_key)
++            || !sign::verify_detached(&signature, &frame, &target_key)
++        {
++            bail!("invalid managed key offer");
++        }
++        let (own, ephemeral) = box_::gen_keypair();
++        let key = secretbox::gen_key();
++        let sealed = box_::seal(&key.0, &box_::Nonce([0; 24]), &other, &ephemeral);
++        send_handshake(
++            stream,
++            &grant,
++            route,
++            Phase::KeyExchange(PublicKey {
++                asymmetric_value: Bytes::copy_from_slice(own.as_ref()),
++                symmetric_value: sealed.into(),
++                kx_version: 1,
++                ..Default::default()
++            }),
++            Bytes::new(),
++        )
++        .await?;
++        stream.set_negotiated_key(
++            key,
++            true,
++            &KxTranscript {
++                initiator_pk: own.as_ref(),
++                responder_pk: other.as_ref(),
++                advertised: 1,
++                picked: 1,
++            },
++        )?;
++        self.admit_controller(stream, route, controller, path).await
++    }
++
++    /// The managed target never falls back to a legacy or plaintext exchange.
++    pub async fn connect_target<'a, F, R>(
++        &self,
++        stream: &mut Stream,
++        target: TargetSession<'a>,
++        consent: F,
++    ) -> ResultType<Lease>
++    where
++        F: FnOnce(LocalConsent) -> R,
++        R: Future<Output = Option<u8>>,
++    {
++        let grant = self.verify(target.route, target.device, PeerRole::Target)?;
++        require_unkeyed_tcp(stream)?;
++        let (own, ephemeral) = box_::gen_keypair();
++        let frame = kx_offer(&grant, target.route, target.path, &own, 1);
++        send_handshake(
++            stream,
++            &grant,
++            target.route,
++            Phase::KeyOffer(DeskRealmKeyOffer {
++                ephemeral_public_key: Bytes::copy_from_slice(own.as_ref()),
++                version: 1,
++                signature: Bytes::copy_from_slice(&target.device.sign(&frame)),
++                ..Default::default()
++            }),
++            Bytes::copy_from_slice(target.device.public_key.as_ref()),
++        )
++        .await?;
++        let reply = read_handshake(stream, &grant, target.route, PROOF_TIMEOUT).await?;
++        let Some(Phase::KeyExchange(key)) = reply.phase else {
++            bail!("managed directional exchange required");
++        };
++        if !reply.device_public_key.is_empty()
++            || key.kx_version != 1
++            || key.asymmetric_value.as_ref() == own.as_ref()
++            || key.symmetric_value.len() != secretbox::KEYBYTES + box_::MACBYTES
++        {
++            bail!("invalid managed key exchange");
++        }
++        let secret = Encrypt::decode(&key.symmetric_value, &key.asymmetric_value, &ephemeral)?;
++        stream.set_negotiated_key(
++            secret,
++            false,
++            &KxTranscript {
++                initiator_pk: &key.asymmetric_value,
++                responder_pk: own.as_ref(),
++                advertised: 1,
++                picked: 1,
++            },
++        )?;
++        self.admit_target(stream, target, consent).await
++    }
++
++    /// No login or remote operations are allowed until this succeeds.
++    pub async fn admit_controller(
++        &self,
++        stream: &mut Stream,
++        route: &DeskRealmRoute,
++        controller: &DeviceIdentity,
++        path: Path,
++    ) -> ResultType<DeskRealmAdmission> {
++        let grant = self.verify(route, controller, PeerRole::Controller)?;
++        let binding = stream
++            .managed_channel_binding()
++            .ok_or_else(|| anyhow!("managed channel binding required"))?;
++        stream.set_max_packet_length(MAX_HANDSHAKE_FRAME);
++        let connection = route.connection_uuid.as_ref().try_into()?;
++        let own = nonce();
++        send_hello(stream, &grant, route, controller, &own).await?;
++        let (peer, other) = read_hello(stream, &grant, route, PeerRole::Target).await?;
++        let bound = grant
++            .bind(connection, binding, own, other, path)
++            .ok_or_else(|| anyhow!("reused managed nonce"))?;
++        send_proof(
++            stream,
++            &grant,
++            route,
++            controller,
++            &bound,
++            PeerRole::Controller,
++        )
++        .await?;
++        let proof = read_proof(stream, &grant, route).await?;
++        if !bound.verify_peer(PeerRole::Target, &peer, &proof) {
++            bail!("managed target proof failed");
++        }
++        let response = read_handshake(
++            stream,
++            &grant,
++            route,
++            CONSENT_TIMEOUT + HTTP_TIMEOUT + PROOF_TIMEOUT,
++        )
++        .await?;
++        match response.phase {
++            Some(Phase::Admission(result))
++                if response.device_public_key.is_empty()
++                    && result.allowed_mask > 0
++                    && result.allowed_mask & !u32::from(grant.allowed_mask()) == 0
++                    && result.lease_sequence == 1
++                    && result.lease_until_ms > now_ms()? =>
++            {
++                Ok(result)
++            }
++            _ => bail!("managed target did not admit this session"),
++        }
++    }
++
++    /// The caller supplies the locally applied policy and trusted on-device consent.
++    /// The returned lease keeps the private session credential on the target.
++    pub async fn admit_target<'a, F, R>(
++        &self,
++        stream: &mut Stream,
++        target: TargetSession<'a>,
++        consent: F,
++    ) -> ResultType<Lease>
++    where
++        F: FnOnce(LocalConsent) -> R,
++        R: Future<Output = Option<u8>>,
++    {
++        let TargetSession {
++            route,
++            device,
++            device_credential,
++            path,
++            relay_id,
++            policy,
++        } = target;
++        check_credential(device_credential, "drd_")?;
++        if (path == Path::Direct && !relay_id.is_empty())
++            || (path == Path::Relay && !valid_identifier(relay_id, 32))
++        {
++            bail!("invalid managed path");
++        }
++        let grant = self.verify(route, device, PeerRole::Target)?;
++        if policy.version != grant.policy_version()
++            || grant.allowed_mask() & !policy.allowed_mask != 0
++        {
++            bail!("managed policy is not locally applied");
++        }
++        let binding = stream
++            .managed_channel_binding()
++            .ok_or_else(|| anyhow!("managed channel binding required"))?;
++        stream.set_max_packet_length(MAX_HANDSHAKE_FRAME);
++        let connection = route.connection_uuid.as_ref().try_into()?;
++        let (peer, other) = read_hello(stream, &grant, route, PeerRole::Controller).await?;
++        let own = nonce();
++        send_hello(stream, &grant, route, device, &own).await?;
++        let bound = grant
++            .bind(connection, binding, other, own, path)
++            .ok_or_else(|| anyhow!("reused managed nonce"))?;
++        let proof = read_proof(stream, &grant, route).await?;
++        if !bound.verify_peer(PeerRole::Controller, &peer, &proof) {
++            bail!("managed controller proof failed");
++        }
++        let target_sig =
++            send_proof(stream, &grant, route, device, &bound, PeerRole::Target).await?;
++        let (active_mask, confirmed, consent_sig) = if grant.attended() {
++            let selected = timeout(
++                CONSENT_TIMEOUT,
++                consent(LocalConsent {
++                    user_id: Uuid::from_slice(grant.user_id())?,
++                    controller_device_id: Uuid::from_slice(grant.device_id(PeerRole::Controller))?,
++                    purpose: grant.purpose().to_owned(),
++                    allowed_mask: grant.allowed_mask(),
++                }),
++            )
++            .await?
++            .ok_or_else(|| anyhow!("local approval declined"))?;
++            let frame = bound
++                .consent_frame(selected)
++                .ok_or_else(|| anyhow!("invalid local approval"))?;
++            (
++                selected,
++                actions(selected),
++                URL_SAFE_NO_PAD.encode(device.sign(&frame)),
++            )
++        } else if policy.unattended_purposes.contains(&grant.purpose()) {
++            (grant.allowed_mask(), Vec::new(), String::new())
++        } else {
++            bail!("unattended access is not approved by local policy");
++        };
++        self.verify(route, device, PeerRole::Target)?;
++        let session_id = Uuid::from_slice(grant.session_id())?;
++        let connection_id = Uuid::from_bytes(connection);
++        let started = Instant::now();
++        let path_name = if path == Path::Direct {
++            "direct"
++        } else {
++            "relay"
++        };
++        let data = self.post(&format!("/v1/sessions/{session_id}/redeem"), device_credential, serde_json::json!({
++            "grant_id": Uuid::from_slice(grant.grant_id())?.to_string(),
++            "grant_signature": URL_SAFE_NO_PAD.encode(&route.grant_signature),
++            "connection_id": connection_id.to_string(), "path": path_name, "relay_id": relay_id,
++            "channel_sha256": hex(binding.as_bytes()),
++            "controller_nonce": URL_SAFE_NO_PAD.encode(other), "target_nonce": URL_SAFE_NO_PAD.encode(own),
++            "controller_signature": URL_SAFE_NO_PAD.encode(proof), "target_signature": URL_SAFE_NO_PAD.encode(target_sig),
++            "confirmed_actions": confirmed, "consent_signature": consent_sig,
++        }), &[200]).await?;
++        let r: Redemption =
++            serde_json::from_slice(&data).map_err(|_| anyhow!("invalid managed lease response"))?;
++        check_credential(&r.session_credential, "drc_")?;
++        if uuid_bytes(&r.session_id)? != session_id
++            || uuid_bytes(&r.connection_id)? != connection_id
++            || r.path != path_name
++            || r.relay_id != relay_id
++            || r.lease_sequence != 1
++            || mask(&r.allowed_actions)? != active_mask
++            || r.redeemed_ms == 0
++            || r.lease_until_ms.checked_sub(r.redeemed_ms) != Some(INITIAL_LEASE.as_millis() as u64)
++            || r.lease_until_ms <= now_ms()?
++            || started.elapsed() >= INITIAL_LEASE
++        {
++            bail!("managed lease does not match the admitted session");
++        }
++        send_handshake(
++            stream,
++            &grant,
++            route,
++            Phase::Admission(DeskRealmAdmission {
++                allowed_mask: active_mask.into(),
++                lease_sequence: r.lease_sequence,
++                lease_until_ms: r.lease_until_ms,
++                ..Default::default()
++            }),
++            Bytes::new(),
++        )
++        .await?;
++        Ok(Lease {
++            session_id,
++            connection_id,
++            path,
++            allowed_mask: active_mask,
++            sequence: r.lease_sequence,
++            until_ms: r.lease_until_ms,
++            deadline: started + INITIAL_LEASE,
++            credential: r.session_credential,
++        })
++    }
++}
++
++fn require_unkeyed_tcp(stream: &mut Stream) -> ResultType<()> {
++    if !matches!(stream, Stream::Tcp(_)) || stream.is_secured() {
++        bail!("unkeyed managed TCP stream required");
++    }
++    stream.set_max_packet_length(MAX_HANDSHAKE_FRAME);
++    Ok(())
++}
++
++fn kx_offer(
++    grant: &VerifiedGrant<'_>,
++    route: &DeskRealmRoute,
++    path: Path,
++    public: &box_::PublicKey,
++    version: u32,
++) -> Vec<u8> {
++    let mut frame = b"DeskRealm/M2/key-offer/v1\0".to_vec();
++    frame.extend_from_slice(grant.session_id());
++    frame.extend_from_slice(&route.connection_uuid);
++    frame.push(path as u8);
++    frame.extend_from_slice(&version.to_be_bytes());
++    frame.extend_from_slice(public.as_ref());
++    frame
++}
++
++fn nonce() -> [u8; 32] {
++    let mut bytes = [0; 32];
++    randombytes_into(&mut bytes);
++    bytes
++}
++
++fn now_ms() -> ResultType<u64> {
++    Ok(u64::try_from(
++        SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis(),
++    )?)
++}
++
++fn uuid_bytes(value: &str) -> ResultType<Uuid> {
++    let uuid = Uuid::parse_str(value)?;
++    if uuid.to_string() != value {
++        bail!("noncanonical managed UUID");
++    }
++    Ok(uuid)
++}
++
++fn valid_identifier(value: &str, max: usize) -> bool {
++    !value.is_empty()
++        && value.len() <= max
++        && value.bytes().enumerate().all(|(i, b)| {
++            b.is_ascii_digit() || b.is_ascii_lowercase() || (i > 0 && matches!(b, b'_' | b'-'))
++        })
++}
++
++fn check_credential(value: &str, prefix: &str) -> ResultType<()> {
++    let Some(raw) = value.strip_prefix(prefix).filter(|v| v.len() == 43) else {
++        bail!("invalid managed credential");
++    };
++    if URL_SAFE_NO_PAD.decode(raw).map_or(true, |v| v.len() != 32) {
++        bail!("invalid managed credential");
++    }
++    Ok(())
++}
++
++fn actions(mask: u8) -> Vec<&'static str> {
++    ACTIONS
++        .iter()
++        .enumerate()
++        .filter_map(|(i, action)| ((mask & (1 << i)) != 0).then_some(*action))
++        .collect()
++}
++
++fn mask(actions: &[String]) -> ResultType<u8> {
++    let mut out = 0;
++    for action in actions {
++        let i = ACTIONS
++            .iter()
++            .position(|v| v == action)
++            .ok_or_else(|| anyhow!("unknown managed action"))?;
++        let bit = 1 << i;
++        if out & bit != 0 {
++            bail!("duplicate managed action");
++        }
++        out |= bit;
++    }
++    if out == 0 {
++        bail!("managed actions are empty");
++    }
++    Ok(out)
++}
++
++fn hex(bytes: &[u8]) -> String {
++    const TABLE: &[u8; 16] = b"0123456789abcdef";
++    let mut s = String::with_capacity(bytes.len() * 2);
++    for b in bytes {
++        s.push(TABLE[usize::from(b >> 4)] as char);
++        s.push(TABLE[usize::from(b & 15)] as char);
++    }
++    s
++}
++
++fn decode_hex_32(value: &str) -> ResultType<[u8; 32]> {
++    let digits = |b: u8| match b {
++        b'0'..=b'9' => Ok(b - b'0'),
++        b'a'..=b'f' => Ok(b - b'a' + 10),
++        _ => Err(anyhow!("malformed managed digest")),
++    };
++    if value.len() != 64 {
++        bail!("malformed managed digest");
++    }
++    let mut bytes = [0; 32];
++    for (i, pair) in value.as_bytes().chunks_exact(2).enumerate() {
++        bytes[i] = digits(pair[0])? << 4 | digits(pair[1])?;
++    }
++    Ok(bytes)
++}
++
++async fn send_handshake(
++    stream: &mut Stream,
++    grant: &VerifiedGrant<'_>,
++    route: &DeskRealmRoute,
++    phase: Phase,
++    device_public_key: Bytes,
++) -> ResultType<()> {
++    let mut msg = Message::new();
++    msg.set_deskrealm_handshake(DeskRealmHandshake {
++        session_uuid: Bytes::copy_from_slice(grant.session_id()),
++        connection_uuid: route.connection_uuid.clone(),
++        device_public_key,
++        phase: Some(phase),
++        ..Default::default()
++    });
++    timeout(PROOF_TIMEOUT, stream.send(&msg)).await??;
++    Ok(())
++}
++
++async fn read_handshake(
++    stream: &mut Stream,
++    grant: &VerifiedGrant<'_>,
++    route: &DeskRealmRoute,
++    wait: Duration,
++) -> ResultType<DeskRealmHandshake> {
++    let bytes = timeout(wait, stream.next())
++        .await?
++        .ok_or_else(|| anyhow!("managed connection closed"))??;
++    match Message::parse_from_bytes(&bytes)?.union {
++        Some(message::Union::DeskrealmHandshake(msg))
++            if msg.session_uuid.as_ref() == grant.session_id()
++                && msg.connection_uuid == route.connection_uuid =>
++        {
++            Ok(msg)
++        }
++        _ => bail!("managed handshake required for this connection"),
++    }
++}
++
++async fn send_hello(
++    stream: &mut Stream,
++    grant: &VerifiedGrant<'_>,
++    route: &DeskRealmRoute,
++    device: &DeviceIdentity,
++    nonce: &[u8; 32],
++) -> ResultType<()> {
++    send_handshake(
++        stream,
++        grant,
++        route,
++        Phase::Nonce(Bytes::copy_from_slice(nonce)),
++        Bytes::copy_from_slice(device.public_key.as_ref()),
++    )
++    .await
++}
++
++async fn read_hello(
++    stream: &mut Stream,
++    grant: &VerifiedGrant<'_>,
++    route: &DeskRealmRoute,
++    role: PeerRole,
++) -> ResultType<(sign::PublicKey, [u8; 32])> {
++    let message = read_handshake(stream, grant, route, PROOF_TIMEOUT).await?;
++    if let (Some(Phase::Nonce(nonce)), Some(key)) = (
++        message.phase,
++        sign::PublicKey::from_slice(&message.device_public_key),
++    ) {
++        if grant.matches_device_key(role, &key) {
++            return Ok((key, nonce.as_ref().try_into()?));
++        }
++    }
++    bail!("managed peer key does not match the grant");
++}
++
++async fn send_proof(
++    stream: &mut Stream,
++    grant: &VerifiedGrant<'_>,
++    route: &DeskRealmRoute,
++    device: &DeviceIdentity,
++    bound: &BoundConnection<'_, '_>,
++    role: PeerRole,
++) -> ResultType<[u8; 64]> {
++    let signature = device.sign(&bound.proof_frame(role));
++    send_handshake(
++        stream,
++        grant,
++        route,
++        Phase::ProofSignature(Bytes::copy_from_slice(&signature)),
++        Bytes::new(),
++    )
++    .await?;
++    Ok(signature)
++}
++
++async fn read_proof(
++    stream: &mut Stream,
++    grant: &VerifiedGrant<'_>,
++    route: &DeskRealmRoute,
++) -> ResultType<[u8; 64]> {
++    let message = read_handshake(stream, grant, route, PROOF_TIMEOUT).await?;
++    if let Some(Phase::ProofSignature(signature)) = message.phase {
++        if message.device_public_key.is_empty() {
++            return Ok(signature.as_ref().try_into()?);
++        }
++    }
++    bail!("managed connection proof required");
++}
+diff --git a/libs/base/src/deskrealm_transport.rs b/libs/base/src/deskrealm_transport.rs
+new file mode 100644
+index 0000000..82903d2
+--- /dev/null
++++ b/libs/base/src/deskrealm_transport.rs
+@@ -0,0 +1,359 @@
++//! The two managed RustDesk TCP routes share one authenticated endpoint gate.
++
++use crate::deskrealm_endpoint::{Authority, DeviceIdentity};
++use hbb_common::{
++    anyhow::{anyhow, bail},
++    bytes::Bytes,
++    deskrealm_protocol::{Path, PeerRole, TransportPurpose},
++    rendezvous_proto::{
++        desk_realm_signal::Operation, rendezvous_message, DeskRealmRoute, DeskRealmSignal,
++        PunchHoleRequest, PunchHoleSent, RelayResponse, RendezvousMessage, RequestRelay,
++    },
++    tcp::{new_listener, FramedStream},
++    ResultType, Stream,
++};
++use protobuf::{Message as _, MessageField};
++use std::{
++    convert::{TryFrom, TryInto},
++    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
++    time::Duration,
++};
++use tokio::time::{sleep, timeout};
++
++const PROOF_TIMEOUT: Duration = Duration::from_secs(8);
++const OFFER_TIMEOUT: Duration = Duration::from_secs(20);
++const MAX_SIGNAL_BYTES: usize = 4096;
++const NO_OFFER: [u8; 32] = [0; 32];
++
++/// Values pinned by the managed deployment. The advertised authority must
++/// match the configured spelling before the address is used.
++pub struct RelayNode<'a> {
++    pub authority: &'a str,
++    pub address: SocketAddr,
++}
++
++pub struct Network<'a> {
++    pub rendezvous: SocketAddr,
++    pub relay: Option<RelayNode<'a>>,
++}
++
++impl Network<'_> {
++    pub async fn connect_controller(
++        &self,
++        authority: &Authority,
++        device: &DeviceIdentity,
++        route: &DeskRealmRoute,
++        path: Path,
++    ) -> ResultType<Stream> {
++        let (op, purpose) = match path {
++            Path::Direct => (
++                Operation::DirectRequest(PunchHoleRequest {
++                    id: route.target_rustdesk_id.clone(),
++                    ..Default::default()
++                }),
++                TransportPurpose::DirectRequest,
++            ),
++            Path::Relay => {
++                self.relay
++                    .as_ref()
++                    .ok_or_else(|| anyhow!("managed relay is not configured"))?;
++                (
++                    Operation::RelayRequest(RequestRelay {
++                        id: route.target_rustdesk_id.clone(),
++                        ..Default::default()
++                    }),
++                    TransportPurpose::RelayRequest,
++                )
++            }
++        };
++        let mut center = dial(self.rendezvous, None).await?;
++        prove(
++            authority,
++            device,
++            &mut center,
++            route,
++            op,
++            purpose,
++            PeerRole::Controller,
++            NO_OFFER,
++        )
++        .await?;
++        let reply = read(&mut center, OFFER_TIMEOUT).await?;
++        let offer = match_offer(&reply, route)?;
++        match (path, reply.operation) {
++            (Path::Direct, Some(Operation::DirectResponse(response))) => {
++                let candidate = checked_address(&response.socket_addr)?;
++                let stream = timeout(PROOF_TIMEOUT, async {
++                    loop {
++                        if let Ok(stream) = dial(candidate, None).await {
++                            return stream;
++                        }
++                        sleep(Duration::from_millis(100)).await;
++                    }
++                })
++                .await?;
++                Ok(stream)
++            }
++            (Path::Relay, Some(Operation::RelayResponse(response))) => {
++                let relay = self
++                    .relay
++                    .as_ref()
++                    .ok_or_else(|| anyhow!("managed relay is not configured"))?;
++                check_relay(relay, route, &response.uuid, &response.relay_server)?;
++                join_relay(authority, device, relay, route, offer, PeerRole::Controller).await
++            }
++            _ => bail!("managed rendezvous returned the wrong path"),
++        }
++    }
++
++    /// Handles a candidate forwarded to this target over its registration
++    /// socket. The caller passes its configured rendezvous address and local ID.
++    pub async fn accept_target(
++        &self,
++        authority: &Authority,
++        device: &DeviceIdentity,
++        rustdesk_id: &str,
++        forwarded: DeskRealmSignal,
++    ) -> ResultType<(Stream, DeskRealmRoute, Path)> {
++        let route = forwarded
++            .route
++            .into_option()
++            .ok_or_else(|| anyhow!("managed offer has no route"))?;
++        let offer = offer_nonce(&forwarded.offer_nonce)?;
++        if route.target_rustdesk_id != rustdesk_id {
++            bail!("managed offer targets a different RustDesk ID");
++        }
++        authority.verify(&route, device, PeerRole::Target)?;
++        match forwarded.operation {
++            Some(Operation::DirectCandidate(candidate)) => {
++                // The source address is supplied by hbbs and used only as a
++                // family/shape check. The listener receives the inbound TCP.
++                checked_address(&candidate.socket_addr)?;
++                let bind = SocketAddr::new(
++                    if self.rendezvous.is_ipv4() {
++                        "0.0.0.0".parse()?
++                    } else {
++                        "::".parse()?
++                    },
++                    0,
++                );
++                let mut center = dial(self.rendezvous, Some(bind)).await?;
++                let socket = center.local_addr();
++                let op = Operation::DirectReady(PunchHoleSent::new());
++                prove(
++                    authority,
++                    device,
++                    &mut center,
++                    &route,
++                    op,
++                    TransportPurpose::DirectReply,
++                    PeerRole::Target,
++                    offer,
++                )
++                .await?;
++                drop(center);
++                let listener = new_listener(socket, true).await?;
++                let (stream, _) = timeout(PROOF_TIMEOUT, listener.accept()).await??;
++                let addr = stream.local_addr()?;
++                Ok((Stream::from(stream, addr), route, Path::Direct))
++            }
++            Some(Operation::RelayRequest(request)) => {
++                let relay = self
++                    .relay
++                    .as_ref()
++                    .ok_or_else(|| anyhow!("managed relay is not configured"))?;
++                check_relay(relay, &route, &request.uuid, &request.relay_server)?;
++                let mut center = dial(self.rendezvous, None).await?;
++                let op = Operation::RelayResponse(RelayResponse::new());
++                prove(
++                    authority,
++                    device,
++                    &mut center,
++                    &route,
++                    op,
++                    TransportPurpose::RelayReply,
++                    PeerRole::Target,
++                    offer,
++                )
++                .await?;
++                let stream =
++                    join_relay(authority, device, relay, &route, offer, PeerRole::Target).await?;
++                Ok((stream, route, Path::Relay))
++            }
++            _ => bail!("unsupported managed target offer"),
++        }
++    }
++}
++
++fn checked_address(encoded: &[u8]) -> ResultType<SocketAddr> {
++    // Invert RustDesk AddrMangle with checked arithmetic on untrusted input.
++    // Its legacy decoder uses unchecked integer subtraction in debug builds.
++    let candidate = match encoded.len() {
++        18 => {
++            let ip = Ipv6Addr::from(<[u8; 16]>::try_from(&encoded[..16])?);
++            let port = u16::from_le_bytes(encoded[16..].try_into()?);
++            SocketAddr::new(IpAddr::V6(ip), port)
++        }
++        1..=16 => {
++            let mut padded = [0; 16];
++            padded[..encoded.len()].copy_from_slice(encoded);
++            let value = u128::from_le_bytes(padded);
++            let stamp = (value >> 17) & u128::from(u32::MAX);
++            let ip = u32::try_from(
++                (value >> 49)
++                    .checked_sub(stamp)
++                    .ok_or_else(|| anyhow!("invalid managed candidate address"))?,
++            )?;
++            let port = u16::try_from(
++                (value & 0x1_ffff)
++                    .checked_sub(stamp & 0xffff)
++                    .ok_or_else(|| anyhow!("invalid managed candidate port"))?,
++            )?;
++            SocketAddr::new(IpAddr::V4(Ipv4Addr::from(ip.to_le_bytes())), port)
++        }
++        _ => bail!("invalid managed candidate address"),
++    };
++    if candidate.port() == 0 || candidate.ip().is_unspecified() || candidate.ip().is_multicast() {
++        bail!("invalid managed candidate address");
++    }
++    Ok(candidate)
++}
++
++fn check_relay(
++    relay: &RelayNode<'_>,
++    route: &DeskRealmRoute,
++    id: &str,
++    authority: &str,
++) -> ResultType<()> {
++    let connection = hbb_common::uuid::Uuid::from_slice(&route.connection_uuid)?;
++    if id != connection.to_string() || authority != relay.authority {
++        bail!("managed relay does not match its configured route");
++    }
++    Ok(())
++}
++
++async fn join_relay(
++    authority: &Authority,
++    device: &DeviceIdentity,
++    relay: &RelayNode<'_>,
++    route: &DeskRealmRoute,
++    offer: [u8; 32],
++    role: PeerRole,
++) -> ResultType<Stream> {
++    let mut stream = dial(relay.address, None).await?;
++    prove(
++        authority,
++        device,
++        &mut stream,
++        route,
++        Operation::RelayJoin(role as u32),
++        TransportPurpose::RelayJoin,
++        role,
++        offer,
++    )
++    .await?;
++    let ready = read(&mut stream, OFFER_TIMEOUT).await?;
++    if match_offer(&ready, route)? != offer
++        || !matches!(ready.operation, Some(Operation::RelayReady(true)))
++    {
++        bail!("managed relay did not release this route");
++    }
++    Ok(stream)
++}
++
++async fn dial(target: SocketAddr, local: Option<SocketAddr>) -> ResultType<Stream> {
++    let mut stream =
++        Stream::Tcp(FramedStream::new(target, local, PROOF_TIMEOUT.as_millis() as u64).await?);
++    stream.set_max_packet_length(MAX_SIGNAL_BYTES);
++    Ok(stream)
++}
++
++fn offer_nonce(value: &[u8]) -> ResultType<[u8; 32]> {
++    let offer: [u8; 32] = value.try_into()?;
++    if offer == NO_OFFER {
++        bail!("invalid managed offer nonce");
++    }
++    Ok(offer)
++}
++
++fn match_offer(reply: &DeskRealmSignal, route: &DeskRealmRoute) -> ResultType<[u8; 32]> {
++    let candidate = reply
++        .route
++        .as_ref()
++        .ok_or_else(|| anyhow!("managed response has no route"))?;
++    if candidate.grant_frame != route.grant_frame
++        || candidate.grant_signature != route.grant_signature
++        || candidate.connection_uuid != route.connection_uuid
++        || candidate.target_rustdesk_id != route.target_rustdesk_id
++    {
++        bail!("managed response does not match the requested route");
++    }
++    offer_nonce(&reply.offer_nonce)
++}
++
++async fn prove(
++    authority: &Authority,
++    device: &DeviceIdentity,
++    stream: &mut Stream,
++    route: &DeskRealmRoute,
++    operation: Operation,
++    purpose: TransportPurpose,
++    role: PeerRole,
++    offer: [u8; 32],
++) -> ResultType<()> {
++    authority.verify(route, device, role)?;
++    send(
++        stream,
++        DeskRealmSignal {
++            route: MessageField::some(route.clone()),
++            offer_nonce: if offer == NO_OFFER {
++                Bytes::new()
++            } else {
++                Bytes::copy_from_slice(&offer)
++            },
++            operation: Some(operation),
++            ..Default::default()
++        },
++    )
++    .await?;
++    let response = read(stream, PROOF_TIMEOUT).await?;
++    let Some(Operation::TransportChallenge(challenge)) = response.operation else {
++        bail!("managed challenge required")
++    };
++    if response.route.is_some() || !response.offer_nonce.is_empty() {
++        bail!("invalid managed challenge");
++    }
++    let proof = authority.transport_proof(
++        route,
++        device,
++        purpose,
++        role,
++        challenge.as_ref().try_into()?,
++        &offer,
++    )?;
++    send(
++        stream,
++        DeskRealmSignal {
++            operation: Some(Operation::TransportProof(proof)),
++            ..Default::default()
++        },
++    )
++    .await
++}
++
++async fn send(stream: &mut Stream, signal: DeskRealmSignal) -> ResultType<()> {
++    let mut outer = RendezvousMessage::new();
++    outer.set_deskrealm_signal(signal);
++    timeout(PROOF_TIMEOUT, stream.send(&outer)).await??;
++    Ok(())
++}
++
++async fn read(stream: &mut Stream, wait: Duration) -> ResultType<DeskRealmSignal> {
++    let bytes = timeout(wait, stream.next())
++        .await?
++        .ok_or_else(|| anyhow!("managed service closed its connection"))??;
++    match RendezvousMessage::parse_from_bytes(&bytes)?.union {
++        Some(rendezvous_message::Union::DeskrealmSignal(signal)) => Ok(signal),
++        _ => bail!("managed service message required"),
++    }
++}
+diff --git a/libs/base/src/lib.rs b/libs/base/src/lib.rs
+index 4389428..66be68c 100644
+--- a/libs/base/src/lib.rs
++++ b/libs/base/src/lib.rs
+@@ -1,4 +1,6 @@
+ pub mod config;
++pub mod deskrealm_endpoint;
++pub mod deskrealm_transport;
+ pub mod fs;
+ pub mod keyboard;
+ pub mod platform;
+diff --git a/libs/base/tests/deskrealm_interop.rs b/libs/base/tests/deskrealm_interop.rs
+new file mode 100644
+index 0000000..9a0ef49
+--- /dev/null
++++ b/libs/base/tests/deskrealm_interop.rs
+@@ -0,0 +1,173 @@
++use base::{
++    deskrealm_endpoint::{AppliedPolicy, Authority, DeviceIdentity, TargetSession},
++    deskrealm_transport::{Network, RelayNode},
++};
++use hbb_common::{
++    base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _},
++    bytes::Bytes,
++    deskrealm_protocol::Path,
++    rendezvous_proto::{rendezvous_message, RegisterPk, RendezvousMessage},
++    sodiumoxide::crypto::sign,
++    uuid::Uuid,
++    ResultType,
++};
++use protobuf::Message as _;
++use std::{env, net::SocketAddr, time::Duration};
++use tokio::{net::UdpSocket, time::timeout};
++
++const DEVICE_RUSTDESK_ID: &str = "10700002";
++const WAIT: Duration = Duration::from_secs(30);
++
++fn bearer(prefix: &str, byte: u8) -> String {
++    format!("{prefix}{}", URL_SAFE_NO_PAD.encode([byte; 32]))
++}
++
++async fn register(rendezvous: SocketAddr, target: &DeviceIdentity) -> ResultType<UdpSocket> {
++    let socket = UdpSocket::bind("127.0.0.1:0").await?;
++    socket.connect(rendezvous).await?;
++    let mut message = RendezvousMessage::new();
++    message.set_register_pk(RegisterPk {
++        id: DEVICE_RUSTDESK_ID.to_owned(),
++        uuid: Bytes::copy_from_slice(target.id.as_bytes()),
++        pk: Bytes::copy_from_slice(target.public_key.as_ref()),
++        ..Default::default()
++    });
++    socket.send(&message.write_to_bytes()?).await?;
++    let mut bytes = [0; 4096];
++    let n = timeout(WAIT, socket.recv(&mut bytes)).await??;
++    assert!(RendezvousMessage::parse_from_bytes(&bytes[..n])?.has_register_pk_response());
++    Ok(socket)
++}
++
++#[tokio::test]
++async fn managed_endpoint_admission_on_direct_and_relay() -> ResultType<()> {
++    let center = env::var("DESKREALM_FIXTURE_CENTER")
++        .expect("launch this test with the managed TLS fixture");
++    let ca = std::fs::read(env::var("DESKREALM_FIXTURE_CA")?)?;
++    let rendezvous = env::var("DESKREALM_FIXTURE_HBBS")?.parse()?;
++    let relay_authority = env::var("DESKREALM_FIXTURE_HBBR")?;
++    let controller = DeviceIdentity::from_seed(
++        env::var("DESKREALM_FIXTURE_CONTROLLER")?.parse()?,
++        &sign::Seed([2; 32]),
++    )?;
++    let target = DeviceIdentity::from_seed(
++        env::var("DESKREALM_FIXTURE_TARGET")?.parse()?,
++        &sign::Seed([3; 32]),
++    )?;
++    let (center_key, _) = sign::keypair_from_seed(&sign::Seed([1; 32]));
++    let authority = Authority::new(&center, "fixture-center".to_owned(), center_key, Some(&ca))?;
++    let network = Network {
++        rendezvous,
++        relay: Some(RelayNode {
++            authority: &relay_authority,
++            address: relay_authority.parse()?,
++        }),
++    };
++    assert!(authority
++        .issue(
++            &controller,
++            &bearer("dru_", 11),
++            DEVICE_RUSTDESK_ID,
++            Uuid::new_v4(),
++            "expired",
++            3,
++            true
++        )
++        .await
++        .is_err());
++    let target_udp = register(rendezvous, &target).await?;
++    for (path, purpose, selection, success) in [
++        (Path::Direct, "direct-admit", Some(1), true),
++        (Path::Relay, "relay-admit", Some(1), true),
++        (Path::Direct, "decline", None, false),
++        (Path::Direct, "path-mismatch", Some(1), false),
++        (Path::Direct, "policy-mismatch", Some(1), false),
++        (Path::Relay, "deny-redeem", Some(1), false),
++    ] {
++        let controller_run = async {
++            let route = authority
++                .issue(
++                    &controller,
++                    &bearer("dru_", 11),
++                    DEVICE_RUSTDESK_ID,
++                    Uuid::new_v4(),
++                    purpose,
++                    3,
++                    true,
++                )
++                .await?;
++            let mut stream = network
++                .connect_controller(&authority, &controller, &route, path)
++                .await?;
++            let claimed_path = if purpose == "path-mismatch" {
++                Path::Relay
++            } else {
++                path
++            };
++            authority
++                .connect_controller(&mut stream, &route, &controller, claimed_path)
++                .await
++        };
++        let target_run = async {
++            let mut buf = [0; 4096];
++            let size = timeout(WAIT, target_udp.recv(&mut buf)).await??;
++            let message = RendezvousMessage::parse_from_bytes(&buf[..size])?;
++            let Some(rendezvous_message::Union::DeskrealmSignal(signal)) = message.union else {
++                hbb_common::bail!("managed offer expected");
++            };
++            let (mut stream, route, actual_path) = network
++                .accept_target(&authority, &target, DEVICE_RUSTDESK_ID, signal)
++                .await?;
++            assert!(path == actual_path);
++            let relay_id = if path == Path::Relay {
++                "fixture-relay"
++            } else {
++                ""
++            };
++            let drd = bearer("drd_", 12);
++            authority
++                .connect_target(
++                    &mut stream,
++                    TargetSession {
++                        route: &route,
++                        device: &target,
++                        device_credential: &drd,
++                        path: actual_path,
++                        relay_id,
++                        policy: AppliedPolicy {
++                            version: if purpose == "policy-mismatch" { 2 } else { 1 },
++                            allowed_mask: 3,
++                            unattended_purposes: &[],
++                        },
++                    },
++                    |request| async move {
++                        assert_eq!(request.purpose, purpose);
++                        assert_eq!(request.allowed_mask, 3);
++                        selection
++                    },
++                )
++                .await
++        };
++        let (client, host) =
++            timeout(WAIT, async { tokio::join!(controller_run, target_run) }).await?;
++        if success {
++            if let Err(error) = &host {
++                eprintln!("{purpose} target: {error:#}");
++            }
++            if let Err(error) = &client {
++                eprintln!("{purpose} controller: {error:#}");
++            }
++            let client = client?;
++            let host = host?;
++            assert_eq!(client.allowed_mask, 1);
++            assert_eq!(host.allowed_mask, 1);
++            assert_eq!(client.lease_sequence, host.sequence);
++            assert_eq!(client.lease_until_ms, host.until_ms);
++            assert_eq!(host.credential(), bearer("drc_", 13));
++        } else {
++            assert!(client.is_err(), "client opened a denied session");
++            assert!(host.is_err(), "host opened a denied session");
++        }
++    }
++    Ok(())
++}

@@ -229,6 +229,10 @@ impl<'a> VerifiedGrant<'a> {
         self.fields[11][0] == 1
     }
 
+    pub fn purpose(&self) -> &str {
+        std::str::from_utf8(self.fields[12]).expect("validated ASCII purpose")
+    }
+
     pub fn expires_ms(&self) -> u64 {
         number(self.fields[14])
     }
