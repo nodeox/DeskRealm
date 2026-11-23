@@ -137,9 +137,9 @@ func ensureInstallRecord(directory, id string) (installRecord, error) {
 	return record, writeAtomic(directory, manifestName, updated, 0600)
 }
 
-func (r *installRecord) step(ctx context.Context, directory string, index int, work func() error) error {
+func (r *installRecord) step(ctx context.Context, directory string, index int, rerun bool, work func() error) error {
 	s := &r.Steps[index]
-	began := s.State != "completed"
+	began := rerun || s.State != "completed"
 	if began {
 		s.State, s.FailureCode = "running", ""
 		s.Attempts++

@@ -416,9 +416,11 @@ def interrupted_rebuild(scratch, installer, flags, ca):
             try:
                 deadline = time.monotonic() + 60
                 while process.poll() is None and time.monotonic() < deadline:
-                    status = json.loads(output(installer, "status", *flags))
-                    if status["phase"] == "https" and "unknown authority" in status["detail"]:
-                        break
+                    journal = json.loads(output(installer, "install-record", *flags))
+                    if any(step["name"] == "health" and step["state"] == "running" for step in journal["steps"]):
+                        status = json.loads(output(installer, "status", *flags))
+                        if status["phase"] == "https" and "unknown authority" in status["detail"]:
+                            break
                     time.sleep(0.3)
                 else:
                     raise RuntimeError("did not reach the expected post-migration TLS failure during rebuild")

@@ -23,7 +23,7 @@ func TestInstallRecordResumesWithStableTaskAndRedactedOutcome(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	private := "postgres://operator:private-database-password@example.invalid"
-	if err := record.step(ctx, c.Directory, healthStep, func() error {
+	if err := record.step(ctx, c.Directory, healthStep, false, func() error {
 		cancel()
 		return errors.New(private)
 	}); err == nil {
@@ -38,16 +38,25 @@ func TestInstallRecordResumesWithStableTaskAndRedactedOutcome(t *testing.T) {
 		t.Fatal("step record included raw execution output")
 	}
 	noFailure := func() error { return nil }
-	if err := interrupted.step(context.Background(), c.Directory, healthStep, noFailure); err != nil {
+	if err := interrupted.step(context.Background(), c.Directory, healthStep, false, noFailure); err != nil {
 		t.Fatal(err)
 	}
 	rev := interrupted.Revision
-	if err := interrupted.step(context.Background(), c.Directory, healthStep, noFailure); err != nil {
+	if err := interrupted.step(context.Background(), c.Directory, healthStep, false, noFailure); err != nil {
 		t.Fatal(err)
 	}
 	if interrupted.Revision != rev || interrupted.Steps[healthStep].Attempts != 2 ||
 		interrupted.Steps[healthStep].State != "completed" {
 		t.Fatal("rechecking a completed step rewrote its outcome")
+	}
+	if err := interrupted.step(context.Background(), c.Directory, healthStep, true, func() error {
+		running, err := loadInstallRecord(c.Directory, center.ID)
+		if err != nil || running.Steps[healthStep].State != "running" {
+			t.Fatal("rechecking after a rebuild did not record its active step")
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
 	}
 }
 

@@ -66,13 +66,13 @@ func installCenter(ctx context.Context, c config, run dockerRunner) (centerStatu
 	if err != nil {
 		return centerStatus{}, err
 	}
-	if err := record.step(ctx, c.Directory, imagesStep, func() error {
+	if err := record.step(ctx, c.Directory, imagesStep, false, func() error {
 		haveVerifiedImages := recordedCluster != "" || !record.Steps[imagesStep].FirstSuccess.IsZero()
 		return ensureImages(ctx, c, center, platform, haveVerifiedImages, run)
 	}); err != nil {
 		return centerStatus{}, err
 	}
-	if err := record.step(ctx, c.Directory, databaseStep, func() error {
+	if err := record.step(ctx, c.Directory, databaseStep, false, func() error {
 		if recordedCluster == "" && !record.Steps[databaseStep].FirstSuccess.IsZero() {
 			return errors.New("PostgreSQL initialization record is missing; restore the original deployment record")
 		}
@@ -80,13 +80,14 @@ func installCenter(ctx context.Context, c config, run dockerRunner) (centerStatu
 	}); err != nil {
 		return centerStatus{}, err
 	}
-	if err := record.step(ctx, c.Directory, servicesStep, func() error {
+	startupNeeded, _ := serviceHealth(services)
+	if err := record.step(ctx, c.Directory, servicesStep, startupNeeded != "", func() error {
 		return ensureServices(ctx, c, center, run)
 	}); err != nil {
 		return centerStatus{}, err
 	}
 	var status centerStatus
-	err = record.step(ctx, c.Directory, healthStep, func() error {
+	err = record.step(ctx, c.Directory, healthStep, startupNeeded != "", func() error {
 		var err error
 		status, err = waitForCenter(ctx, c, center, run)
 		return err
