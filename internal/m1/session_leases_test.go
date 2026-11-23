@@ -214,3 +214,59 @@ func TestSessionInvalidationPostgres(t *testing.T) {
 		})
 	}
 }
+
+func TestSessionAddressBookPostgres(t *testing.T) {
+	f := newSessionFixture(t)
+	changeTestRule(t, f.h, f.admin, f.rule, "publish")
+	f.applyPolicy(t, []string{"view", "input"}, nil)
+	bookReply := connectionRulePost(f.h, f.admin, "/v1/address-books", map[string]string{"name": "会话通讯录"})
+	checkCode(t, bookReply, 201, "")
+	book := responseValue[addressBook](t, bookReply.Body.Bytes()).ID
+	bookPath := "/v1/address-books/" + book
+	entryReply := connectionRulePost(f.h, f.admin, bookPath+"/entries", entryInput{DeviceID: f.target, Alias: "受控端"})
+	checkCode(t, entryReply, 201, "")
+	entry := responseValue[addressEntry](t, entryReply.Body.Bytes())
+	in := f.input(60)
+	in.Target, in.Book, in.Entry = "", book, entry.ID
+	issue := func(in sessionIssueRequest) *httptest.ResponseRecorder {
+		return nativeRequest(f.h, "POST", sessionsURL, f.userToken, in)
+	}
+	checkCode(t, issue(in), 403, errSessionDenied.Error())
+	shares := bookPath + "/shares"
+	share := func() string {
+		checkCode(t, connectionRulePost(f.h, f.admin, shares,
+			map[string]any{"kind": "user", "name": "member", "permission": bookView}), 204, "")
+		list := request(f.h, "GET", shares, "", nil, f.admin, "")
+		checkCode(t, list, 200, "member")
+		return responseValue[grantPage](t, list.Body.Bytes()).Shares[0].ID
+	}
+	grant := share()
+	checkCode(t, issue(in), 403, errSessionDenied.Error())
+	var group string
+	if err := f.store.DB.QueryRow(f.ctx, "SELECT group_id FROM devices WHERE id=$1", f.target).Scan(&group); err != nil {
+		t.Fatal(err)
+	}
+	checkCode(t, connectionRulePost(f.h, f.admin, "/v1/admin/device-groups/"+group+"/grants",
+		deviceGroupGrant{Username: "member"}), 204, "")
+	g := f.issue(t, in)
+	if g.Book != book || g.Entry != entry.ID || g.Target != f.target || g.TargetRustDeskID != "10700002" {
+		t.Fatal("grant did not preserve the selected entry and bind the resolved target")
+	}
+	route := testSessionRoute(g, 61, "direct")
+	checkCode(t, nativeRequest(f.h, "POST", sessionAuthorizeURL, f.rendezvous, route), 204, "")
+	checkCode(t, connectionRulePost(f.h, f.admin, shares+"/"+grant+"/revoke", struct{}{}), 204, "")
+	checkCode(t, nativeRequest(f.h, "POST", sessionsURL+"/"+g.ID+"/redeem", f.targetToken,
+		f.redeemProof(t, g, route, "view")), 403, errSessionDenied.Error())
+	f.count(t, 0, "SELECT count(*) FROM managed_session_redemptions WHERE session_id=$1", g.ID)
+
+	share()
+	in.RequestID = testSessionUUID(62)
+	lease := f.establish(t, in, 63, "view")
+	checkCode(t, lease.renew(f.h, f.targetToken, 1), 200, `"lease_sequence":2`)
+	checkCode(t, connectionRulePost(f.h, f.admin, bookPath+"/entries/"+entry.ID+"/remove",
+		map[string]int64{"version": entry.Version}), 204, "")
+	checkCode(t, lease.renew(f.h, f.targetToken, 2), 403, errSessionDenied.Error())
+	checkCode(t, lease.status(f.h), 200, `"state":"revocation_requested"`)
+	in.RequestID = testSessionUUID(64)
+	checkCode(t, issue(in), 403, errSessionDenied.Error())
+}

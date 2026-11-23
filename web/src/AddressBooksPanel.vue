@@ -37,6 +37,44 @@ const confirmation = ref<{ kind: 'entry'; value: Entry } | { kind: 'share'; valu
 const dialog = ref<HTMLDialogElement>()
 const detailHeading = ref<HTMLElement>()
 const titleInput = ref<HTMLInputElement>()
+const connectionDialog = ref<HTMLDialogElement>()
+const connectionInput = ref<HTMLInputElement>()
+const connection = ref<{ alias: string; target: string }>()
+const copyNotice = ref('')
+let connectionTrigger: HTMLButtonElement | undefined
+
+async function showConnection(entry: Entry, event: MouseEvent) {
+  const current = book.value
+  if (!current || entry.registration_state !== 'approved') return
+  connectionTrigger = event.currentTarget as HTMLButtonElement
+  connection.value = {
+    alias: entry.alias || entry.rustdesk_id,
+    target: 'drbook-' + current.id.replaceAll('-', '') + '-' + entry.id.replaceAll('-', ''),
+  }
+  copyNotice.value = ''
+  await nextTick()
+  connectionDialog.value?.showModal()
+  connectionInput.value?.select()
+}
+
+async function copyConnection() {
+  const selected = connection.value
+  if (!selected) return
+  try {
+    await navigator.clipboard.writeText(selected.target)
+    if (connection.value === selected) copyNotice.value = '已复制连接目标。'
+  } catch {
+    if (connection.value !== selected) return
+    connectionInput.value?.select()
+    copyNotice.value = '请复制已选中的连接目标。'
+  }
+}
+
+function closeConnection() {
+  connection.value = undefined
+  connectionTrigger?.focus()
+  connectionTrigger = undefined
+}
 
 async function run(task: () => Promise<void>) {
   if (busy.value) return
@@ -263,16 +301,19 @@ onMounted(() => run(() => listBooks()))
 
     <div v-if="entries.length" class="table-wrap">
       <table>
-        <thead><tr><th scope="col">设备与别名</th><th scope="col">登记状态</th><th scope="col">标签</th><th scope="col">备注</th><th v-if="book.permission >= 2" scope="col">操作</th></tr></thead>
+        <thead><tr><th scope="col">设备与别名</th><th scope="col">登记状态</th><th scope="col">标签</th><th scope="col">备注</th><th scope="col">操作</th></tr></thead>
         <tbody>
           <tr v-for="entry in entries" :key="entry.id">
             <th scope="row">{{ entry.alias || entry.rustdesk_id }}<small v-if="entry.alias">{{ entry.rustdesk_id }}</small></th>
             <td>{{ states[entry.registration_state] }}</td>
             <td>{{ entry.tags.join('、') }}</td>
             <td class="address-book-note">{{ entry.note }}</td>
-            <td v-if="book.permission >= 2" class="row-actions">
-              <button class="secondary" type="button" :disabled="busy" @click="edit(entry)">编辑</button>
-              <button class="secondary" type="button" :disabled="busy" @click="confirm({ kind: 'entry', value: entry })">移除</button>
+            <td class="row-actions">
+              <button v-if="entry.registration_state === 'approved'" class="secondary" type="button" :disabled="busy" @click="showConnection(entry, $event)">准备连接</button>
+              <template v-if="book.permission >= 2">
+                <button class="secondary" type="button" :disabled="busy" @click="edit(entry)">编辑</button>
+                <button class="secondary" type="button" :disabled="busy" @click="confirm({ kind: 'entry', value: entry })">移除</button>
+              </template>
             </td>
           </tr>
         </tbody>
@@ -299,6 +340,23 @@ onMounted(() => run(() => listBooks()))
       <button v-if="shareNext" type="button" class="secondary load-more" :disabled="busy" @click="run(() => listShares(book!.id, shareNext))">加载更多共享</button>
     </section>
   </section>
+
+  <dialog ref="connectionDialog" aria-labelledby="book-connect-title" @close="closeConnection">
+    <template v-if="connection">
+      <h2 id="book-connect-title">从通讯录连接</h2>
+      <p>{{ connection.alias }}</p>
+      <p class="muted dialog-copy">将连接目标粘贴到端域 Windows 客户端的远程 ID 输入框，再发起连接。中心会检查当前账号及条目的权限。</p>
+      <div class="field">
+        <label for="book-connect-target">连接目标</label>
+        <input id="book-connect-target" ref="connectionInput" :value="connection.target" spellcheck="false" readonly>
+      </div>
+      <p v-if="copyNotice" role="status">{{ copyNotice }}</p>
+      <div class="dialog-actions">
+        <button class="secondary" type="button" @click="connectionDialog?.close()">关闭</button>
+        <button class="primary" type="button" @click="copyConnection">复制连接目标</button>
+      </div>
+    </template>
+  </dialog>
 
   <dialog ref="dialog" aria-labelledby="book-confirm-title">
     <form v-if="confirmation" @submit.prevent="applyConfirmation">

@@ -18,7 +18,7 @@ managed_identity=(TestManagedDeviceIdentityPostgres TestManagedControllerBinding
 managed_rules=(TestConnectionRuleEvaluationPostgres TestConnectionRuleRevisionsPostgres)
 managed_policies=(TestManagedPolicyAssignmentPostgres TestManagedPolicyReceiptsPostgres)
 managed_sessions=(TestSessionGrantPostgres TestSessionRedemptionPostgres)
-session_leases=(TestSessionLeasesPostgres TestSessionInvalidationPostgres)
+session_leases=(TestSessionLeasesPostgres TestSessionInvalidationPostgres TestSessionAddressBookPostgres)
 case "$mode" in
   bootstrap-api) tests=("${bootstrap[@]}") ;;
   user-status) tests=("${user_status[@]}") ;;

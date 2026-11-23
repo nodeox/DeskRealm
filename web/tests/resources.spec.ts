@@ -71,11 +71,15 @@ test('共享通讯录、审计和任务中心按实际授权与结果运行', as
     await page.getByLabel('别名').fill(alias)
     await page.getByLabel('标签').fill('试点、值班')
     await page.getByLabel('备注').fill(note)
+    const response = page.waitForResponse(result =>
+      result.url().endsWith('/v1/address-books/' + book.id + '/entries') && result.request().method() === 'POST')
     await page.getByRole('button', { name: '保存设备条目' }).click()
     await expect(page.getByRole('row').filter({ hasText: alias })).toBeVisible()
+    return (await (await response).json() as { id: string }).id
   }
-  await addEntry(firstID, '前台主机', '可查看备注')
+  const firstEntry = await addEntry(firstID, '前台主机', '可查看备注')
   await addEntry(hiddenID, '机房主机', '机房私有备注')
+  await expect(page.getByRole('row').filter({ hasText: '机房主机' }).getByRole('button', { name: '准备连接' })).toHaveCount(0)
 
   await page.getByRole('button', { name: '共享设置' }).click()
   await page.getByLabel('共享给').selectOption('group')
@@ -106,6 +110,14 @@ test('共享通讯录、审计和任务中心按实际授权与结果运行', as
     await expect(viewer.getByText('机房私有备注')).toHaveCount(0)
     await expect(viewer.getByRole('button', { name: '添加设备条目' })).toHaveCount(0)
     await expect(viewer.getByRole('button', { name: '共享设置' })).toHaveCount(0)
+    const prepare = viewer.getByRole('row').filter({ hasText: '前台主机' }).getByRole('button', { name: '准备连接' })
+    await prepare.click()
+    const connect = viewer.getByRole('dialog', { name: '从通讯录连接' })
+    await expect(connect.getByLabel('连接目标')).toHaveValue(
+      'drbook-' + book.id.replaceAll('-', '') + '-' + firstEntry.replaceAll('-', ''),
+    )
+    await connect.getByRole('button', { name: '关闭', exact: true }).click()
+    await expect(prepare).toBeFocused()
     expect(await viewer.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(375)
 
     await page.getByLabel('共享用户组名称').fill('桌面支持组')

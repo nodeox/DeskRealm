@@ -1,0 +1,180 @@
+diff --git a/libs/base/src/deskrealm_endpoint.rs b/libs/base/src/deskrealm_endpoint.rs
+index 2cefab2..33e13c8 100644
+--- a/libs/base/src/deskrealm_endpoint.rs
++++ b/libs/base/src/deskrealm_endpoint.rs
+@@ -77,6 +77,36 @@ impl DeviceIdentity {
+     }
+ }
+ 
++/// A managed grant resolves a device ID or a specific authorized book entry.
++#[derive(Clone, Copy)]
++pub enum SessionTarget<'a> {
++    RustDeskId(&'a str),
++    AddressBook { book: Uuid, entry: Uuid },
++}
++
++impl<'a> SessionTarget<'a> {
++    pub fn parse(value: &'a str) -> ResultType<Self> {
++        if valid_rustdesk_id(value) {
++            return Ok(Self::RustDeskId(value));
++        }
++        let (book, entry) = value
++            .strip_prefix("drbook-")
++            .and_then(|value| value.split_once('-'))
++            .ok_or_else(|| anyhow!("invalid managed connection target"))?;
++        let parse_uuid = |value: &str| -> ResultType<Uuid> {
++            let id = Uuid::parse_str(value)?;
++            if id.is_nil() || id.simple().to_string() != value {
++                bail!("invalid managed address book reference");
++            }
++            Ok(id)
++        };
++        Ok(Self::AddressBook {
++            book: parse_uuid(book)?,
++            entry: parse_uuid(entry)?,
++        })
++    }
++}
++
+ #[derive(Deserialize)]
+ struct GrantResponse {
+     kid: String,
+@@ -233,29 +263,44 @@ impl Authority {
+         &self,
+         controller: &DeviceIdentity,
+         credential: &str,
+-        target_rustdesk_id: &str,
++        target: SessionTarget<'_>,
+         request_id: Uuid,
+         purpose: &str,
+         allowed_mask: u8,
+         attended: bool,
+     ) -> ResultType<DeskRealmRoute> {
+         check_credential(credential, "dru_")?;
+-        if !valid_rustdesk_id(target_rustdesk_id)
+-            || !valid_identifier(purpose, 64)
++        if !valid_identifier(purpose, 64)
+             || allowed_mask == 0
+             || allowed_mask & !0x1f != 0
+         {
+             bail!("invalid managed session request");
+         }
+         let mode = if attended { "attended" } else { "unattended" };
+-        let data = self.post("/v1/sessions", credential, serde_json::json!({
+-            "request_id": request_id.to_string(), "target_rustdesk_id": target_rustdesk_id,
+-            "purpose": purpose, "requested_actions": actions(allowed_mask), "confirmation_mode": mode,
+-        }), &[200, 201]).await?;
++        let mut request = serde_json::json!({
++            "request_id": request_id.to_string(), "purpose": purpose,
++            "requested_actions": actions(allowed_mask), "confirmation_mode": mode,
++        });
++        match target {
++            SessionTarget::RustDeskId(id) => {
++                if !valid_rustdesk_id(id) {
++                    bail!("invalid managed connection target");
++                }
++                request["target_rustdesk_id"] = id.into();
++            }
++            SessionTarget::AddressBook { book, entry } => {
++                if book.is_nil() || entry.is_nil() {
++                    bail!("invalid managed address book reference");
++                }
++                request["book_id"] = book.to_string().into();
++                request["entry_id"] = entry.to_string().into();
++            }
++        }
++        let data = self.post("/v1/sessions", credential, request, &[200, 201]).await?;
+         let grant: GrantResponse =
+             serde_json::from_slice(&data).map_err(|_| anyhow!("invalid managed grant response"))?;
+         let granted_mask = mask(&grant.allowed_actions)?;
+-        if grant.target_rustdesk_id != target_rustdesk_id
++        if matches!(target, SessionTarget::RustDeskId(id) if id != grant.target_rustdesk_id)
+             || grant.purpose != purpose
+             || grant.confirmation_mode != mode
+             || granted_mask & !allowed_mask != 0
+diff --git a/libs/base/tests/deskrealm_interop.rs b/libs/base/tests/deskrealm_interop.rs
+index 37400ec..3acb807 100644
+--- a/libs/base/tests/deskrealm_interop.rs
++++ b/libs/base/tests/deskrealm_interop.rs
+@@ -1,5 +1,5 @@
+ use base::{
+-    deskrealm_endpoint::{AppliedPolicy, Authority, DeviceIdentity, TargetSession},
++    deskrealm_endpoint::{AppliedPolicy, Authority, DeviceIdentity, SessionTarget, TargetSession},
+     deskrealm_transport::{Network, RelayNode},
+     message_proto::{Message, TestDelay},
+ };
+@@ -21,6 +21,8 @@ use tokio::{
+ 
+ const DEVICE_RUSTDESK_ID: &str = "10700002";
+ const WAIT: Duration = Duration::from_secs(30);
++const BOOK_TARGET: &str =
++    "drbook-30000000000040008000000000000001-30000000000040008000000000000002";
+ 
+ fn bearer(prefix: &str, byte: u8) -> String {
+     format!("{prefix}{}", URL_SAFE_NO_PAD.encode([byte; 32]))
+@@ -45,6 +47,13 @@ async fn register(rendezvous: SocketAddr, target: &DeviceIdentity) -> ResultType
+ 
+ #[tokio::test]
+ async fn managed_endpoint_admission_on_direct_and_relay() -> ResultType<()> {
++    for invalid in [
++        "drbook-30000000000040008000000000000001-",
++        "drbook-30000000000040008000000000000001-00000000000000000000000000000000",
++        "drbook-300000000000400080000000000000AB-30000000000040008000000000000002",
++    ] {
++        assert!(SessionTarget::parse(invalid).is_err());
++    }
+     let center = env::var("DESKREALM_FIXTURE_CENTER")
+         .expect("launch this test with the managed TLS fixture");
+     let ca = std::fs::read(env::var("DESKREALM_FIXTURE_CA")?)?;
+@@ -71,7 +80,7 @@ async fn managed_endpoint_admission_on_direct_and_relay() -> ResultType<()> {
+         .issue(
+             &controller,
+             &bearer("dru_", 11),
+-            DEVICE_RUSTDESK_ID,
++            SessionTarget::parse(DEVICE_RUSTDESK_ID)?,
+             Uuid::new_v4(),
+             "expired",
+             3,
+@@ -114,7 +123,11 @@ async fn managed_endpoint_admission_on_direct_and_relay() -> ResultType<()> {
+                 .issue(
+                     &controller,
+                     &bearer("dru_", 11),
+-                    DEVICE_RUSTDESK_ID,
++                    SessionTarget::parse(if purpose.ends_with("-admit") {
++                        BOOK_TARGET
++                    } else {
++                        DEVICE_RUSTDESK_ID
++                    })?,
+                     Uuid::new_v4(),
+                     purpose,
+                     requested,
+diff --git a/src/deskrealm_desktop.rs b/src/deskrealm_desktop.rs
+index bf714aa..a2bb17a 100644
+--- a/src/deskrealm_desktop.rs
++++ b/src/deskrealm_desktop.rs
+@@ -3,7 +3,7 @@
+ use base::{
+     deskrealm_endpoint::{
+         AppliedPolicy, Authority, DeviceCredential, DeviceIdentity, InstalledPolicy, LocalConsent,
+-        ManagedAction, TargetSession,
++        ManagedAction, SessionTarget, TargetSession,
+     },
+     deskrealm_transport::{Network, RelayNode},
+ };
+@@ -219,6 +219,7 @@ pub(crate) async fn connect(
+     if hbb_common::config::is_incoming_only() {
+         bail!("managed controller is unavailable in incoming-only mode");
+     }
++    let target = SessionTarget::parse(peer)?;
+     let desktop = Desktop::configured().await?;
+     let credential = desktop
+         .authority
+@@ -253,7 +254,7 @@ pub(crate) async fn connect(
+         .issue(
+             &desktop.device,
+             std::str::from_utf8(&bearer)?.trim(),
+-            peer,
++            target,
+             Uuid::new_v4(),
+             &purpose,
+             requested,

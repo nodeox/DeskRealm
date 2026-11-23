@@ -240,9 +240,17 @@ class SessionFixture(Fixture):
         if path == "/v1/sessions":
             if authorization != "Bearer " + bearer("dru_", 11):
                 return 401, {}
-            if body["target_rustdesk_id"] != TARGET or body["confirmation_mode"] != "attended":
-                return 403, {}
             purpose = body["purpose"]
+            keys = {"book_id", "entry_id", "target_rustdesk_id", "target_device_id"} & body.keys()
+            if purpose.endswith("-admit"):
+                if keys != {"book_id", "entry_id"} or (
+                    body["book_id"], body["entry_id"]
+                ) != ("30000000-0000-4000-8000-000000000001", "30000000-0000-4000-8000-000000000002"):
+                    return 403, {}
+            elif keys != {"target_rustdesk_id"} or body["target_rustdesk_id"] != TARGET:
+                return 403, {}
+            if body["confirmation_mode"] != "attended":
+                return 403, {}
             allowed, actions = confirmed_mask(purpose) if purpose.endswith(("-audio", "-clipboard", "-file")) else (3, ["view", "input"])
             if body["requested_actions"] != actions:
                 return 403, {}
