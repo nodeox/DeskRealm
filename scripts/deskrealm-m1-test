@@ -32,6 +32,7 @@ case "$mode" in
   audit) tests=("${audit[@]}") ;;
   tasks) tests=("${tasks[@]}") ;;
   install-task) tests=(TestInstallationTaskImportPostgres "${tasks[@]}" "${enrollment[@]}") ;;
+  delivery-tasks) tests=(TestDeliveryTaskRecoveryPostgres TestDeliveryTaskBrowserPostgres "${tasks[@]}") ;;
   overview) tests=("${overview[@]}") ;;
   managed-identity) tests=("${managed_identity[@]}") ;;
   connection-rules) tests=("${managed_rules[@]}") ;;
@@ -92,7 +93,7 @@ if [[ "$mode" != *-browser ]]; then
   if [[ "$mode" == all ]]; then
     go mod verify
     go vet ./...
-    go_args=(-race ./...)
+    go_args=(-race ./... -skip '^TestDeliveryTaskBrowserPostgres$')
   else
     pattern=$(IFS='|'; echo "${tests[*]}")
     go_args=(./internal/m1 -run "^($pattern)$")

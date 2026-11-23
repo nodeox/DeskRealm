@@ -180,7 +180,9 @@ func NewHandler(store Store, origin *url.URL, web fs.FS, config ...AuthConfig) h
 	mux.HandleFunc("POST /v1/admin/audit-retention/prune", api.pruneAudit)
 	mux.HandleFunc("GET /v1/admin/tasks", api.listTasks)
 	mux.HandleFunc("GET /v1/admin/tasks/{id}", api.getTask)
+	mux.HandleFunc("POST /v1/admin/tasks/delivery", api.createDeliveryTask)
 	mux.HandleFunc("POST /v1/admin/tasks/{id}/retry", api.retryTask)
+	mux.HandleFunc("POST /v1/admin/tasks/{id}/cancel", api.cancelTask)
 	apiNotFound := func(w http.ResponseWriter, _ *http.Request) {
 		writeError(w, http.StatusNotFound, "not_found")
 	}

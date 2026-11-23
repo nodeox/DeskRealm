@@ -42,7 +42,8 @@ var (
 )
 
 type Store struct {
-	DB *pgxpool.Pool
+	DB       *pgxpool.Pool
+	Delivery DeliveryExecutor
 }
 
 func Migrate(ctx context.Context, dsn string) error {

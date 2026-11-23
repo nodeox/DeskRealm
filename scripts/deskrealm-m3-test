@@ -3,6 +3,11 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 case "${1:-}" in
+  delivery-tasks)
+    npm --prefix web run build
+    DESKREALM_DELIVERY_BROWSER=1 GOFLAGS="${GOFLAGS:-} -race" bash scripts/deskrealm-m1-test delivery-tasks
+    exit
+    ;;
   install-task)
     GOFLAGS="${GOFLAGS:-} -race" bash scripts/deskrealm-m1-test install-task
     exec python3 -B managed/tests/center_install.py --install-task
@@ -47,7 +52,7 @@ case "${1:-}" in
     )
     ;;
   *)
-    echo "usage: $0 install-preflight|install-prepare|install-bootstrap|install-offline|install-resume|install-relay|install-task" >&2
+    echo "usage: $0 install-preflight|install-prepare|install-bootstrap|install-offline|install-resume|install-relay|install-task|delivery-tasks" >&2
     exit 2
     ;;
 esac

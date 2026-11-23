@@ -19,4 +19,5 @@ export const auditLabels: Record<string, string> = {
   'audit.retention_changed': '更新保留期', 'audit.retention_pruned': '清理过期审计',
   'user.import_batch': '导入账号', 'task.retry_requested': '提交任务重试', 'task.target_finished': '完成任务执行',
   'task.install_record_imported': '导入中心安装记录',
+  'task.delivery_created': '创建交付任务', 'task.target_canceled': '取消任务对象',
 }

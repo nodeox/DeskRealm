@@ -4,8 +4,14 @@ import { api, json, RequestError } from './api'
 
 import { taskKinds as kinds, taskProgress as progress, taskStates as states, type TaskState, type TaskSummary } from './overview'
 
-type Target = { id: string; object_key: string; state: TaskState; result_code: string; can_retry: boolean; version: number }
-type Attempt = { id?: string; target_id: string; sequence: number; result_code?: string; started_at: string; finished_at?: string }
+type Target = {
+  id: string; object_key: string; state: TaskState; result_code: string; can_retry: boolean; version: number
+  can_cancel?: boolean; operation_id?: string
+}
+type Attempt = {
+  id?: string; target_id: string; sequence: number; result_code?: string; started_at: string; finished_at?: string
+  receipt_id?: string
+}
 type InstallStep = {
   name: 'images' | 'database' | 'services' | 'health'
   state: 'pending' | 'running' | 'completed' | 'failed' | 'interrupted'
@@ -24,6 +30,7 @@ const results: Record<string, string> = {
   pending: '账号待激活', exists: '账号已存在', import_failed: '账号写入失败', pending_approval: '等待设备审批',
   approved: '设备已通过审批', rejected: '设备已被拒绝', retired: '待审批设备已退役',
   lease_expired: '执行租约已过期', authorization_changed: '重试申请人的管理员权限已变更',
+  delivery_succeeded: '外部执行成功', delivery_failed: '外部执行失败', canceled: '执行前已取消',
 }
 const steps = { images: '准备镜像', database: '检查数据库', services: '启动服务', health: '验证服务健康' }
 const installStates = { pending: '待执行', running: '执行中', completed: '成功', failed: '失败', interrupted: '已中断' }
@@ -34,7 +41,11 @@ const next = ref('')
 const task = ref<Task>()
 const viewedRevision = ref('')
 const selected = ref<string[]>([])
-const selection = computed(() => task.value?.targets.filter(target => target.can_retry && selected.value.includes(target.id)) ?? [])
+const chosen = computed(() => task.value?.targets.filter(target => selected.value.includes(target.id)) ?? [])
+const retrySelection = computed(() => chosen.value.filter(target => target.can_retry))
+const cancelSelection = computed(() => chosen.value.filter(target => target.can_cancel))
+const action = ref<'retry' | 'cancel'>('retry')
+const selection = computed(() => action.value === 'retry' ? retrySelection.value : cancelSelection.value)
 const error = ref('')
 const notice = ref('')
 const busy = ref(false)
@@ -97,21 +108,22 @@ async function openTask(id: string, revision = '') {
   }
 }
 
-function confirmSelection() {
+function confirmSelection(next: 'retry' | 'cancel') {
+  action.value = next
   dialogError.value = ''
   confirm.value?.showModal()
 }
 
-async function retry() {
+async function submitSelection() {
   if (!task.value || !selection.value.length || busy.value) return
   const id = task.value.id
   const targets = selection.value.map(({ id, version }) => ({ id, version }))
   busy.value = true
   dialogError.value = ''
   try {
-    const reply = await api<{ queued: number }>(base + '/' + id + '/retry', json({ targets }, props.csrf))
+    const reply = await api<{ queued?: number; canceled?: number }>(base + '/' + id + '/' + action.value, json({ targets }, props.csrf))
     confirm.value?.close()
-    notice.value = `已提交 ${reply.queued} 项重试。`
+    notice.value = action.value === 'retry' ? `已提交 ${reply.queued} 项重试。` : `已取消 ${reply.canceled} 项。`
     await refresh()
   } catch (cause) {
     dialogError.value = message(cause)
@@ -155,7 +167,10 @@ onMounted(async () => {
   <section v-if="task" class="users-surface" aria-labelledby="task-detail-heading">
     <div class="section-heading">
       <h2 id="task-detail-heading" ref="detailHeading" tabindex="-1">{{ kinds[task.kind] }}详情</h2>
-      <button v-if="task.targets.some(target => target.can_retry)" class="primary" :disabled="!selection.length || busy" @click="confirmSelection">重试所选失败项</button>
+      <div v-if="task.targets.some(target => target.can_retry || target.can_cancel)" class="control-actions">
+        <button v-if="task.targets.some(target => target.can_retry)" class="primary" :disabled="!retrySelection.length || busy" @click="confirmSelection('retry')">重试所选失败项</button>
+        <button v-if="task.targets.some(target => target.can_cancel)" class="secondary" :disabled="!cancelSelection.length || busy" @click="confirmSelection('cancel')">取消所选未开始项</button>
+      </div>
     </div>
     <dl>
       <div><dt>任务 ID</dt><dd><code>{{ task.id }}</code></dd></div>
@@ -180,17 +195,19 @@ onMounted(async () => {
         <tbody>
           <tr v-for="target in task.targets" :key="target.id">
             <td>
-              <label v-if="target.can_retry" class="control-actions"><input v-model="selected" type="checkbox" :value="target.id" :disabled="busy"> {{ target.object_key }}</label>
+              <label v-if="target.can_retry || target.can_cancel" class="control-actions"><input v-model="selected" type="checkbox" :value="target.id" :disabled="busy"> {{ target.object_key }}</label>
               <span v-else>{{ target.object_key }}</span>
+              <div v-if="target.operation_id" class="muted">操作 ID <code>{{ target.operation_id }}</code></div>
             </td>
             <td>{{ states[target.state] }}</td><td>{{ results[target.result_code] ?? '—' }}</td>
             <td>
               <div v-for="attempt in task.attempts.filter(row => row.target_id === target.id)" :key="attempt.sequence">
                 <details>
-                  <summary>{{ attempt.sequence ? '第 ' + attempt.sequence + ' 次重试' : '首次处理' }} · {{ attempt.result_code ? results[attempt.result_code] : '执行中' }}</summary>
+                  <summary>{{ task.kind === 'delivery' ? '第 ' + attempt.sequence + ' 次尝试' : attempt.sequence ? '第 ' + attempt.sequence + ' 次重试' : '首次处理' }} · {{ attempt.result_code ? results[attempt.result_code] : '执行中' }}</summary>
                   <div>开始于 {{ formatTime(attempt.started_at) }}</div>
                   <div v-if="attempt.finished_at">完成于 {{ formatTime(attempt.finished_at) }}</div>
                   <div v-if="attempt.id"><code>{{ attempt.id }}</code></div>
+                  <div v-if="attempt.receipt_id">外部回执 <code>{{ attempt.receipt_id }}</code></div>
                 </details>
               </div>
               <span v-if="!task.attempts.some(row => row.target_id === target.id)">—</span>
@@ -201,13 +218,13 @@ onMounted(async () => {
     </div>
   </section>
   <dialog ref="confirm" aria-labelledby="task-retry-heading" @cancel.prevent="!busy && confirm?.close()">
-    <h2 id="task-retry-heading">确认重试</h2>
-    <p>将重新调度以下 {{ selection.length }} 个失败对象。</p>
+    <h2 id="task-retry-heading">{{ action === 'retry' ? '确认重试' : '确认取消' }}</h2>
+    <p>{{ action === 'retry' ? '将重新调度以下失败对象。' : '将取消以下尚未开始的对象。' }}</p>
     <ul><li v-for="target in selection" :key="target.id">{{ target.object_key }}</li></ul>
     <p v-if="dialogError" class="error" role="alert">{{ dialogError }}</p>
     <div class="dialog-actions">
       <button class="secondary" :disabled="busy" @click="confirm?.close()">取消</button>
-      <button class="primary" :disabled="busy" @click="retry">确认重试</button>
+      <button class="primary" :disabled="busy" @click="submitSelection">{{ action === 'retry' ? '确认重试' : '确认取消' }}</button>
     </div>
   </dialog>
 </template>

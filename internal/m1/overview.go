@@ -88,8 +88,8 @@ func (a *API) overview(w http.ResponseWriter, r *http.Request) {
 		}
 		if who.PlatformAdmin {
 			err = tx.QueryRow(ctx, `SELECT count(*) FROM task_targets tt JOIN tasks t ON t.id=tt.task_id
-				WHERE t.organization_id=$1 AND t.kind='user_import' AND tt.retryable AND tt.attempt_count<$2`,
-				who.Organization, maxTaskAttempts).Scan(&result.Metrics.RetryableTargets)
+				WHERE t.organization_id=$1 AND (t.kind='user_import' OR ($3 AND t.kind='delivery')) AND tt.retryable AND tt.attempt_count<$2`,
+				who.Organization, maxTaskAttempts, a.store.Delivery != nil).Scan(&result.Metrics.RetryableTargets)
 			if err != nil {
 				return err
 			}
