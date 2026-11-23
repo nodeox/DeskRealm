@@ -43,6 +43,7 @@ type portConfig struct {
 	API             uint16 `json:"api,omitempty"`
 	RendezvousCheck uint16 `json:"rendezvous_check,omitempty"`
 	Rendezvous      uint16 `json:"rendezvous,omitempty"`
+	BindHost        string `json:"bind_host,omitempty"`
 }
 
 type config struct {
@@ -170,6 +171,13 @@ func validateConfig(c config, now time.Time) (config, error) {
 	}
 	if c.Ports.Rendezvous == 0 {
 		c.Ports.Rendezvous = 21116
+	}
+	if c.Ports.BindHost != "" {
+		address, err := netip.ParseAddr(c.Ports.BindHost)
+		if err != nil || !address.Is4() || address.IsUnspecified() || address.IsMulticast() {
+			return c, errors.New("ports.bind_host must be a unicast IPv4 address")
+		}
+		c.Ports.BindHost = address.String()
 	}
 	if c.Ports.API == c.Ports.RendezvousCheck || c.Ports.API == c.Ports.Rendezvous ||
 		c.Ports.RendezvousCheck == c.Ports.Rendezvous {

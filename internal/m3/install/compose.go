@@ -118,7 +118,7 @@ func renderCompose(d deployment) ([]byte, error) {
 		Restart:   "unless-stopped",
 	}
 	if c.HTTPS.Mode == httpsProvided {
-		center.Ports = []composePort{port(c.Ports.API, c.Ports.API, "tcp", "")}
+		center.Ports = []composePort{port(c.Ports.API, c.Ports.API, "tcp", c.Ports.BindHost)}
 		center.Environment["DESKREALM_HTTP_ADDR"] = joinPort("0.0.0.0", c.Ports.API)
 		center.Environment["DESKREALM_TLS_CERT_FILE"] = "/run/deskrealm/tls.crt"
 		center.Environment["DESKREALM_TLS_KEY_FILE"] = "/run/deskrealm/tls.key"
@@ -143,9 +143,9 @@ func renderCompose(d deployment) ([]byte, error) {
 		},
 		EnvFile: []string{"./secrets/rendezvous.env"},
 		Ports: []composePort{
-			port(c.Ports.RendezvousCheck, 21115, "tcp", ""),
-			port(c.Ports.Rendezvous, 21116, "tcp", ""),
-			port(c.Ports.Rendezvous, 21116, "udp", ""),
+			port(c.Ports.RendezvousCheck, 21115, "tcp", c.Ports.BindHost),
+			port(c.Ports.Rendezvous, 21116, "tcp", c.Ports.BindHost),
+			port(c.Ports.Rendezvous, 21116, "udp", c.Ports.BindHost),
 		},
 		Volumes:   []composeBind{bind(filepath.Join(c.Directory, "rendezvous"), "/var/lib/deskrealm-rendezvous", false)},
 		Networks:  map[string]composeAttachment{"control": {}},

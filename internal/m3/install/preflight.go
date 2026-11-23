@@ -20,9 +20,15 @@ const usage = `DeskRealm center installer
 
   deskrealm-install preflight --config FILE
   deskrealm-install prepare   --config FILE
+  deskrealm-install install   --config FILE
+  deskrealm-install status    --config FILE
+  deskrealm-install bootstrap-ticket --config FILE
 
 Preflight checks configuration, TLS materials, local Docker and host ports.
 Prepare writes the persistent center identity and Compose configuration.
+Install starts the deployment and checks its HTTPS and rendezvous services.
+Status inspects the persisted deployment and running services.
+Bootstrap-ticket prints a one-time initialization link for a ready center.
 `
 
 type portBinding struct {
@@ -63,34 +69,41 @@ func localDockerEndpoint(ctx context.Context, run dockerRunner) error {
 	return nil
 }
 
-func check(ctx context.Context, c config, run dockerRunner) (preflightResult, error) {
-	var result preflightResult
+func checkRuntime(ctx context.Context, run dockerRunner) (platform, compose string, err error) {
 	if err := localDockerEndpoint(ctx, run); err != nil {
-		return result, err
+		return "", "", err
 	}
 	engine, err := run(ctx, "version", "--format", "{{.Server.Os}}/{{.Server.Arch}}")
 	if err != nil {
-		return result, errors.New("Docker Engine is unavailable for the selected context")
+		return "", "", errors.New("Docker Engine is unavailable for the selected context")
 	}
-	platform := strings.TrimSpace(string(engine))
+	platform = strings.TrimSpace(string(engine))
 	if platform != "linux/amd64" && platform != "linux/arm64" {
-		return result, errors.New("Docker Engine must run linux/amd64 or linux/arm64")
+		return "", "", errors.New("Docker Engine must run linux/amd64 or linux/arm64")
 	}
 	data, err := run(ctx, "compose", "version", "--short")
-	compose := strings.TrimSpace(string(data))
+	compose = strings.TrimSpace(string(data))
 	if err != nil || compose == "" {
-		return result, errors.New("Docker Compose plugin is unavailable")
+		return "", "", errors.New("Docker Compose plugin is unavailable")
 	}
+	return platform, compose, nil
+}
 
+func check(ctx context.Context, c config, run dockerRunner) (preflightResult, error) {
+	var result preflightResult
+	platform, compose, err := checkRuntime(ctx, run)
+	if err != nil {
+		return result, err
+	}
 	apiHost := "127.0.0.1"
 	if c.HTTPS.Mode == httpsProvided {
-		apiHost = ""
+		apiHost = c.Ports.BindHost
 	}
 	bindings := []portBinding{
 		{"api", "tcp", joinPort(apiHost, c.Ports.API)},
-		{"rendezvous_check", "tcp", joinPort("", c.Ports.RendezvousCheck)},
-		{"rendezvous", "tcp", joinPort("", c.Ports.Rendezvous)},
-		{"rendezvous", "udp", joinPort("", c.Ports.Rendezvous)},
+		{"rendezvous_check", "tcp", joinPort(c.Ports.BindHost, c.Ports.RendezvousCheck)},
+		{"rendezvous", "tcp", joinPort(c.Ports.BindHost, c.Ports.Rendezvous)},
+		{"rendezvous", "udp", joinPort(c.Ports.BindHost, c.Ports.Rendezvous)},
 	}
 	for _, binding := range bindings {
 		if err := checkPort(ctx, binding); err != nil {
@@ -128,8 +141,13 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		_, err := io.WriteString(stdout, usage)
 		return err
 	}
-	if len(args) == 0 || (args[0] != "preflight" && args[0] != "prepare") {
-		return errors.New("expected preflight or prepare with --config FILE; see --help")
+	if len(args) == 0 {
+		return errors.New("expected a command with --config FILE; see --help")
+	}
+	switch args[0] {
+	case "preflight", "prepare", "install", "status", "bootstrap-ticket":
+	default:
+		return errors.New("unknown installer command; see --help")
 	}
 	flags := flag.NewFlagSet(args[0], flag.ContinueOnError)
 	flags.SetOutput(stderr)
@@ -149,8 +167,38 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	}
 	encoder := json.NewEncoder(stdout)
 	encoder.SetIndent("", "  ")
-	if args[0] == "prepare" {
+	switch args[0] {
+	case "prepare":
 		result, err := prepareDeployment(c)
+		if err != nil {
+			return err
+		}
+		return encoder.Encode(result)
+	case "install":
+		result, err := installCenter(ctx, c, docker)
+		if err != nil {
+			return err
+		}
+		return encoder.Encode(result)
+	case "status", "bootstrap-ticket":
+		ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+		defer cancel()
+		center, err := readPrepared(c)
+		if err != nil {
+			return err
+		}
+		if _, _, err := checkRuntime(ctx, docker); err != nil {
+			return err
+		}
+		if args[0] == "bootstrap-ticket" {
+			ticket, err := issueBootstrapTicket(ctx, c, center, docker)
+			if err != nil {
+				return err
+			}
+			_, err = fmt.Fprintln(stdout, ticket)
+			return err
+		}
+		result, err := inspectCenter(ctx, c, center, docker)
 		if err != nil {
 			return err
 		}

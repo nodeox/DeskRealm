@@ -12,7 +12,7 @@ import subprocess
 import tempfile
 import time
 
-from native_coord_fixture import field, fields, receive, send, tls_context
+from native_coord_fixture import tls_context
 from native_wire import ROOT, SERVER_IMAGE, cargo, target_directory
 
 
@@ -116,22 +116,6 @@ def wait_for_center(origin, port, ca, initialized):
     raise RuntimeError(f"HTTPS readiness failed: {last_error}")
 
 
-def wait_for_rendezvous(port):
-    deadline = time.monotonic() + 15
-    while time.monotonic() < deadline:
-        try:
-            with socket.create_connection((LOOPBACK, port), timeout=1) as connection:
-                # RustDesk RendezvousMessage TestNatRequest and TestNatResponse tags.
-                send(connection, field(20, b""))
-                response = fields(receive(connection)[21])
-                if not 0 < response.get(1, 0) < 65536:
-                    raise RuntimeError("hbbs returned an invalid NAT probe port")
-                return
-        except (OSError, EOFError):
-            time.sleep(0.3)
-    raise RuntimeError("hbbs NAT probe timed out")
-
-
 def browser_bootstrap(scratch, origin, certificate, ticket):
     key = run("openssl", "x509", "-in", certificate, "-pubkey", "-noout", stdout=subprocess.PIPE)
     der = run("openssl", "pkey", "-pubin", "-outform", "DER", input=key.stdout, stdout=subprocess.PIPE)
@@ -168,35 +152,114 @@ def exercise(scratch, images, resources):
         "id_server": f"{LOOPBACK}:{route_port}",
         "https": {"mode": "provided", "certificate": str(certificate),
                   "private_key": str(private_key), "ca_certificate": str(ca)},
-        "images": images, "ports": {"rendezvous": route_port, "rendezvous_check": check_port},
+        "images": images,
+        "ports": {"rendezvous": route_port, "rendezvous_check": check_port, "bind_host": LOOPBACK},
     }))
     installer = scratch / "deskrealm-install"
     run("go", "build", "-o", installer, "./cmd/deskrealm-install")
-    run(installer, "preflight", "--config", config)
-    prepared = json.loads(output(installer, "prepare", "--config", config))
-    override = scratch / "loopback.yaml"
-    override.write_text(
-        "networks:\n  control:\n    driver_opts:\n"
-        f"      com.docker.network.bridge.host_binding_ipv4: {LOOPBACK}\n"
-    )
-    compose = ("docker", "compose", "--env-file", "/dev/null", "-f", prepared["compose_file"], "-f", override)
+    flags = ("--config", config)
+    run(installer, "preflight", *flags)
+    prepared = json.loads(output(installer, "prepare", *flags))
+    compose = ("docker", "compose", "--env-file", "/dev/null", "-f", prepared["compose_file"])
     resources.callback(cleanup, *compose, "down", "--volumes", "--remove-orphans")
-    run(*compose, "up", "--detach", "--wait", "--wait-timeout", "90")
-    wait_for_center(origin, api_port, ca, initialized=False)
-    wait_for_rendezvous(route_port)
-    with socket.create_connection((LOOPBACK, check_port), timeout=2):
-        pass
-    run(*compose, "exec", "-T", "rendezvous", "getent", "ahostsv4", HOST, stdout=subprocess.DEVNULL)
-    if json.loads(output(installer, "prepare", "--config", config)) != prepared:
+    if json.loads(output(installer, "status", *flags))["phase"] != "prepared":
+        raise RuntimeError("status did not identify a prepared deployment")
+    installed = json.loads(output(installer, "install", *flags))
+    if installed["phase"] != "ready" or installed["initialized"] is not False:
+        raise RuntimeError("installation did not reach ready before issuing a ticket")
+    if any(installed.get(key) != value for key, value in prepared.items()):
         raise RuntimeError("starting services changed the persisted deployment identity")
+    wait_for_center(origin, api_port, ca, initialized=False)
+    run(*compose, "exec", "-T", "rendezvous", "getent", "ahostsv4", HOST, stdout=subprocess.DEVNULL)
     print("Compose migration, CA-verified HTTPS and native hbbs readiness passed.", flush=True)
 
-    ticket = output(*compose, "exec", "-T", "center", "/usr/local/bin/deskrealm", "bootstrap-ticket")
+    ticket = output(installer, "bootstrap-ticket", *flags)
     if not re.fullmatch(re.escape(origin) + r"/initialize#ticket=[A-Za-z0-9_-]{43}", ticket):
         raise RuntimeError("host-side command did not produce a valid initialization link")
     browser_bootstrap(scratch, origin, certificate, ticket)
     wait_for_center(origin, api_port, ca, initialized=True)
     print("Chromium first-administrator initialization and login passed.", flush=True)
+
+    container_ids = output(*compose, "ps", "--all", "--quiet")
+    assert_initialized(installer, flags, prepared)
+    if output(*compose, "ps", "--all", "--quiet") != container_ids:
+        raise RuntimeError("re-running install replaced a healthy service")
+    denied = subprocess.run([installer, "bootstrap-ticket", *flags], capture_output=True, text=True)
+    if not denied.returncode or denied.stdout or "already initialized" not in denied.stderr:
+        raise RuntimeError("installer allowed another initialization link after bootstrap")
+
+    run(*compose, "down")
+    if json.loads(output(installer, "status", *flags))["phase"] != "stopped":
+        raise RuntimeError("status did not identify a stopped deployment")
+    interrupted_rebuild(scratch, installer, flags, ca)
+    run(*compose, "stop", "rendezvous")
+    assert_initialized(installer, flags, prepared)
+    if output(*compose, "ps", "--all", "--quiet") == container_ids:
+        raise RuntimeError("the test did not rebuild the Compose services")
+    print("Interrupted rebuild retained the database, deployment ID and both public keys.", flush=True)
+
+    run(*compose, "down")
+    record = installation / "database-ready"
+    original_record = record.read_bytes()
+    try:
+        record.write_text(f"1 {prepared['deployment_id']} 1\n")
+        assert_storage_refusal(installer, flags, compose, "different cluster")
+    finally:
+        record.write_bytes(original_record)
+
+    database = installation / "postgres"
+    original = installation / "postgres-original"
+    database.rename(original)
+    try:
+        database.mkdir(mode=0o700)
+        assert_storage_refusal(installer, flags, compose, "missing or incomplete")
+    finally:
+        database.rmdir()
+        original.rename(database)
+    print("A missing database or mismatched cluster ID was rejected before starting services.", flush=True)
+
+
+def assert_storage_refusal(installer, flags, compose, reason):
+    failed = subprocess.run([installer, "install", *flags], capture_output=True, text=True)
+    if (not failed.returncode or failed.stdout or reason not in failed.stderr or
+            output(*compose, "ps", "--all", "--quiet")):
+        raise RuntimeError(f"installer did not stop on PostgreSQL storage conflict: {reason}")
+
+
+def assert_initialized(installer, flags, prepared):
+    for command in ("install", "status"):
+        status = json.loads(output(installer, command, *flags))
+        if (status["phase"] != "ready" or status["initialized"] is not True or
+                any(status.get(key) != value for key, value in prepared.items())):
+            raise RuntimeError(f"{command} did not report the initialized deployment and original identity")
+
+
+def interrupted_rebuild(scratch, installer, flags, ca):
+    alternate = scratch / "alternate-trust"
+    alternate.mkdir()
+    unrelated, _ = tls_context(alternate, f"DNS:{HOST}")
+    trusted = ca.read_bytes()
+    ca.write_bytes(unrelated.read_bytes())
+    # Break HTTPS readiness after the database and migration are already up.
+    try:
+        with subprocess.Popen([installer, "install", *flags], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE) as process:
+            try:
+                deadline = time.monotonic() + 60
+                while process.poll() is None and time.monotonic() < deadline:
+                    status = json.loads(output(installer, "status", *flags))
+                    if status["phase"] == "https" and "unknown authority" in status["detail"]:
+                        break
+                    time.sleep(0.3)
+                else:
+                    raise RuntimeError("did not reach the expected post-migration TLS failure during rebuild")
+            finally:
+                if process.poll() is None:
+                    process.terminate()
+                process.wait(timeout=15)
+            if process.returncode == 0:
+                raise RuntimeError("interrupted installer reported success")
+    finally:
+        ca.write_bytes(trusted)
 
 
 def main():

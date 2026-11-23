@@ -39,7 +39,7 @@ func TestInstallConfigDefaultsAndCanonicalOrigins(t *testing.T) {
 		t.Fatal(err)
 	}
 	if actual.PublicOrigin != "https://console.example.test" || actual.IDServer != "id.example.test:21116" ||
-		actual.Ports != (portConfig{8080, 21115, 21116}) {
+		actual.Ports != (portConfig{API: 8080, RendezvousCheck: 21115, Rendezvous: 21116}) {
 		t.Fatalf("unexpected normalized config: %+v", actual)
 	}
 	input.PublicOrigin = "https://[2001:DB8::2]:08443"
@@ -74,6 +74,7 @@ func TestInstallConfigRejectsUnsafeValues(t *testing.T) {
 		{"image injection", func(c *config) { c.Images.Center = "a/../x" + c.Images.Center }, "pinned"},
 		{"proxy key", func(c *config) { c.HTTPS.PrivateKey = "/key" }, "reverse proxy"},
 		{"duplicate port", func(c *config) { c.Ports.API = 21115 }, "must be distinct"},
+		{"invalid local bind", func(c *config) { c.Ports.BindHost = "0.0.0.0" }, "unicast IPv4"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			value := fixtureConfig(t)
