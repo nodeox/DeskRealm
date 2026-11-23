@@ -39,4 +39,18 @@ status: in_progress
 
 日志在本地 Git 目录下的 `deskrealm-evidence/m3/b301c57b39b326d260f66f6a5b5434c921fc39cb/install-bootstrap.log`，SHA-256 为 `bcefe9453e5b2dac1febff0cf1565977bc8b12d3fd011016581205e3dbc5a68f`。
 
-04-01 继续把启动、状态核对和首管票据接入安装器命令，验证中断重跑与持久数据保护。实际 Linux 中心、中继和双 Windows 仍按 Phase 5 验收。
+## 04-01 安装器首装及中断恢复
+
+2026-11-23，在 `4bf6943cf4a940c1bf40eec8967cfc9a4aaf9d4e` 运行 `bash scripts/deskrealm-m3-test install-bootstrap`，退出 0。Docker 使用 Linux ARM64，HTTPS 使用提供证书模式。
+
+| 检查 | 结果 |
+| --- | --- |
+| 安装器命令 | `install` 依次启动 PostgreSQL、迁移、Go 中心和受管 `hbbs`；HTTPS 校验中心签名身份并通过 RustDesk 探测。状态经过 `prepared`、`ready`、`stopped` 及故障时的 `https` 阶段。 |
+| 首次管理员 | `bootstrap-ticket` 产生的一次性链接通过 Chromium 验证初始化和登录。初始化后再次签发被拒绝。 |
+| 重跑和重建 | 健康状态重跑保持原容器。移除整组容器后，测试在迁移完成、HTTPS 信任失败时中断安装器；恢复测试 CA 后重跑，保留 PostgreSQL 集群、初始化状态、部署 ID 及原会合和签名公钥。 |
+| 数据保护 | 模拟原数据库目录为空和记录标识与实际集群不符，两种情况均拒绝启动 Compose 服务。 |
+| 基础回归 | 全仓 Go 测试和 vet、M3 预检和准备竞态用例通过；安装器静态交叉编译为 Linux amd64 和 arm64。 |
+
+日志在本地 Git 目录下的 `deskrealm-evidence/m3/4bf6943cf4a940c1bf40eec8967cfc9a4aaf9d4e/install-bootstrap.log`，SHA-256 为 `8d06f6ff51062f329598b9bcca51e4ff59792f1ed5db04f3591895e7a2941458`。
+
+Task 1 的已有 Docker 首装开发验证通过。Task 2 继续空机 Docker 准备、签名离线清单、完整可恢复步骤与安装记录交接，并验证已有默认中继选择。实际 Linux 中心、中继和双 Windows 仍按 Phase 5 验收。
