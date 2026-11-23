@@ -87,3 +87,14 @@ Windows 启动时钟函数单独通过 x64 和 ARM64 MSVC 类型检查。持续�
 提交 `10fe2fabc0473d4dd8f22783911b554f2b8d2286` 增加 `endpoint` 综合门禁和 Windows 双架构工作流。以锁定源码、复用依赖缓存及断网 Cargo 容器运行 `endpoint`，退出码 0。原生回环夹具、4 项租约测试、1 项恢复复核测试、11 项桌面测试和两项 PostgreSQL 回归通过。
 
 Windows 工作流通过 actionlint。证据验证器的 4 项合成工件测试覆盖两架构齐全、缺失架构、PE 架构错误、构建工件摘要变化、缺失具名测试及 bridge 提交不符。实际调用 `windows-builds` 时，两架构的清单缺失，门禁返回非零。现有 Windows 11 ARM64 虚拟机缺少 MSVC、Rust 和 Flutter，本仓库没有配置 Git 远端。本次没有 Windows 原生构建或运行证据，03-04 保持进行中。
+
+2026-11-23，提交 `f488f2bfacbd04f2257909d6c765914e24860c87` 的 Windows x64 和 ARM64 原生构建、测试及聚合校验均通过。下载两架构工件后，在同一提交本地执行 `windows-builds` 并返回 0。每架构通过 8 项桌面能力测试、4 项租约测试及 1 项恢复复核测试。构建证据验证器的 8 项本地测试通过。 [Windows 构建与工件](https://github.com/nodeox/DeskRealm/actions/runs/45168532930)
+
+`endpoint` 在 `30a0044` 复跑通过。与 `f488f2b` 比对确认原生源码补丁、协议与上游锁、中心及 Linux 端点测试和构建入口一致。另一次复跑在 Docker 首项命令处无响应，沿用前次通过的端点验证记录。
+
+此前 `30a0044` 的 ARM64 发布库已成功编译，Rust 1.75 编译优化后的测试可执行文件时遇到未定义的汇编标签。修复仅对 ARM64 桌面测试停用优化和 LTO，并使用 16 个代码生成单元。发布 DLL 继续使用锁定的发布配置，构建流程核对测试前的发布 DLL 与打包文件的 SHA-256。双 Windows 实际通路、撤销时序和设备睡眠恢复留待 Phase 5。 [ARM64 失败日志](https://github.com/nodeox/DeskRealm/actions/runs/45156486887/job/137634317593)
+
+| 工件 | 客户端 ZIP SHA-256 |
+| --- | --- |
+| Windows x64 | `52572a051ecdf2053f6c9a140394d1bfd08ace27c9052909c05cf346a8bd5eb6` |
+| Windows ARM64 | `6047a4d676399d6fd0a0c9997669e9d91d5718e7b2520c79f325100782a93db9` |
