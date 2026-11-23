@@ -44,6 +44,18 @@ class FlutterVersionTests(unittest.TestCase):
                     self.assertEqual(build.flutter_patch_shell(), bash.resolve())
 
 
+class WindowsTestProfileTests(unittest.TestCase):
+    def test_arm64_workaround_is_local_to_desktop_test_process(self):
+        env = {"CARGO_TARGET_DIR": "target", "CARGO_PROFILE_RELEASE_LTO": "true"}
+        arm64 = build.desktop_test_environment("aarch64-pc-windows-msvc", env)
+        self.assertEqual(arm64["CARGO_PROFILE_RELEASE_OPT_LEVEL"], "0")
+        self.assertEqual(arm64["CARGO_PROFILE_RELEASE_LTO"], "false")
+        self.assertEqual(arm64["CARGO_PROFILE_RELEASE_CODEGEN_UNITS"], "16")
+        self.assertEqual(arm64["CARGO_TARGET_DIR"], "target")
+        self.assertEqual(env["CARGO_PROFILE_RELEASE_LTO"], "true")
+        self.assertIs(build.desktop_test_environment("x86_64-pc-windows-msvc", env), env)
+
+
 class WindowsEvidenceTests(unittest.TestCase):
     def setUp(self):
         temp = tempfile.TemporaryDirectory()

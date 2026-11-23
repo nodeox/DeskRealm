@@ -322,6 +322,19 @@ def check_tests(path, names):
                 f"{path.name}: missing passing test {name}")
 
 
+def desktop_test_environment(target, env):
+    if TARGETS[target]["arch"] != "arm64":
+        return env
+    # Rust 1.75's ARM64 assembler rejects undefined .LBB labels when compiling
+    # the optimized libtest executable. Keep the packaged release DLL unchanged.
+    return {
+        **env,
+        "CARGO_PROFILE_RELEASE_OPT_LEVEL": "0",
+        "CARGO_PROFILE_RELEASE_LTO": "false",
+        "CARGO_PROFILE_RELEASE_CODEGEN_UNITS": "16",
+    }
+
+
 def build_windows(target, work, bridge, evidence):
     tools = inspect_toolchains(target)
     source = source_identity()
@@ -368,8 +381,9 @@ def build_windows(target, work, bridge, evidence):
     check_build_log(destination / "cargo-build.log")
     rust_library = client / "target/release/librustdesk.dll"
     require(rust_library.is_file(), "expected a native Windows Rust library")
+    rust_digest = sha_file(rust_library)
     log_command(["cargo", "test", "--locked", "--lib", "--release", "--features", features, "managed_"],
-                client, destination / "desktop-tests.log", env)
+                client, destination / "desktop-tests.log", desktop_test_environment(target, env))
     log_command(["cargo", "test", "--locked", "-p", "base", "--lib", "managed_lease_"],
                 client, destination / "lease-tests.log", env)
     log_command(["cargo", "test", "--locked", "-p", "base", "--lib", RESUME_TESTS[0]],
@@ -377,7 +391,7 @@ def build_windows(target, work, bridge, evidence):
     log_command([*build, "--skip-cargo"], client, destination / "flutter-build.log", env)
 
     bundle = client / f"flutter/build/windows/{TARGETS[target]['arch']}/runner/Release"
-    require(sha_file(bundle / "librustdesk.dll") == sha_file(rust_library),
+    require(sha_file(bundle / "librustdesk.dll") == rust_digest and sha_file(rust_library) == rust_digest,
             "Flutter packaged a different Rust library")
     require(sha_file(client / "Cargo.lock") == cargo_lock, "locked Rust dependencies changed during the build")
     archive_tree(bundle, destination / "client.zip")
@@ -385,7 +399,7 @@ def build_windows(target, work, bridge, evidence):
     write_json(destination / "manifest.json", {
         "schema": 1, "source": source, "upstream": upstream, "target": target, "toolchains": tools,
         "cargo_lock_sha256": cargo_lock, "flutter_lock_sha256": sha_file(client / "flutter/pubspec.lock"),
-        "rust_library_sha256": sha_file(rust_library),
+        "rust_library_sha256": rust_digest,
         "files": {name: sha_file(destination / name) for name in EVIDENCE_FILES},
     })
     verify_target(destination, target, source)
