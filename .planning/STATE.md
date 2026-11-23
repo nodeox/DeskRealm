@@ -3,10 +3,10 @@ gsd_state_version: "1.0"
 current_phase: 3
 current_phase_name: M2 受管连接与策略
 status: executing
-last_updated: "2026-11-23T08:53:10Z"
+last_updated: "2026-11-23T09:13:00Z"
 last_activity: 2026-11-23
-last_activity_desc: 03-04 Task 2 受管系统音频许可、Opus 队列和传输
-state_head: 45ad377570ce703076f17c598b7b1931eec089db
+last_activity_desc: 03-04 Task 2 双向纯文本剪贴板许可、队列失效和清理
+state_head: e2699fbe444648c442be669d5fed6e7543a9f234
 progress:
   total_phases: 5
   completed_phases: 2
@@ -27,9 +27,9 @@ See: .planning/PROJECT.md (updated 2026-11-22)
 ## Current Position
 
 Phase: 3 — M2 受管连接与策略
-Plan: 03-04 of 5，Task 2 进行中。受管主屏、键鼠和系统音频已接入。接续剪贴板、文件传输、资源清理和原生构建。
+Plan: 03-04 of 5，Task 2 进行中。受管主屏、键鼠、系统音频和双向文本剪贴板已接入。接续文件传输、资源清理和原生构建。
 Status: In progress
-Last activity: 2026-11-23 — 受管音频许可、Opus 编解码、队列失效和 Linux X11 桌面回归通过。Windows WASAPI 采集和播放待真机验证。
+Last activity: 2026-11-23 — Linux X11 验证剪贴板读写、旧队列丢弃、恢复和线程退出，直连及强制中继夹具验证双向报文。Windows 原生剪贴板待真机验证。
 
 ## Accumulated Context
 
