@@ -95,10 +95,18 @@ index 33e13c8..e7b7846 100644
          let session_id = Uuid::from_slice(grant.session_id())?;
          let connection_id = Uuid::from_bytes(connection);
 diff --git a/libs/base/tests/deskrealm_interop.rs b/libs/base/tests/deskrealm_interop.rs
-index 3acb807..16f769e 100644
+index 3acb807..b0c1659 100644
 --- a/libs/base/tests/deskrealm_interop.rs
 +++ b/libs/base/tests/deskrealm_interop.rs
-@@ -108,7 +108,12 @@ async fn managed_endpoint_admission_on_direct_and_relay() -> ResultType<()> {
+@@ -88,7 +88,6 @@ async fn managed_endpoint_admission_on_direct_and_relay() -> ResultType<()> {
+         )
+         .await
+         .is_err());
+-    let target_udp = register(rendezvous, &target).await?;
+     for (path, purpose, selection, success) in [
+         (Path::Direct, "direct-admit", Some(1), true),
+         (Path::Relay, "relay-admit", Some(1), true),
+@@ -108,7 +107,14 @@ async fn managed_endpoint_admission_on_direct_and_relay() -> ResultType<()> {
          (Path::Relay, "relay-file", Some(16), true),
          (Path::Direct, "direct-supervised", Some(1), true),
          (Path::Relay, "relay-supervised", Some(1), true),
@@ -107,11 +115,13 @@ index 3acb807..16f769e 100644
 +        (Path::Direct, "direct-unattended-local-denied", None, false),
 +        (Path::Direct, "direct-console-unavailable", Some(1), false),
      ] {
++        // A long lease scenario can outlive the rendezvous registration.
++        let target_udp = register(rendezvous, &target).await?;
 +        let attended = !purpose.contains("-unattended");
          let requested = if purpose.ends_with("-file") {
              16
          } else if purpose.ends_with("-clipboard") {
-@@ -131,7 +136,7 @@ async fn managed_endpoint_admission_on_direct_and_relay() -> ResultType<()> {
+@@ -131,7 +137,7 @@ async fn managed_endpoint_admission_on_direct_and_relay() -> ResultType<()> {
                      Uuid::new_v4(),
                      purpose,
                      requested,
@@ -120,7 +130,7 @@ index 3acb807..16f769e 100644
                  )
                  .await?;
              let mut stream = network
-@@ -176,14 +181,16 @@ async fn managed_endpoint_admission_on_direct_and_relay() -> ResultType<()> {
+@@ -176,14 +182,16 @@ async fn managed_endpoint_admission_on_direct_and_relay() -> ResultType<()> {
                          policy: AppliedPolicy {
                              version: if purpose == "policy-mismatch" { 2 } else { 1 },
                              allowed_mask: requested,
@@ -138,7 +148,7 @@ index 3acb807..16f769e 100644
                  )
                  .await?;
              Ok::<_, hbb_common::anyhow::Error>((lease, stream))
-@@ -199,13 +206,23 @@ async fn managed_endpoint_admission_on_direct_and_relay() -> ResultType<()> {
+@@ -199,13 +207,23 @@ async fn managed_endpoint_admission_on_direct_and_relay() -> ResultType<()> {
              }
              let (client, mut controller_stream) = client?;
              let (mut host, mut target_stream) = host?;
