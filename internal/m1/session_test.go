@@ -166,7 +166,7 @@ func (f sessionFixture) auditCount(t *testing.T, session, action string, want in
 
 func testSessionRoute(g sessionGrant, conn int, path string) sessionRouteInput {
 	in := sessionRouteInput{Session: g.ID, Grant: g.Grant, Signature: base64.RawURLEncoding.EncodeToString(g.Signature),
-		Controller: g.Controller, Target: g.Target, Connection: testSessionUUID(conn), Path: path}
+		Controller: g.Controller, Target: g.Target, TargetRustDesk: g.TargetRustDeskID, Connection: testSessionUUID(conn), Path: path}
 	if path == "relay" {
 		in.Relay = sessionTestRelay
 	}
@@ -249,6 +249,11 @@ func TestSessionGrantPostgres(t *testing.T) {
 	forged := route
 	forged.Target = f.controller
 	checkCode(t, nativeRequest(f.h, "POST", sessionAuthorizeURL, f.rendezvous, forged), 403, errSessionDenied.Error())
+	forged = route
+	forged.TargetRustDesk = g.ControllerRustDeskID
+	checkCode(t, nativeRequest(f.h, "POST", sessionAuthorizeURL, f.rendezvous, forged), 403, errSessionDenied.Error())
+	forged.TargetRustDesk = ""
+	checkCode(t, nativeRequest(f.h, "POST", sessionAuthorizeURL, f.rendezvous, forged), 400, errSessionInput.Error())
 	checkCode(t, nativeRequest(f.h, "POST", sessionAuthorizeURL, f.rendezvous, route), 204, "")
 	// Hold the rule row so the real archive waits after obtaining the organization lock.
 	tx, err := f.store.DB.Begin(f.ctx)
@@ -391,6 +396,9 @@ func TestSessionRedemptionPostgres(t *testing.T) {
 	checkCode(t, nativeRequest(f.h, "POST", sessionPairedURL, f.rendezvous, relayRoute), 401, errManagedIdentity.Error())
 	checkCode(t, nativeRequest(f.h, "POST", sessionPairedURL, f.relay, relayRoute), 409, errSessionConflict.Error())
 	checkCode(t, nativeRequest(f.h, "POST", sessionAuthorizeURL, f.rendezvous, relayRoute), 204, "")
+	tamperedRoute := relayRoute
+	tamperedRoute.TargetRustDesk = g.ControllerRustDeskID
+	checkCode(t, nativeRequest(f.h, "POST", sessionPairedURL, f.relay, tamperedRoute), 403, errSessionDenied.Error())
 	checkCode(t, redeem(g.ID, f.targetToken, pr), 403, errSessionDenied.Error())
 	checkCode(t, nativeRequest(f.h, "POST", sessionPairedURL, f.relay, relayRoute), 204, "")
 	checkCode(t, nativeRequest(f.h, "POST", sessionPairedURL, f.relay, relayRoute), 204, "")

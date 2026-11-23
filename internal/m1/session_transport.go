@@ -40,14 +40,15 @@ func ConfigureManagedTransport(rendezvousToken, relayID, relayToken string) (Man
 }
 
 type sessionRouteInput struct {
-	Session    string `json:"session_id"`
-	Grant      string `json:"grant_id"`
-	Signature  string `json:"grant_signature"`
-	Controller string `json:"controller_device_id"`
-	Target     string `json:"target_device_id"`
-	Connection string `json:"connection_id"`
-	Path       string `json:"path"`
-	Relay      string `json:"relay_id"`
+	Session        string `json:"session_id"`
+	Grant          string `json:"grant_id"`
+	Signature      string `json:"grant_signature"`
+	Controller     string `json:"controller_device_id"`
+	Target         string `json:"target_device_id"`
+	TargetRustDesk string `json:"target_rustdesk_id"`
+	Connection     string `json:"connection_id"`
+	Path           string `json:"path"`
+	Relay          string `json:"relay_id"`
 }
 
 type sessionRoute struct {
@@ -93,7 +94,8 @@ func (a *API) authorizeSessionRoute(w http.ResponseWriter, r *http.Request) {
 	sig, valid := canonicalSignature(req.Signature)
 	if !valid || !userIDPattern.MatchString(req.Session) || !userIDPattern.MatchString(req.Grant) ||
 		!userIDPattern.MatchString(req.Connection) || !userIDPattern.MatchString(req.Controller) ||
-		!userIDPattern.MatchString(req.Target) || !validSessionPath(req.Path, req.Relay) ||
+		!userIDPattern.MatchString(req.Target) || !rustdeskIDPattern.MatchString(req.TargetRustDesk) ||
+		!validSessionPath(req.Path, req.Relay) ||
 		(pairing && req.Path != "relay") {
 		failure(w, "authorize session route", errSessionInput)
 		return
@@ -115,7 +117,7 @@ func (a *API) authorizeSessionRoute(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return err
 		}
-		if !ok || g.Controller != req.Controller || g.Target != req.Target {
+		if !ok || g.Controller != req.Controller || g.Target != req.Target || g.TargetRustDeskID != req.TargetRustDesk {
 			return errSessionDenied
 		}
 		reason, group, err := g.revalidate(ctx, tx)

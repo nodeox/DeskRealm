@@ -112,7 +112,7 @@ bash scripts/deskrealm-m2-test sources
 | API | 认证及结果 |
 | --- | --- |
 | `POST /v1/sessions` | 主控的 `dru_`。提交 `request_id` UUID、`purpose`、`requested_actions` 和一个目标选择方式，默认 `confirmation_mode` 为 `attended`。首次签发返回 201，同主体同绑定同载荷重试返回 200 和原签发结果。 |
-| `POST /v1/internal/managed/rendezvous/authorize` | 会合的 `drr_`。提交 `session_id`、`grant_id`、`grant_signature`、`controller_device_id`、`target_device_id`、`connection_id`、`path`，中继路径另提交 `relay_id`。中心核对授权与两端并保存候选路径，成功返回 204。 |
+| `POST /v1/internal/managed/rendezvous/authorize` | 会合的 `drr_`。提交 `session_id`、`grant_id`、`grant_signature`、`controller_device_id`、`target_device_id`、`target_rustdesk_id`、`connection_id`、`path`，中继路径另提交 `relay_id`。中心核对授权、两端和调度使用的目标 RustDesk ID，再保存候选路径，成功返回 204。 |
 | `POST /v1/internal/managed/relay/paired` | 中继的 `drl_`。以相同字段报告该中继已配对的双方，配对须对应已有的会合候选路径。成功返回 204。 |
 | `POST /v1/sessions/{id}/redeem` | 授权目标设备的 `drd_`。提交 `grant_id`、`grant_signature`、`connection_id`、`path`、可选 `relay_id`、`channel_sha256`、双方随机数 `controller_nonce` 和 `target_nonce`、双方种类 `04` 的签名 `controller_signature` 和 `target_signature`。有人值守还需 `confirmed_actions` 及种类 `06` 的 `consent_signature`。 |
 
