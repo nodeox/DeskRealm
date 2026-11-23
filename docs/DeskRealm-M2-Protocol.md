@@ -191,15 +191,18 @@ TCP 的绑定摘要使用 HMAC-SHA256，密钥为 RustDesk 方向密钥协商中
 | `DESKREALM_MANAGED_RUSTDESK_ID`、`DESKREALM_MANAGED_RENDEZVOUS_ADDRESS` | 与批准记录绑定的 RustDesk ID，以及会合服务的主机和端口。 |
 | `DESKREALM_MANAGED_RELAY_ID`、`DESKREALM_MANAGED_RELAY_ADDRESS` | 可选，启用中继时两项同时配置，使用与服务一致的中继 ID、主机和端口。 |
 | `DESKREALM_MANAGED_CONTROLLER_CREDENTIAL_FILE`、`DESKREALM_MANAGED_PURPOSE` | 主控读取已绑定到本设备的 `dru_` 凭据文件。用途可选，默认为 `helpdesk`。 |
-| `DESKREALM_MANAGED_INPUT` | 主控默认只请求查看。设置为 `1` 时同时请求键鼠，最终仍以中心策略、本地确认和核销返回的权限为准。`0` 保持只读。 |
+| `DESKREALM_MANAGED_INPUT` | 设置为 `1` 时附加键鼠请求。默认为 `0`。 |
+| `DESKREALM_MANAGED_AUDIO` | 设置为 `1` 时附加受控端系统音频请求。默认为 `0`。 |
 
-受控端用设备签名完成中心挑战并定期发送心跳，按组织、设备和密钥版本核对中心策略。策略校验通过后才应用版本及动作集合，并签发应用回执。遇到支持上报的策略字段错误时签发失败回执，暂停新准入。主控当前从桌面入口申请有人值守的查看或查看与键鼠，界面的强制中继选项决定申请的连接路径。
+受控端用设备签名完成中心挑战并定期发送心跳，按组织、设备和密钥版本核对中心策略。策略校验通过后才应用版本及动作集合，并签发应用回执。遇到支持上报的策略字段错误时签发失败回执，暂停新准入。主控从桌面入口发起有人值守的查看请求，可独立附加键鼠及音频。有效权限以中心策略、本地确认和核销结果为准。界面的强制中继选项决定申请的连接路径。
 
 Windows 本地确认发送到当前解锁的物理控制台，显示此次授权的动作，默认拒绝。无可用控制台、超时或同时已有一条确认时拒绝。有效核销且中心状态为活动后，受控端订阅主显示器原生视频，主控用 RustDesk 解码。当前每台受控端同时接受一个会话。受控端在订阅、帧入队和发送前检查许可，使用有界帧队列。
 
-键鼠要求独立的 `input` 授权。Windows 受控输入只在已解锁的活动物理控制台内执行。Linux 开发验证使用 X11。当前接入物理映射键盘、主屏绝对鼠标移动、左中右键和垂直滚轮。受控端在入队和本地执行前核对权限，丢弃来自暂停前的旧事件，释放本会话仍按下的键和鼠标按钮。撤销、到期、控制台锁定或连接关闭时，受控端先停止输入及采集线程，再提交停止回执。音频、剪贴板、文件传输和录制尚未启用。
+键鼠要求独立的 `input` 授权。Windows 受控输入只在已解锁的活动物理控制台内执行。Linux 开发验证使用 X11。当前接入物理映射键盘、主屏绝对鼠标移动、左中右键和垂直滚轮。受控端在入队和本地执行前核对权限，丢弃来自暂停前的旧事件，释放本会话仍按下的键和鼠标按钮。
 
-`bash scripts/deskrealm-m2-test managed-interop` 运行隔离传输用例和签名向量，并检查启用受管入口的 Linux RustDesk Rust 库编译。`bash scripts/deskrealm-m2-test managed-view` 和 `bash scripts/deskrealm-m2-test managed-input` 用 Xvfb 分别验证原生采集启停和本地键鼠执行、释放及队列失效。Windows 原生制品、真实显示、键鼠和实际本地确认仍需 Windows 环境验证。
+音频要求独立的 `audio` 授权。受控端在已解锁的 Windows 物理控制台使用 WASAPI 回环采集默认系统输出，单向发送到主控。主控依据核销权限和受控端的音频许可接收并播放。受控端丢弃暂停前及排队达 150 毫秒的音频包。撤销、到期、控制台锁定或连接关闭后，受控端停止采集，清理输入及采集线程后提交停止回执。剪贴板和文件传输待接入。
+
+`bash scripts/deskrealm-m2-test managed-interop` 运行隔离传输用例和签名向量，并检查启用受管入口的 Linux RustDesk Rust 库编译。`bash scripts/deskrealm-m2-test managed-view` 和 `bash scripts/deskrealm-m2-test managed-input` 用 Xvfb 分别验证原生采集启停和本地键鼠执行、释放及队列失效。`bash scripts/deskrealm-m2-test managed-audio` 验证音频消息权限、有效格式、Opus 编解码和过期队列丢弃。Windows 原生制品、真实显示、键鼠、WASAPI 采集、播放和实际本地确认仍需 Windows 环境验证。
 
 ## 原生构建入口与证据
 

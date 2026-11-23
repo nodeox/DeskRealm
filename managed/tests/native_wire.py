@@ -130,6 +130,7 @@ def main():
     modes.add_argument("--desktop", action="store_true", help="check desktop routing and run native interoperability")
     modes.add_argument("--view", action="store_true", help="run the managed capture and message tests on X11")
     modes.add_argument("--input", action="store_true", help="run the managed input dispatch and cleanup tests on X11")
+    modes.add_argument("--audio", action="store_true", help="run managed audio permission and Opus queue tests")
     arguments = parser.parse_args()
     # Use a Docker-mountable path on macOS, even when TMPDIR is a per-user path.
     directory = os.environ.get("DESKREALM_NATIVE_TMPDIR", "/tmp")
@@ -143,6 +144,11 @@ def main():
             if actual.read_bytes() != canonical:
                 raise RuntimeError(f"{target}: managed protocol differs from the reviewed source")
         verify_schemas(source / "client", source / "server")
+        if arguments.audio:
+            cargo(source / "client", scratch / "client-cache", desktop_image(scratch),
+                  "test", "--locked", "--lib", "--no-default-features", "--features",
+                  DESKTOP_FEATURES, "managed_audio_", required="test result: ok. 2 passed")
+            return
         if arguments.view or arguments.input:
             selector, expected = ("managed_input_", 2) if arguments.input else ("managed_view_", 3)
             check_x11(source / "client", scratch / "client-cache", scratch, selector, expected)

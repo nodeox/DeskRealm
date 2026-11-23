@@ -26,6 +26,14 @@ def decoded(raw):
     return base64.urlsafe_b64decode(raw + "==")
 
 
+def confirmed_mask(purpose):
+    if purpose.endswith("-audio"):
+        return 5, ["view", "audio"]
+    if purpose.endswith("-input"):
+        return 3, ["view", "input"]
+    return 1, ["view"]
+
+
 class SessionFixture(Fixture):
     def __init__(self, path):
         super().__init__(path)
@@ -209,11 +217,12 @@ class SessionFixture(Fixture):
                 return 401, {}
             if body["target_rustdesk_id"] != TARGET or body["confirmation_mode"] != "attended":
                 return 403, {}
-            if body["requested_actions"] != ["view", "input"]:
-                return 403, {}
             purpose = body["purpose"]
+            allowed, actions = confirmed_mask(purpose) if purpose.endswith("-audio") else (3, ["view", "input"])
+            if body["requested_actions"] != actions:
+                return 403, {}
             route = Route(self, "relay" if purpose.startswith("relay-") or purpose == "deny-redeem" else "direct",
-                          allowed=3, purpose=purpose, expired=purpose == "expired")
+                          allowed=allowed, purpose=purpose, expired=purpose == "expired")
             # The controller chooses its connection UUID on grant receipt.
             route.connection = None
             return 201, {
@@ -223,7 +232,7 @@ class SessionFixture(Fixture):
                 "controller_key_sha256": hashlib.sha256(self.controller.public).hexdigest(),
                 "target_key_sha256": hashlib.sha256(self.target.public).hexdigest(),
                 "controller_rustdesk_id": "10700001", "target_rustdesk_id": TARGET,
-                "policy_version": 1, "allowed_actions": ["view", "input"],
+                "policy_version": 1, "allowed_actions": actions,
                 "confirmation_mode": "attended", "purpose": purpose,
                 "issued_ms": route.issued, "expires_ms": route.expires, "signature": b64(route.signature),
             }
@@ -240,7 +249,7 @@ class SessionFixture(Fixture):
             return 409, {}
         self.redemptions[route.session] = body
         now = time.time_ns() // 1_000_000
-        confirmed = ["view", "input"] if route.purpose.endswith("-input") else ["view"]
+        _, confirmed = confirmed_mask(route.purpose)
         return 200, {
             "session_id": str(route.session), "connection_id": str(route.connection),
             "path": route.path, "relay_id": RELAY_ID if route.path == "relay" else "",
@@ -267,8 +276,7 @@ class SessionFixture(Fixture):
             return False
         if decoded(body["target_signature"]) != self.target.sign(signed_frame(4, [b"\x02", *common])):
             return False
-        confirmed = ["view", "input"] if route.purpose.endswith("-input") else ["view"]
-        mask = 3 if route.purpose.endswith("-input") else 1
+        mask, confirmed = confirmed_mask(route.purpose)
         consent = signed_frame(6, [route.bound, route.session.bytes, route.connection.bytes, channel, bytes([mask])])
         return body["confirmed_actions"] == confirmed and decoded(body["consent_signature"]) == self.target.sign(consent)
 
@@ -292,9 +300,10 @@ def main():
                 assert fixture.results == [("direct-admit", True), ("relay-admit", True),
                                            ("deny-redeem", True), ("direct-clean", True),
                                            ("direct-forbidden", True), ("direct-input", True),
-                                           ("relay-input", True), ("direct-supervised", True),
+                                           ("relay-input", True), ("direct-audio", True),
+                                           ("relay-audio", True), ("direct-supervised", True),
                                            ("relay-supervised", True)]
-                assert len(fixture.redemptions) == 8 and len(fixture.renewals) == 3
+                assert len(fixture.redemptions) == 10 and len(fixture.renewals) == 3
                 assert fixture.stopped == fixture.redemptions.keys()
                 assert fixture.revoked_renewals == {
                     route.session for route in fixture.routes.values() if route.purpose == "relay-admit"

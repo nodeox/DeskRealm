@@ -1,0 +1,1081 @@
+diff --git a/libs/base/tests/deskrealm_interop.rs b/libs/base/tests/deskrealm_interop.rs
+index 023d315..f400be1 100644
+--- a/libs/base/tests/deskrealm_interop.rs
++++ b/libs/base/tests/deskrealm_interop.rs
+@@ -91,9 +91,12 @@ async fn managed_endpoint_admission_on_direct_and_relay() -> ResultType<()> {
+         (Path::Direct, "direct-forbidden", Some(1), true),
+         (Path::Direct, "direct-input", Some(3), true),
+         (Path::Relay, "relay-input", Some(3), true),
++        (Path::Direct, "direct-audio", Some(5), true),
++        (Path::Relay, "relay-audio", Some(5), true),
+         (Path::Direct, "direct-supervised", Some(1), true),
+         (Path::Relay, "relay-supervised", Some(1), true),
+     ] {
++        let requested = if purpose.ends_with("-audio") { 5 } else { 3 };
+         let controller_run = async {
+             let route = authority
+                 .issue(
+@@ -102,7 +105,7 @@ async fn managed_endpoint_admission_on_direct_and_relay() -> ResultType<()> {
+                     DEVICE_RUSTDESK_ID,
+                     Uuid::new_v4(),
+                     purpose,
+-                    3,
++                    requested,
+                     true,
+                 )
+                 .await?;
+@@ -147,13 +150,13 @@ async fn managed_endpoint_admission_on_direct_and_relay() -> ResultType<()> {
+                         relay_id,
+                         policy: AppliedPolicy {
+                             version: if purpose == "policy-mismatch" { 2 } else { 1 },
+-                            allowed_mask: 3,
++                            allowed_mask: requested,
+                             unattended_purposes: &[],
+                         },
+                     },
+                     |request| async move {
+                         assert_eq!(request.purpose, purpose);
+-                        assert_eq!(request.allowed_mask, 3);
++                        assert_eq!(request.allowed_mask, requested);
+                         selection
+                     },
+                 )
+@@ -178,6 +181,40 @@ async fn managed_endpoint_admission_on_direct_and_relay() -> ResultType<()> {
+             assert_eq!(client.lease_until_ms, host.until_ms);
+             assert_eq!(host.credential(), bearer("drc_", 13));
+             use base::deskrealm_endpoint::{ManagedAction, SessionStatus, StopReason};
++            if purpose.ends_with("-audio") {
++                assert!(host.permits(ManagedAction::Audio));
++                assert!(!host.permits(ManagedAction::Input));
++                let run = authority.run_target(
++                    target_stream,
++                    host,
++                    || Some(bearer("drd_", 12)),
++                    || false,
++                    |mut stream, access| async move {
++                        while !access.permits(ManagedAction::Audio) {
++                            tokio::time::sleep(Duration::from_millis(25)).await;
++                        }
++                        assert!(!access.permits(ManagedAction::Input));
++                        let mut frame = Message::new();
++                        frame.mut_audio_frame().data = Bytes::from_static(b"fixture-audio");
++                        if stream.send(&frame).await.is_ok() {
++                            StopReason::LocalEnd
++                        } else {
++                            StopReason::ConnectionLost
++                        }
++                    },
++                    || async { Ok(()) },
++                );
++                let receive = async {
++                    let bytes = controller_stream.next().await.expect("audio frame")?;
++                    let frame = Message::parse_from_bytes(&bytes)?;
++                    assert_eq!(frame.audio_frame().data.as_ref(), b"fixture-audio");
++                    Ok::<_, hbb_common::anyhow::Error>(())
++                };
++                let (reason, frame) = timeout(WAIT, async { tokio::join!(run, receive) }).await?;
++                frame?;
++                assert_eq!(reason?, StopReason::LocalEnd);
++                continue;
++            }
+             if purpose.ends_with("-input") {
+                 assert!(host.permits(ManagedAction::Input));
+                 let mut received = false;
+diff --git a/src/client.rs b/src/client.rs
+index 1494bae..ef5a059 100644
+--- a/src/client.rs
++++ b/src/client.rs
+@@ -386,7 +386,7 @@ impl Client {
+             &'static str,
+         ),
+         (i32, String),
+-        bool,
++        u8,
+     )> {
+         debug_assert!(peer == interface.get_id());
+         interface.update_direct(None);
+@@ -396,9 +396,9 @@ impl Client {
+             if conn_type != ConnType::DEFAULT_CONN {
+                 bail!("managed mode requires the desktop connection entry");
+             }
+-            let (stream, direct, input) =
++            let (stream, direct, allowed) =
+                 crate::deskrealm_desktop::connect(peer, interface.is_force_relay()).await?;
+-            return Ok(((stream, direct, None, None, "TCP"), (0, String::new()), input));
++            return Ok(((stream, direct, None, None, "TCP"), (0, String::new()), allowed));
+         }
+         match Self::_start(peer, key, token, conn_type, interface.clone()).await {
+             Err(err) => {
+@@ -420,7 +420,7 @@ impl Client {
+                         interface.get_lch().write().unwrap().set_direct_failure(n);
+                     }
+                 }
+-                Ok((x.0, x.1, false))
++                Ok((x.0, x.1, 0))
+             }
+         }
+     }
+@@ -4183,6 +4183,53 @@ pub fn start_audio_thread() -> MediaSender {
+     audio_sender
+ }
+ 
++#[cfg(not(any(target_os = "android", target_os = "ios")))]
++struct ManagedPlayback {
++    sender: mpsc::SyncSender<(AudioFormat, AudioFrame)>,
++    stopped: Arc<std::sync::atomic::AtomicBool>,
++}
++
++#[cfg(not(any(target_os = "android", target_os = "ios")))]
++impl ManagedPlayback {
++    fn start() -> ResultType<Self> {
++        use std::sync::atomic::{AtomicBool, Ordering};
++
++        let stopped = Arc::new(AtomicBool::new(false));
++        let cancelled = stopped.clone();
++        let (sender, receiver) = mpsc::sync_channel(8);
++        std::thread::Builder::new()
++            .name("managed-audio-playback".into())
++            .spawn(move || {
++                let mut output = AudioHandler::default();
++                let mut installed = false;
++                while let Ok((format, frame)) = receiver.recv() {
++                    if cancelled.load(Ordering::Acquire) {
++                        break;
++                    }
++                    if !installed {
++                        output.handle_format(format);
++                        installed = true;
++                    }
++                    if !cancelled.load(Ordering::Acquire) {
++                        output.handle_frame(frame);
++                    }
++                }
++            })?;
++        Ok(Self { sender, stopped })
++    }
++
++    fn enqueue(&self, format: &AudioFormat, frame: AudioFrame) {
++        let _ = self.sender.try_send((format.clone(), frame));
++    }
++}
++
++#[cfg(not(any(target_os = "android", target_os = "ios")))]
++impl Drop for ManagedPlayback {
++    fn drop(&mut self) {
++        self.stopped.store(true, std::sync::atomic::Ordering::Release);
++    }
++}
++
+ #[inline]
+ fn fps_calculate(
+     skip_beginning: &mut usize,
+diff --git a/src/client/io_loop.rs b/src/client/io_loop.rs
+index 47621d2..b40592c 100644
+--- a/src/client/io_loop.rs
++++ b/src/client/io_loop.rs
+@@ -79,7 +79,8 @@ fn managed_view_refresh(message: &Message) -> bool {
+     )
+ }
+ 
+-fn managed_view_response(message: &Message, connected: bool, input: bool) -> bool {
++fn managed_view_response(message: &Message, connected: bool, actions: u8) -> bool {
++    use base::deskrealm_endpoint::ManagedAction;
+     match message.union.as_ref() {
+         Some(message::Union::VideoFrame(frame)) => connected && frame.display == 0,
+         Some(message::Union::LoginResponse(response)) => !connected
+@@ -95,7 +96,11 @@ fn managed_view_response(message: &Message, connected: bool, input: bool) -> boo
+             Some(misc::Union::CloseReason(_)) => true,
+             Some(misc::Union::PermissionInfo(permission)) => {
+                 !permission.enabled
+-                    || (input && permission.permission.enum_value() == Ok(Permission::Keyboard))
++                    || match permission.permission.enum_value() {
++                        Ok(Permission::Keyboard) => actions & ManagedAction::Input as u8 != 0,
++                        Ok(Permission::Audio) => actions & ManagedAction::Audio as u8 != 0,
++                        _ => false,
++                    }
+             }
+             _ => false,
+         },
+@@ -108,18 +113,18 @@ fn managed_view_response(message: &Message, connected: bool, input: bool) -> boo
+ fn managed_view_does_not_dispatch_legacy_or_other_capabilities() {
+     let mut message = Message::new();
+     message.set_hash(Default::default());
+-    assert!(!managed_view_response(&message, false, false));
++    assert!(!managed_view_response(&message, false, 0));
+     message.set_clipboard(Default::default());
+-    assert!(!managed_view_response(&message, true, false));
++    assert!(!managed_view_response(&message, true, 0));
+     message.set_file_action(Default::default());
+-    assert!(!managed_view_response(&message, true, false));
++    assert!(!managed_view_response(&message, true, 0));
+     message.set_audio_frame(Default::default());
+-    assert!(!managed_view_response(&message, true, false));
++    assert!(!managed_view_response(&message, true, 0));
+     message.set_video_frame(Default::default());
+-    assert!(!managed_view_response(&message, false, false));
+-    assert!(managed_view_response(&message, true, false));
++    assert!(!managed_view_response(&message, false, 0));
++    assert!(managed_view_response(&message, true, 0));
+     message.mut_video_frame().display = 1;
+-    assert!(!managed_view_response(&message, true, false));
++    assert!(!managed_view_response(&message, true, 0));
+     let mut control = Misc::new();
+     control.set_permission_info(PermissionInfo {
+         permission: Permission::Keyboard.into(),
+@@ -127,10 +132,105 @@ fn managed_view_does_not_dispatch_legacy_or_other_capabilities() {
+         ..Default::default()
+     });
+     message.set_misc(control);
+-    assert!(!managed_view_response(&message, false, false));
+-    assert!(managed_view_response(&message, false, true));
++    assert!(!managed_view_response(&message, false, 0));
++    assert!(managed_view_response(&message, false, base::deskrealm_endpoint::ManagedAction::Input as u8));
+     message.mut_misc().mut_permission_info().permission = Permission::File.into();
+-    assert!(!managed_view_response(&message, true, true));
++    assert!(!managed_view_response(&message, true, base::deskrealm_endpoint::ManagedAction::Input as u8));
++}
++
++#[cfg(not(any(target_os = "android", target_os = "ios")))]
++#[derive(Default)]
++struct ManagedAudio {
++    enabled: bool,
++    playback: Option<super::ManagedPlayback>,
++    format: Option<AudioFormat>,
++}
++
++#[cfg(not(any(target_os = "android", target_os = "ios")))]
++impl ManagedAudio {
++    // Returns true for audio media, which must bypass the legacy playback queue.
++    fn handle(&mut self, message: &mut Message, admitted: bool, connected: bool, muted: bool) -> bool {
++        use crate::server::managed_audio;
++
++        if let Some(misc::Union::PermissionInfo(permission)) = message.misc().union.as_ref() {
++            if permission.permission.enum_value() == Ok(Permission::Audio) {
++                self.enabled = admitted && permission.enabled;
++                if !self.enabled {
++                    self.playback.take();
++                    self.format.take();
++                }
++            }
++        }
++
++        if muted {
++            self.playback.take();
++        }
++        if message.misc().has_audio_format() {
++            if self.enabled && connected {
++                self.format = managed_audio::format(message).cloned();
++                // Drop queued data and decoded PCM from the previous capture generation.
++                self.playback.take();
++            }
++            return true;
++        }
++        if !message.has_audio_frame() {
++            return false;
++        }
++        if self.enabled && connected && !muted && managed_audio::valid_frame(&message.audio_frame().data) {
++            if let Some(format) = self.format.as_ref() {
++                if self.playback.is_none() {
++                    self.playback = super::ManagedPlayback::start().ok();
++                }
++                if let Some(playback) = &self.playback {
++                    playback.enqueue(format, message.take_audio_frame());
++                }
++            }
++        }
++        true
++    }
++}
++
++#[cfg(all(test, not(any(target_os = "android", target_os = "ios"))))]
++#[test]
++fn managed_audio_requires_independent_permission_and_valid_format() {
++    use base::deskrealm_endpoint::ManagedAction;
++    let mut audio = ManagedAudio::default();
++    let mut message = Message::new();
++    message.mut_misc().set_permission_info(PermissionInfo {
++        permission: Permission::Audio.into(), enabled: true, ..Default::default()
++    });
++    assert!(!managed_view_response(&message, false, ManagedAction::Input as u8));
++    assert!(managed_view_response(&message, false, ManagedAction::Audio as u8));
++    assert!(!audio.handle(&mut message, false, true, false));
++    assert!(!audio.enabled);
++    assert!(!audio.handle(&mut message, true, true, false));
++    assert!(audio.enabled);
++    message.mut_misc().set_audio_format(AudioFormat {
++        sample_rate: 48000, channels: 2, ..Default::default()
++    });
++    assert!(audio.handle(&mut message, true, true, true));
++    assert!(audio.format.is_some());
++    message.mut_misc().mut_audio_format().channels = 16;
++    assert!(audio.handle(&mut message, true, true, false));
++    assert!(audio.format.is_none());
++    message.set_audio_frame(AudioFrame { data: vec![1; 5000].into(), ..Default::default() });
++    assert!(audio.handle(&mut message, true, true, false));
++    assert!(audio.playback.is_none());
++    message.mut_misc().set_audio_format(AudioFormat {
++        sample_rate: 48000,
++        channels: 2,
++        ..Default::default()
++    });
++    assert!(audio.handle(&mut message, true, true, false));
++    assert!(audio.format.is_some());
++    message.mut_misc().set_permission_info(PermissionInfo {
++        permission: Permission::Audio.into(),
++        enabled: false,
++        ..Default::default()
++    });
++    assert!(!audio.handle(&mut message, true, true, false));
++    assert!(!audio.enabled);
++    assert!(audio.format.is_none());
+ }
+ 
+ pub struct Remote<T: InvokeUiSession> {
+@@ -268,7 +368,7 @@ impl<T: InvokeUiSession> Remote<T> {
+         )
+         .await
+         {
+-            Ok(((mut peer, direct, pk, kcp, stream_type), (feedback, rendezvous_server), _managed_input)) => {
++            Ok(((mut peer, direct, pk, kcp, stream_type), (feedback, rendezvous_server), _managed_actions)) => {
+                 self.handler
+                     .connection_round_state
+                     .lock()
+@@ -315,7 +415,7 @@ impl<T: InvokeUiSession> Remote<T> {
+                 self.handler.update_direct(Some(direct));
+                 #[cfg(not(any(target_os = "android", target_os = "ios")))]
+                 if managed {
+-                    self.managed_view_loop(&mut peer, _managed_input).await;
++                    self.managed_view_loop(&mut peer, _managed_actions).await;
+                     self.handle_disconnected(round);
+                     return;
+                 }
+@@ -376,7 +476,8 @@ impl<T: InvokeUiSession> Remote<T> {
+                                             self.handler.update_received(true);
+                                         }
+                                         self.data_count.fetch_add(bytes.len(), Ordering::Relaxed);
+-                                        if !self.handle_msg_from_peer(bytes, &mut peer, None).await {
++                                        let message = Message::parse_from_bytes(bytes).ok();
++                                        if !self.handle_msg_from_peer(message, &mut peer, None).await {
+                                             break
+                                         }
+                                     }
+@@ -1764,7 +1865,11 @@ impl<T: InvokeUiSession> Remote<T> {
+     }
+ 
+     #[cfg(not(any(target_os = "android", target_os = "ios")))]
+-    async fn managed_view_loop(&mut self, peer: &mut Stream, input_allowed: bool) {
++    async fn managed_view_loop(&mut self, peer: &mut Stream, actions: u8) {
++        use base::deskrealm_endpoint::ManagedAction;
++        let input_allowed = actions & ManagedAction::Input as u8 != 0;
++        let audio_admitted = actions & ManagedAction::Audio as u8 != 0;
++        let mut audio = ManagedAudio::default();
+         *self.handler.server_keyboard_enabled.write().unwrap() = false;
+         let mut deadline = Instant::now() + SEC30;
+         loop {
+@@ -1782,7 +1887,12 @@ impl<T: InvokeUiSession> Remote<T> {
+                     if !self.is_connected {
+                         self.handler.update_received(true);
+                     }
+-                    if !self.handle_msg_from_peer(&bytes, peer, Some(input_allowed)).await {
++                    let Ok(mut message) = Message::parse_from_bytes(&bytes) else { continue };
++                    let muted = self.handler.lc.read().unwrap().disable_audio.v;
++                    if audio.handle(&mut message, audio_admitted, self.is_connected, muted) {
++                        continue;
++                    }
++                    if !self.handle_msg_from_peer(Some(message), peer, Some(actions)).await {
+                         break;
+                     }
+                 }
+@@ -1811,17 +1921,17 @@ impl<T: InvokeUiSession> Remote<T> {
+ 
+     async fn handle_msg_from_peer(
+         &mut self,
+-        data: &[u8],
++        message: Option<Message>,
+         peer: &mut Stream,
+-        managed_input: Option<bool>,
++        managed_actions: Option<u8>,
+     ) -> bool {
+-        if let Ok(msg_in) = Message::parse_from_bytes(data) {
+-            if let Some(input) = managed_input {
+-                if !managed_view_response(&msg_in, self.is_connected, input) {
++        if let Some(msg_in) = message {
++            if let Some(actions) = managed_actions {
++                if !managed_view_response(&msg_in, self.is_connected, actions) {
+                     return true;
+                 }
+             }
+-            let managed = managed_input.is_some();
++            let managed = managed_actions.is_some();
+             match msg_in.union {
+                 Some(message::Union::VideoFrame(vf)) => {
+                     if !self.first_frame {
+diff --git a/src/deskrealm_desktop.rs b/src/deskrealm_desktop.rs
+index 840b910..9d8fb66 100644
+--- a/src/deskrealm_desktop.rs
++++ b/src/deskrealm_desktop.rs
+@@ -45,6 +45,7 @@ const SETTINGS: &[&str] = &[
+     "DESKREALM_MANAGED_CONTROLLER_CREDENTIAL_FILE",
+     "DESKREALM_MANAGED_PURPOSE",
+     "DESKREALM_MANAGED_INPUT",
++    "DESKREALM_MANAGED_AUDIO",
+ ];
+ const ONLINE_INTERVAL: Duration = Duration::from_secs(12);
+ const REGISTRATION_INTERVAL: Duration = Duration::from_secs(8);
+@@ -52,6 +53,7 @@ const REFRESH_MARGIN: Duration = Duration::from_secs(120);
+ const LOOKUP_TIMEOUT: Duration = Duration::from_secs(5);
+ const VIEW: u8 = ManagedAction::View as u8;
+ const INPUT: u8 = ManagedAction::Input as u8;
++const AUDIO: u8 = ManagedAction::Audio as u8;
+ 
+ pub(crate) fn enabled() -> bool {
+     cfg!(feature = "deskrealm-managed") || SETTINGS.iter().any(|var| env::var_os(var).is_some())
+@@ -69,6 +71,14 @@ fn optional(name: &'static str) -> ResultType<Option<String>> {
+     }
+ }
+ 
++fn requested_action(setting: &'static str, bit: u8) -> ResultType<u8> {
++    match optional(setting)?.as_deref() {
++        None | Some("0") => Ok(0),
++        Some("1") => Ok(bit),
++        Some(_) => bail!("invalid {}", setting),
++    }
++}
++
+ fn read_limited(path: &str, limit: u64) -> ResultType<Vec<u8>> {
+     let mut buffer = Vec::new();
+     File::open(FilePath::new(path))
+@@ -197,7 +207,7 @@ impl Desktop {
+     }
+ }
+ 
+-pub(crate) async fn connect(peer: &str, force_relay: bool) -> ResultType<(Stream, bool, bool)> {
++pub(crate) async fn connect(peer: &str, force_relay: bool) -> ResultType<(Stream, bool, u8)> {
+     if hbb_common::config::is_incoming_only() {
+         bail!("managed controller is unavailable in incoming-only mode");
+     }
+@@ -220,11 +230,9 @@ pub(crate) async fn connect(peer: &str, force_relay: bool) -> ResultType<(Stream
+     } else {
+         Path::Direct
+     };
+-    let requested = match optional("DESKREALM_MANAGED_INPUT")?.as_deref() {
+-        None | Some("0") => VIEW,
+-        Some("1") => VIEW | INPUT,
+-        Some(_) => bail!("invalid DESKREALM_MANAGED_INPUT"),
+-    };
++    let requested = VIEW
++        | requested_action("DESKREALM_MANAGED_INPUT", INPUT)?
++        | requested_action("DESKREALM_MANAGED_AUDIO", AUDIO)?;
+     let route = desktop
+         .authority
+         .issue(
+@@ -254,13 +262,9 @@ pub(crate) async fn connect(peer: &str, force_relay: bool) -> ResultType<(Stream
+     if admitted.allowed_mask & u32::from(VIEW) == 0 {
+         bail!("managed desktop requires screen permission");
+     }
+-    // Only the controller reads encoded video frames after admission.
++    // Only the controller reads encoded media frames after admission.
+     stream.set_max_packet_length(16 * 1024 * 1024);
+-    Ok((
+-        stream,
+-        path == Path::Direct,
+-        admitted.allowed_mask & u32::from(INPUT) != 0,
+-    ))
++    Ok((stream, path == Path::Direct, admitted.allowed_mask as u8))
+ }
+ 
+ pub(crate) type CurrentCredential = watch::Receiver<Option<Arc<DeviceCredential>>>;
+@@ -375,7 +379,7 @@ pub(crate) async fn authorize_target(
+         .ok_or_else(|| anyhow!("no managed policy applied"))?;
+     if grant.policy_version() != policy.version()
+         || grant.allowed_mask() & VIEW == 0
+-        || grant.allowed_mask() & !(VIEW | INPUT) != 0
++        || grant.allowed_mask() & !(VIEW | INPUT | AUDIO) != 0
+         || grant.allowed_mask() & !policy.allowed_mask() != 0
+     {
+         bail!("managed grant does not match locally applied policy");
+@@ -386,6 +390,9 @@ pub(crate) async fn authorize_target(
+     if grant.allowed_mask() & INPUT != 0 && !crate::server::managed_input::available() {
+         bail!("managed input is unavailable on this desktop");
+     }
++    if grant.allowed_mask() & AUDIO != 0 && !crate::server::managed_audio::available() {
++        bail!("managed system audio is unavailable on this desktop");
++    }
+     let capture = capture
+         .try_acquire_owned()
+         .map_err(|_| anyhow!("managed display is busy"))?;
+@@ -431,7 +438,7 @@ pub(crate) async fn authorize_target(
+             |request| async move { ask_local_user(request, prompts).await },
+         )
+         .await?;
+-    let view = crate::server::managed_view::Capture::new(capture, lease.allowed_mask & INPUT != 0);
++    let view = crate::server::managed_view::Capture::new(capture, lease.allowed_mask);
+     let worker = view.clone();
+     desktop
+         .authority
+diff --git a/src/server.rs b/src/server.rs
+index 196843f..2fa6103 100644
+--- a/src/server.rs
++++ b/src/server.rs
+@@ -75,6 +75,8 @@ mod connection;
+ pub(crate) mod managed_view;
+ #[cfg(not(any(target_os = "android", target_os = "ios")))]
+ pub(crate) mod managed_input;
++#[cfg(not(any(target_os = "android", target_os = "ios")))]
++pub(crate) mod managed_audio;
+ mod login_failure_check;
+ pub(crate) mod port_forward_mux;
+ pub mod display_service;
+diff --git a/src/server/audio_service.rs b/src/server/audio_service.rs
+index 7b5addb..aa0c957 100644
+--- a/src/server/audio_service.rs
++++ b/src/server/audio_service.rs
+@@ -196,6 +196,9 @@ mod audio_capture_error;
+ #[cfg(not(any(target_os = "linux", target_os = "android")))]
+ mod audio_capture_queue;
+ 
++#[cfg(windows)]
++pub(super) use cpal_impl::capture_managed_output;
++
+ #[cfg(not(any(target_os = "linux", target_os = "android")))]
+ mod cpal_impl {
+     use self::service::{Reset, ServiceSwap};
+@@ -246,7 +249,7 @@ mod cpal_impl {
+         sp.snapshot(|_sps: ServiceSwap<_>| Ok(()))?;
+         match &state.stream {
+             None => {
+-                state.stream = Some(play(&sp)?);
++                state.stream = Some(play(&sp, get_device()?, || true)?);
+             }
+             _ => {}
+         }
+@@ -263,7 +266,7 @@ mod cpal_impl {
+         sp.snapshot(|sps| {
+             match &state.stream {
+                 None => {
+-                    state.stream = Some(play(&sp)?);
++                    state.stream = Some(play(&sp, get_device()?, || true)?);
+                 }
+                 _ => {}
+             }
+@@ -290,6 +293,58 @@ mod cpal_impl {
+         }
+     }
+ 
++    #[cfg(windows)]
++    pub(in crate::server) fn capture_managed_output(
++        id: i32,
++        access: base::deskrealm_endpoint::SessionAccess,
++        sender: tokio::sync::mpsc::Sender<super::super::managed_audio::Packet>,
++        stopped: std::sync::mpsc::Receiver<()>,
++    ) -> ResultType<()> {
++        use super::super::managed_audio::{self, Feed};
++        use base::deskrealm_endpoint::ManagedAction;
++        use std::{sync::mpsc::RecvTimeoutError, time::Duration};
++
++        let service = GenericService::new(NAME.to_owned(), false);
++        let current = || access.generation(ManagedAction::Audio);
++        let mut active: Option<ActiveCaptureStream> = None;
++        let mut generation = None;
++        loop {
++            match stopped.try_recv() {
++                Err(std::sync::mpsc::TryRecvError::Empty) => {}
++                _ => break,
++            }
++            if !managed_audio::available() {
++                bail!("managed audio console is unavailable");
++            }
++            let next = current();
++            if generation != next {
++                service.on_unsubscribe(id);
++                active.take();
++                generation = next;
++                if let Some(next) = next {
++                    let stream = play(&service, get_loopback_device()?, || {
++                        current() == Some(next) && managed_audio::available()
++                    })?;
++                    service.on_subscribe(ConnInner::managed_audio(
++                        id,
++                        Feed::new(next, stream.format.clone(), sender.clone(), access.clone()),
++                    ));
++                    active = Some(stream);
++                }
++            }
++            if active.as_ref().is_some_and(|stream| stream.errors.needs_restart()) {
++                bail!("managed system audio device stopped");
++            }
++            match stopped.recv_timeout(Duration::from_millis(25)) {
++                Err(RecvTimeoutError::Timeout) => {}
++                _ => break,
++            }
++        }
++        service.on_unsubscribe(id);
++        drop(active);
++        Ok(())
++    }
++
+     #[derive(Clone, Copy)]
+     struct CaptureFrameProcessorConfig {
+         input_rate: u32,
+@@ -402,6 +457,11 @@ mod cpal_impl {
+         if !audio_input.is_empty() {
+             return get_audio_input(&audio_input);
+         }
++        get_loopback_device()
++    }
++
++    #[cfg(windows)]
++    fn get_loopback_device() -> ResultType<(Device, SupportedStreamConfig)> {
+         // The pinned CPAL uses event-driven WASAPI loopback here. Windows versions
+         // before Windows 10 1703 do not signal capture events, so system audio does
+         // not work on Win7. #16095 kept the same CPAL revision and loopback path;
+@@ -471,9 +531,12 @@ mod cpal_impl {
+         Ok((device, format))
+     }
+ 
+-    fn play(sp: &GenericService) -> ResultType<ActiveCaptureStream> {
++    fn play(
++        sp: &GenericService,
++        (device, config): (Device, SupportedStreamConfig),
++        permitted: impl FnOnce() -> bool,
++    ) -> ResultType<ActiveCaptureStream> {
+         use cpal::SampleFormat::*;
+-        let (device, config) = get_device()?;
+         let sp = sp.clone();
+         // Sample rate must be one of 8000, 12000, 16000, 24000, or 48000.
+         let sample_rate_0 = config.sample_rate().0;
+@@ -516,6 +579,9 @@ mod cpal_impl {
+             F64 => build_input_stream::<f64>(device, &config, output)?,
+             f => bail!("unsupported audio format: {:?}", f),
+         };
++        if !permitted() {
++            bail!("audio capture permission changed before startup");
++        }
+         stream.play()?;
+         #[cfg(target_os = "macos")]
+         log::info!("Audio capture start call succeeded");
+diff --git a/src/server/connection.rs b/src/server/connection.rs
+index 3546ee0..8c5f461 100644
+--- a/src/server/connection.rs
++++ b/src/server/connection.rs
+@@ -249,6 +249,8 @@ pub struct ConnInner {
+         base::deskrealm_endpoint::SessionAccess,
+         mpsc::Sender<(Instant, Arc<Message>)>,
+     )>,
++    #[cfg(windows)]
++    managed_audio: Option<Arc<super::managed_audio::Feed>>,
+ }
+ 
+ struct InputMouse {
+@@ -491,6 +493,17 @@ impl ConnInner {
+     }
+ }
+ 
++#[cfg(windows)]
++impl ConnInner {
++    pub(super) fn managed_audio(id: i32, feed: super::managed_audio::Feed) -> Self {
++        Self {
++            id,
++            managed_audio: Some(Arc::new(feed)),
++            ..Default::default()
++        }
++    }
++}
++
+ impl Subscriber for ConnInner {
+     #[inline]
+     fn id(&self) -> i32 {
+@@ -508,6 +521,11 @@ impl Subscriber for ConnInner {
+             }
+             return;
+         }
++        #[cfg(windows)]
++        if let Some(feed) = &self.managed_audio {
++            feed.send(msg);
++            return;
++        }
+         // Send SwitchDisplay on the same channel as VideoFrame to avoid send order problems.
+         let tx_by_video = match &msg.union {
+             Some(message::Union::VideoFrame(_)) => true,
+diff --git a/src/server/managed_audio.rs b/src/server/managed_audio.rs
+new file mode 100644
+index 0000000..7a29273
+--- /dev/null
++++ b/src/server/managed_audio.rs
+@@ -0,0 +1,217 @@
++//! System-output audio after a managed session has been redeemed.
++
++#[cfg(windows)]
++use base::deskrealm_endpoint::ManagedAction;
++#[cfg(any(windows, test))]
++use base::message_proto::message;
++use base::{
++    deskrealm_endpoint::SessionAccess,
++    message_proto::{misc, AudioFormat, Message},
++};
++use hbb_common::{tokio::sync::mpsc, ResultType};
++use std::{sync::Arc, time::Instant};
++
++const MAX_OPUS_BYTES: usize = 4096;
++
++pub(crate) fn valid_format(format: &AudioFormat) -> bool {
++    matches!(format.channels, 1 | 2)
++        && matches!(format.sample_rate, 8000 | 12000 | 16000 | 24000 | 48000)
++}
++
++pub(crate) fn valid_frame(data: &[u8]) -> bool {
++    !data.is_empty() && data.len() <= MAX_OPUS_BYTES
++}
++
++#[cfg(windows)]
++pub(crate) fn available() -> bool {
++    super::managed_input::available()
++}
++
++#[cfg(not(windows))]
++pub(crate) fn available() -> bool {
++    false
++}
++
++pub(super) struct Packet {
++    pub generation: u64,
++    pub queued_at: Instant,
++    pub format: Arc<Message>,
++    pub frame: Arc<Message>,
++}
++
++#[cfg(windows)]
++pub(super) struct Feed {
++    generation: u64,
++    format: Arc<Message>,
++    sender: mpsc::Sender<Packet>,
++    access: SessionAccess,
++}
++
++#[cfg(windows)]
++impl Feed {
++    pub(super) fn new(
++        generation: u64,
++        format: Arc<Message>,
++        sender: mpsc::Sender<Packet>,
++        access: SessionAccess,
++    ) -> Self {
++        Self {
++            generation,
++            format,
++            sender,
++            access,
++        }
++    }
++
++    pub(super) fn send(&self, frame: Arc<Message>) {
++        if self.access.generation(ManagedAction::Audio) == Some(self.generation) {
++            push(&self.sender, self.generation, &self.format, frame);
++        }
++    }
++}
++
++#[cfg(any(windows, test))]
++fn push(
++    sender: &mpsc::Sender<Packet>,
++    generation: u64,
++    format: &Arc<Message>,
++    frame: Arc<Message>,
++) {
++    if matches!(&frame.union, Some(message::Union::AudioFrame(audio)) if valid_frame(&audio.data)) {
++        let _ = sender.try_send(Packet {
++            generation,
++            queued_at: Instant::now(),
++            format: format.clone(),
++            frame,
++        });
++    }
++}
++
++pub(super) fn is_current(packet: &Packet, generation: Option<u64>) -> bool {
++    generation == Some(packet.generation) && packet.queued_at.elapsed().as_millis() < 150
++}
++
++pub(crate) fn format(message: &Message) -> Option<&AudioFormat> {
++    if let Some(misc::Union::AudioFormat(format)) = message.misc().union.as_ref() {
++        return valid_format(format).then_some(format);
++    }
++    None
++}
++
++pub(super) struct Capture {
++    #[cfg(windows)]
++    stop: Option<std::sync::mpsc::Sender<()>>,
++    #[cfg(windows)]
++    worker: Option<std::thread::JoinHandle<()>>,
++}
++
++impl Capture {
++    #[cfg(windows)]
++    pub(super) fn start(
++        id: i32,
++        access: SessionAccess,
++        sender: mpsc::Sender<Packet>,
++    ) -> ResultType<Self> {
++        use hbb_common::anyhow::anyhow;
++        if !access.permits(ManagedAction::Audio) || !available() {
++            return Err(anyhow!("managed system audio is not authorized"));
++        }
++        let (stop, stopped) = std::sync::mpsc::channel();
++        let worker = std::thread::Builder::new()
++            .name("managed-audio-capture".into())
++            .spawn(move || {
++                if let Err(error) =
++                    super::audio_service::capture_managed_output(id, access, sender, stopped)
++                {
++                    hbb_common::log::debug!("managed audio capture stopped: {error}");
++                }
++            })?;
++        Ok(Self {
++            stop: Some(stop),
++            worker: Some(worker),
++        })
++    }
++
++    #[cfg(not(windows))]
++    pub(super) fn start(
++        _id: i32,
++        _access: SessionAccess,
++        _sender: mpsc::Sender<Packet>,
++    ) -> ResultType<Self> {
++        hbb_common::bail!("managed system audio requires Windows");
++    }
++
++    pub(super) fn stop(&mut self) -> ResultType<()> {
++        #[cfg(windows)]
++        {
++            self.stop.take();
++            if let Some(worker) = self.worker.take() {
++                worker
++                    .join()
++                    .map_err(|_| hbb_common::anyhow::anyhow!("managed audio capture panicked"))?;
++            }
++        }
++        Ok(())
++    }
++}
++
++impl Drop for Capture {
++    fn drop(&mut self) {
++        if let Err(error) = self.stop() {
++            hbb_common::log::error!("managed audio cleanup: {error}");
++        }
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use base::message_proto::{AudioFrame, Misc};
++    use magnum_opus::{Application, Channels, Decoder, Encoder};
++    use std::time::Duration;
++
++    #[test]
++    fn managed_audio_keeps_format_with_each_bounded_packet_and_drops_stale_audio() -> ResultType<()>
++    {
++        let mut header = Message::new();
++        let mut control = Misc::new();
++        control.set_audio_format(AudioFormat {
++            sample_rate: 48000,
++            channels: 2,
++            ..Default::default()
++        });
++        header.set_misc(control);
++        let header = Arc::new(header);
++        let mut encoder = Encoder::new(48000, Channels::Stereo, Application::LowDelay)?;
++        let pcm: Vec<f32> = (0..960).map(|n| (n as f32 / 13.0).sin() * 0.5).collect();
++        let opus = encoder.encode_vec_float(&pcm, MAX_OPUS_BYTES)?;
++        let mut frame = Message::new();
++        frame.set_audio_frame(AudioFrame {
++            data: opus.into(),
++            ..Default::default()
++        });
++        let (sender, mut receiver) = mpsc::channel(1);
++
++        push(&sender, 4, &header, Arc::new(Message::new()));
++        assert!(receiver.try_recv().is_err());
++        push(&sender, 4, &header, Arc::new(frame.clone()));
++        push(&sender, 4, &header, Arc::new(frame));
++        let mut packet = receiver.try_recv()?;
++        assert!(receiver.try_recv().is_err());
++        assert!(!is_current(&packet, None));
++        assert!(!is_current(&packet, Some(5)));
++        assert_eq!(format(&packet.format).unwrap().sample_rate, 48000);
++        assert!(is_current(&packet, Some(4)));
++
++        let mut decoder = Decoder::new(48000, Channels::Stereo)?;
++        let mut decoded = [0.0; 960];
++        assert_eq!(
++            decoder.decode_float(&packet.frame.audio_frame().data, &mut decoded, false)?,
++            480
++        );
++        assert!(decoded.iter().any(|sample| sample.abs() > 0.01));
++        packet.queued_at = Instant::now() - Duration::from_millis(200);
++        assert!(!is_current(&packet, Some(4)));
++        Ok(())
++    }
++}
+diff --git a/src/server/managed_view.rs b/src/server/managed_view.rs
+index 88a8fd1..1e2ed32 100644
+--- a/src/server/managed_view.rs
++++ b/src/server/managed_view.rs
+@@ -1,7 +1,7 @@
+ //! Monitor and input sessions after a DeskRealm redemption.
+ 
+ use super::{
+-    display_service,
++    display_service, managed_audio,
+     managed_input::{Input, InputWorker, Screen},
+     service::{GenericService, Service},
+     video_service, ConnInner,
+@@ -34,7 +34,8 @@ pub(crate) struct Capture(Arc<CaptureState>);
+ struct CaptureState {
+     active: Mutex<Option<Monitor>>,
+     input: Mutex<Option<InputWorker>>,
+-    allow_input: bool,
++    audio: Mutex<Option<managed_audio::Capture>>,
++    allowed: u8,
+     _exclusive: OwnedSemaphorePermit,
+ }
+ 
+@@ -54,11 +55,12 @@ impl Drop for Monitor {
+ }
+ 
+ impl Capture {
+-    pub(crate) fn new(exclusive: OwnedSemaphorePermit, allow_input: bool) -> Self {
++    pub(crate) fn new(exclusive: OwnedSemaphorePermit, allowed: u8) -> Self {
+         Self(Arc::new(CaptureState {
+             active: Mutex::new(None),
+             input: Mutex::new(None),
+-            allow_input,
++            audio: Mutex::new(None),
++            allowed,
+             _exclusive: exclusive,
+         }))
+     }
+@@ -67,11 +69,13 @@ impl Capture {
+         // Keep the exclusive permit until the capture worker is joined, even if
+         // the session task is cancelled while waiting for this blocking job.
+         tokio::task::spawn_blocking(move || {
++            let audio = self.0.audio.lock().unwrap().take();
++            let audio_result = audio.map_or(Ok(()), |mut audio| audio.stop());
+             let input = self.0.input.lock().unwrap().take();
+-            let result = input.map_or(Ok(()), |mut input| input.stop());
++            let input_result = input.map_or(Ok(()), |mut input| input.stop());
+             let monitor = self.0.active.lock().unwrap().take();
+             drop(monitor);
+-            result
++            audio_result.and(input_result)
+         })
+         .await?
+     }
+@@ -111,7 +115,10 @@ impl Capture {
+         }
+         let display = displays.swap_remove(primary);
+         let screen = Screen::from(&display);
+-        let input_enabled = self.0.allow_input && access.permits(ManagedAction::Input);
++        let input_enabled = self.0.allowed & ManagedAction::Input as u8 != 0
++            && access.permits(ManagedAction::Input);
++        let audio_enabled = self.0.allowed & ManagedAction::Audio as u8 != 0
++            && access.permits(ManagedAction::Audio);
+         if input_enabled {
+             let worker = InputWorker::start(access.clone(), screen)?;
+             *self.0.input.lock().unwrap() = Some(worker);
+@@ -129,7 +136,11 @@ impl Capture {
+             let mut control = Misc::new();
+             control.set_permission_info(PermissionInfo {
+                 permission: permission.into(),
+-                enabled: permission == Permission::Keyboard && input_enabled,
++                enabled: match permission {
++                    Permission::Keyboard => input_enabled,
++                    Permission::Audio => audio_enabled,
++                    _ => false,
++                },
+                 ..Default::default()
+             });
+             let mut message = Message::new();
+@@ -155,6 +166,12 @@ impl Capture {
+         }
+ 
+         let id = rand::random::<i32>() & i32::MAX;
++        let (audio_sender, mut audio_packets) = mpsc::channel(8);
++        if audio_enabled {
++            let capture = managed_audio::Capture::start(id, access.clone(), audio_sender)?;
++            *self.0.audio.lock().unwrap() = Some(capture);
++        }
++        let mut audio_format = None;
+         let (tx, mut rx) = mpsc::channel(4);
+         Encoder::update(EncodingUpdate::NewOnlyVP9(id));
+         let service = video_service::new_managed_view(primary);
+@@ -188,7 +205,8 @@ impl Capture {
+                 packet = rx.recv() => {
+                     let Some((queued_at, message)) = packet else { return Ok(StopReason::ConnectionLost) };
+                     video_service::notify_video_frame_fetched(primary, id, Some(queued_at.into()));
+-                    if !access.permits(ManagedAction::View) || queued_at.elapsed() >= Duration::from_secs(1) {
++                    let Some(generation) = access.generation(ManagedAction::View) else { continue };
++                    if queued_at.elapsed() >= Duration::from_secs(1) {
+                         continue;
+                     }
+                     // The wire exposes a single display at index zero.
+@@ -196,7 +214,20 @@ impl Capture {
+                     frame.display = 0;
+                     let mut message = Message::new();
+                     message.set_video_frame(frame);
+-                    send_video(stream, access, &message).await?;
++                    send_media(stream, access, ManagedAction::View, generation, &message).await?;
++                }
++                packet = audio_packets.recv(), if audio_enabled => {
++                    let Some(packet) = packet else { return Ok(StopReason::LocalEnd) };
++                    if !managed_audio::is_current(&packet, media_generation(access, ManagedAction::Audio)) {
++                        continue;
++                    }
++                    if audio_format != Some(packet.generation) {
++                        send_media(stream, access, ManagedAction::Audio, packet.generation, &packet.format).await?;
++                        audio_format = Some(packet.generation);
++                    }
++                    if managed_audio::is_current(&packet, media_generation(access, ManagedAction::Audio)) {
++                        send_media(stream, access, ManagedAction::Audio, packet.generation, &packet.frame).await?;
++                    }
+                 }
+                 _ = probe.tick() => {
+                     if self.0.input.lock().unwrap().as_ref().is_some_and(InputWorker::finished) {
+@@ -218,19 +249,31 @@ async fn send(stream: &mut Stream, message: &Message) -> ResultType<()> {
+     Ok(())
+ }
+ 
+-async fn send_video(
++fn media_generation(access: &SessionAccess, action: ManagedAction) -> Option<u64> {
++    access
++        .generation(action)
++        .filter(|_| action != ManagedAction::Audio || managed_audio::available())
++}
++
++async fn send_media(
+     stream: &mut Stream,
+     access: &SessionAccess,
++    action: ManagedAction,
++    generation: u64,
+     message: &Message,
+ ) -> ResultType<()> {
++    // If no write has started, discard an expired packet without touching the stream.
++    if media_generation(access, action) != Some(generation) {
++        return Ok(());
++    }
+     let permit_lost = async {
+-        while access.permits(ManagedAction::View) {
++        while media_generation(access, action) == Some(generation) {
+             sleep(Duration::from_millis(25)).await;
+         }
+     };
+     tokio::select! {
+         biased;
+-        _ = permit_lost => hbb_common::bail!("managed display authorization changed"),
++        _ = permit_lost => hbb_common::bail!("managed media authorization changed"),
+         result = send(stream, message) => result,
+     }
+ }
