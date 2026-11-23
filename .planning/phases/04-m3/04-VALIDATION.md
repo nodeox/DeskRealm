@@ -109,3 +109,17 @@ Task 1 的已有 Docker 首装开发验证通过。
 | 现有路径 | M1 账号导入、任务租约、设备入网和审批 PostgreSQL 回归及资源工作台 Chromium 回归通过。全仓 Go 测试、vet 和 Vue 类型检查通过。 |
 
 日志保存于 `deskrealm-evidence/m3/69e9e41d601e8830c8df381b12b513543c4d2ae9/install-task.log`，SHA-256 为 `534334c6b1b26284e68b6f79333bafdce39f12d6baae9a16d5c8bc2313cec6f8`。Task 2 继续目标级租约、外部回执和取消。
+
+## 04-02 目标级租约、外部回执和取消
+
+2026-11-23，在候选 `f423a62edaa42b4d0d7aba33a6ce90e16f814731` 运行 `bash scripts/deskrealm-m3-test delivery-tasks`，退出 0。
+
+| 检查 | 结果 |
+| --- | --- |
+| PostgreSQL 竞态和授权 | 开发夹具验证创建请求幂等、冲突及越权拒绝。八路并发只领取各目标一次。已领取目标不可取消，混合版本取消按整事务拒绝。 |
+| 外部结果恢复 | 独立磁盘夹具保留外部作用和回执，中途丢失中心响应。新数据库连接池及新执行器实例接管过期租约，核对原操作 ID，外部作用仅执行一次。最后一个常规租约丢失响应时，最终核对也能找回成功回执。 |
+| 重试和回执 | 外部确认失败后以原操作 ID 和上次回执重试。错误对象、旧租约、已用于另一尝试的回执均被拒绝。当前完成回执可幂等重放，任务、结果和审计在同一事务持久化。 |
+| 同源 Chromium | 真实中心和 PostgreSQL 显示外部回执、操作 ID 和失败状态。可重试失败目标和取消尚未领取目标，结果在数据库核对。 |
+| M0/M1 回归 | `bash scripts/deskrealm-m1-test all` 退出 0。25 项具名 Go 回归、全仓竞态检查、Vue 类型检查和三个 Chromium 场景通过。 |
+
+外部执行由开发夹具提供。常规中心启动尚未注册外部交付执行器，区域中继等真实任务在后续阶段接入。日志保存在本地 Git 目录的 `deskrealm-evidence/m3/f423a62edaa42b4d0d7aba33a6ce90e16f814731/`。`delivery-tasks.log` 的 SHA-256 为 `588dc1b5349f497c40727d855c2b431f4d4d1358aaefb5d03114976daaa15a8b`，`m1-all.log` 为 `59b22ccd999d28c8ba7b36d9c419dc37ec5f195c20a9696c68e79606072bd6da`。

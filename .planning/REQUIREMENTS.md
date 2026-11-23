@@ -84,11 +84,11 @@ M4 包括浏览器主控、原生 LDAP、邮件验证和恢复、更多平台、
 | FR-06 | Phase 4 | Pending |
 | FR-14 | Phase 4 | Pending |
 | FR-15 | Phase 4 | Pending |
-| FR-16 | Phase 4 | Partial (中心安装记录可导入及审计，目标级执行、回执和取消待 04-02 Task 2) |
+| FR-16 | Phase 4 | Partial (安装记录导入和受控执行夹具通过，真实交付场景接续后续计划) |
 | FR-17 | Phase 4 | Pending |
 | FR-19 | Phase 4 | Pending |
 | NFR-02 | Phase 4 | Pending |
-| NFR-04 | Phase 4 | Partial (04-01 中心身份与数据恢复通过，任务去重和中继恢复接续后续计划) |
+| NFR-04 | Phase 4 | Partial (中心恢复、任务去重与租约接管通过，中继恢复接续后续计划) |
 | NFR-05 | Phase 4 | Pending |
 | NFR-03 | Phase 5 | Pending |
 | NFR-06 | Phase 5 | Pending |
