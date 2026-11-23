@@ -148,8 +148,9 @@ class WindowsEvidenceTests(unittest.TestCase):
     def test_rejects_wrong_rust_library_inside_verified_bundle(self):
         target = self.targets[1]
         path = self.path(target)
-        self.pack(path / "client.zip", build.TARGETS[target]["machine"])
-        self.rehash(target, "client.zip")
+        manifest = build.json_file(path / "manifest.json")
+        manifest["rust_library_sha256"] = "e" * 64
+        build.write_json(path / "manifest.json", manifest)
         self.verify(1, "packaged Rust library differs")
 
     def test_rejects_bridge_from_different_candidate(self):
