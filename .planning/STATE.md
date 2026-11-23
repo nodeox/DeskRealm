@@ -3,14 +3,14 @@ gsd_state_version: "1.0"
 current_phase: 3
 current_phase_name: M2 受管连接与策略
 status: executing
-last_updated: "2026-11-23T17:20:47Z"
+last_updated: "2026-11-23T17:31:04Z"
 last_activity: 2026-11-23
-last_activity_desc: 03-05 全量开发门禁通过，阶段核对发现原生入口缺口
-state_head: 302c434f1ae7ab6daad984175cdcc7c6c884c46f
+last_activity_desc: 03-06 Task 1 通讯录条目发起已通过开发验证
+state_head: cad98bb44c03a74c9132653466cedbb0ca69e347
 progress:
   total_phases: 5
   completed_phases: 2
-  total_plans: 10
+  total_plans: 11
   completed_plans: 10
   percent: 40
 ---
@@ -27,9 +27,9 @@ See: .planning/PROJECT.md (updated 2026-11-22)
 ## Current Position
 
 Phase: 3 — M2 受管连接与策略
-Plan: 03-05 of 5 已完成。下一步按 [03-VERIFICATION.md](phases/03-m2/03-VERIFICATION.md) 补齐 Windows 原生入口。
-Status: In progress，原生通讯录、无人值守发起及有人值守的权限缩减待补。
-Last activity: 2026-11-23 — `302c434` 的 M2 六项聚合门禁通过。双架构工件构建提交为 `f488f2b`，Windows 原生输入经核对一致。
+Plan: [03-06](phases/03-m2/03-06-PLAN.md) Task 1 已通过开发验证。
+Status: In progress，接续 Task 2 无人值守发起、有人值守权限缩减及新候选的双架构 Windows 构建。
+Last activity: 2026-11-23 — `cad98bb` 从中文通讯录传递原条目至受管客户端。真实数据库验证撤权，隔离直连和强制中继已核销并收到停止回执。
 
 ## Accumulated Context
 

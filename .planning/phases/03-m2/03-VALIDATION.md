@@ -126,3 +126,18 @@ Windows 工作流通过 actionlint。证据验证器的 4 项合成工件测试�
 完整日志、浏览器 JSON、Windows 清单、执行环境与各项状态保存在本地 Git 目录下的 `deskrealm-evidence/m2/302c434f1ae7ab6daad984175cdcc7c6c884c46f/`。其中 `results.tsv` 的 SHA-256 为 `8fc8d07bfc1c6c4a4f2c32a71708cb6a080828bb7050811ab259c8ee78771d04`，`endpoint.log` 的 SHA-256 为 `4d2bac95810fa0cf9039f6529c16198e8be4a8f163e85676f65f031b7dfd412b`。复跑步骤及 Phase 5 顺序见 [M2 开发运行手册](../../../docs/DeskRealm-M2-Runbook.md)。
 
 Windows 原生主控从通讯录条目发起会话、发起经批准的无人值守会话，以及受控端逐项缩减操作尚缺界面入口。中心与原生库已有相关授权基础及相应开发用例。阶段核对保留这些功能缺口。实际 Linux 与双 Windows 拓扑、5 秒撤销和 35 秒停控仍待 Phase 5。
+
+## 03-06 Task 1 通讯录条目发起
+
+2026-11-23，候选 `cad98bb44c03a74c9132653466cedbb0ca69e347` 通过 `leases` 和 `resources-browser`。PostgreSQL 竞态用例验证仅有共享时仍需获准设备组，撤销共享后的授权无法核销，移除条目后拒绝续租并记录撤销。Chromium 验证只读角色取得含原通讯录和条目 ID 的连接目标，未批准设备不显示入口。
+
+从固定上游重放补丁，在 Linux ARM64 运行原生端点夹具。中心夹具要求两条正向连接提交 `book_id` 与 `entry_id`。原生端点据返回的 RustDesk ID 建立加密 TCP、完成核销并报告停止。
+
+同一次原生运行通过 4 项租约、1 项恢复复核和 11 项 Linux 桌面回归，退出状态为 0。端点日志保存在本地 Git 目录的 `deskrealm-evidence/m2/cad98bb44c03a74c9132653466cedbb0ca69e347/endpoint.log`，SHA-256 为 `4049b8e273fb665eb424263b7a7c88739fdcc2029191da6ff4aa785d266ca126`。
+
+| 夹具路径 | 会话 ID | 连接 ID |
+| --- | --- | --- |
+| 直连 | `e0157ce5-3f0a-4eca-b798-33427ca8417f` | `e0b81008-12d2-46cb-a49c-bde552550a0b` |
+| 强制中继 | `0605ce33-696e-40e1-b44f-77aff02bff2a` | `97f5c5fc-b06a-4ee9-b59d-be4cd961483a` |
+
+Windows 原生输入已变更，旧工件仅作为历史证据。新候选的双架构构建及剩余原生入口列在 [03-06 Task 2](03-06-PLAN.md)。

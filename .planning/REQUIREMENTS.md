@@ -70,7 +70,7 @@ M4 包括浏览器主控、原生 LDAP、邮件验证和恢复、更多平台、
 | FR-02 | Phase 2 | Complete (Phase 3 已验证停用后拒绝续租) |
 | FR-03 | Phase 2 | Complete |
 | FR-04 | Phase 2 | Complete |
-| FR-07 | Phase 2 | Partial (中心连接 ACL 已验证，Windows 通讯录发起待补) |
+| FR-07 | Phase 2 | Partial (通讯录发起、隔离路径及中心动态 ACL 已验证，待新候选 Windows 原生构建) |
 | FR-13 | Phase 2 | Complete (Phase 3 已验证会话与终端事件关联) |
 | FR-18 | Phase 2 | Partial (中文工作台与 ID 连接有开发证据，原生入口与 Phase 4 分发待补) |
 | FR-08 | Phase 3 | Complete (开发验证) |
