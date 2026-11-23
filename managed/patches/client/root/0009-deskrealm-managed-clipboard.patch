@@ -1,0 +1,838 @@
+diff --git a/libs/base/protos/message.proto b/libs/base/protos/message.proto
+index a4b4a4b..79f8c1c 100644
+--- a/libs/base/protos/message.proto
++++ b/libs/base/protos/message.proto
+@@ -1031,6 +1031,15 @@ message DeskRealmAdmission {
+   uint64 lease_until_ms = 3;
+ }
+ 
++// Only the target announces an epoch. A zero state pauses synchronization.
++message DeskRealmClipboard {
++  uint64 epoch = 1;
++  oneof union {
++    bool state = 2;
++    bytes text = 3;
++  }
++}
++
+ message Message {
+   oneof union {
+     SignedId signed_id = 3;
+@@ -1067,5 +1076,6 @@ message Message {
+     // Auto Login: the peer types the password only if it is at its logon or lock screen.
+     OSLogin os_login = 34;
+     DeskRealmHandshake deskrealm_handshake = 40;
++    DeskRealmClipboard deskrealm_clipboard = 41;
+   }
+ }
+diff --git a/libs/base/tests/deskrealm_interop.rs b/libs/base/tests/deskrealm_interop.rs
+index f400be1..c233583 100644
+--- a/libs/base/tests/deskrealm_interop.rs
++++ b/libs/base/tests/deskrealm_interop.rs
+@@ -93,10 +93,18 @@ async fn managed_endpoint_admission_on_direct_and_relay() -> ResultType<()> {
+         (Path::Relay, "relay-input", Some(3), true),
+         (Path::Direct, "direct-audio", Some(5), true),
+         (Path::Relay, "relay-audio", Some(5), true),
++        (Path::Direct, "direct-clipboard", Some(9), true),
++        (Path::Relay, "relay-clipboard", Some(9), true),
+         (Path::Direct, "direct-supervised", Some(1), true),
+         (Path::Relay, "relay-supervised", Some(1), true),
+     ] {
+-        let requested = if purpose.ends_with("-audio") { 5 } else { 3 };
++        let requested = if purpose.ends_with("-clipboard") {
++            9
++        } else if purpose.ends_with("-audio") {
++            5
++        } else {
++            3
++        };
+         let controller_run = async {
+             let route = authority
+                 .issue(
+@@ -215,6 +223,70 @@ async fn managed_endpoint_admission_on_direct_and_relay() -> ResultType<()> {
+                 assert_eq!(reason?, StopReason::LocalEnd);
+                 continue;
+             }
++            if purpose.ends_with("-clipboard") {
++                assert!(host.permits(ManagedAction::Clipboard));
++                assert!(!host.permits(ManagedAction::Input));
++                assert!(!host.permits(ManagedAction::FileTransfer));
++                // Exercise the post-admission packet size in the controller-to-target direction.
++                target_stream.set_max_packet_length(64 * 1024 + 256);
++                let contents = Bytes::from(vec![b'x'; 64 * 1024]);
++                let run = authority.run_target(
++                    target_stream,
++                    host,
++                    || Some(bearer("drd_", 12)),
++                    || false,
++                    |mut stream, access| {
++                        let contents = &contents;
++                        async move {
++                            let generation = loop {
++                                if let Some(generation) = access.generation(ManagedAction::Clipboard) {
++                                    break generation;
++                                }
++                                tokio::time::sleep(Duration::from_millis(25)).await;
++                            };
++                            let epoch = generation + 1;
++                            let mut state = Message::new();
++                            let frame = state.mut_deskrealm_clipboard();
++                            frame.epoch = epoch;
++                            frame.set_state(true);
++                            stream.send(&state).await.expect("clipboard state");
++                            let bytes = stream.next().await.expect("clipboard text").expect("clipboard packet");
++                            let message = Message::parse_from_bytes(&bytes).expect("clipboard message");
++                            let frame = message.deskrealm_clipboard();
++                            assert_eq!(frame.epoch, epoch);
++                            assert_eq!(frame.text(), contents.as_ref());
++                            assert_eq!(access.generation(ManagedAction::Clipboard), Some(generation));
++                            let mut reply = Message::new();
++                            let frame = reply.mut_deskrealm_clipboard();
++                            frame.epoch = epoch;
++                            frame.set_text(Bytes::from_static(b"target clipboard"));
++                            stream.send(&reply).await.expect("target clipboard text");
++                            StopReason::LocalEnd
++                        }
++                    },
++                    || async { Ok(()) },
++                );
++                let exchange = async {
++                    let bytes = controller_stream.next().await.expect("clipboard active state")?;
++                    let state = Message::parse_from_bytes(&bytes)?;
++                    let epoch = state.deskrealm_clipboard().epoch;
++                    assert!(epoch > 0 && state.deskrealm_clipboard().state());
++                    let mut text = Message::new();
++                    let frame = text.mut_deskrealm_clipboard();
++                    frame.epoch = epoch;
++                    frame.set_text(contents.clone());
++                    controller_stream.send(&text).await?;
++                    let bytes = controller_stream.next().await.expect("clipboard reply")?;
++                    let reply = Message::parse_from_bytes(&bytes)?;
++                    assert_eq!(reply.deskrealm_clipboard().epoch, epoch);
++                    assert_eq!(reply.deskrealm_clipboard().text(), b"target clipboard");
++                    Ok::<_, hbb_common::anyhow::Error>(())
++                };
++                let (reason, result) = timeout(WAIT, async { tokio::join!(run, exchange) }).await?;
++                result?;
++                assert_eq!(reason?, StopReason::LocalEnd);
++                continue;
++            }
+             if purpose.ends_with("-input") {
+                 assert!(host.permits(ManagedAction::Input));
+                 let mut received = false;
+diff --git a/src/client/io_loop.rs b/src/client/io_loop.rs
+index b40592c..5cdaba5 100644
+--- a/src/client/io_loop.rs
++++ b/src/client/io_loop.rs
+@@ -1866,10 +1866,33 @@ impl<T: InvokeUiSession> Remote<T> {
+ 
+     #[cfg(not(any(target_os = "android", target_os = "ios")))]
+     async fn managed_view_loop(&mut self, peer: &mut Stream, actions: u8) {
++        use crate::server::{managed_clipboard, managed_view::send_authorized};
+         use base::deskrealm_endpoint::ManagedAction;
++        use std::sync::atomic::AtomicU64;
++
+         let input_allowed = actions & ManagedAction::Input as u8 != 0;
+         let audio_admitted = actions & ManagedAction::Audio as u8 != 0;
+         let mut audio = ManagedAudio::default();
++        let clipboard_admitted = actions & ManagedAction::Clipboard as u8 != 0;
++        let clipboard_epoch = Arc::new(AtomicU64::new(0));
++        let mut remote_clipboard = managed_clipboard::RemoteEpoch::default();
++        let mut clipboard = None;
++        let (clipboard_sender, mut clipboard_packets) = mpsc::channel(2);
++        let active_epoch = {
++            let epoch = clipboard_epoch.clone();
++            let config = self.handler.lc.clone();
++            move || {
++                let epoch = epoch.load(Ordering::Acquire);
++                if epoch == 0
++                    || config.read().unwrap().disable_clipboard.v
++                    || !managed_clipboard::available()
++                {
++                    0
++                } else {
++                    epoch
++                }
++            }
++        };
+         *self.handler.server_keyboard_enabled.write().unwrap() = false;
+         let mut deadline = Instant::now() + SEC30;
+         loop {
+@@ -1888,6 +1911,32 @@ impl<T: InvokeUiSession> Remote<T> {
+                         self.handler.update_received(true);
+                     }
+                     let Ok(mut message) = Message::parse_from_bytes(&bytes) else { continue };
++                    if message.has_deskrealm_clipboard() {
++                        if clipboard_admitted && self.is_connected {
++                            let frame = message.deskrealm_clipboard();
++                            let previous = remote_clipboard.current;
++                            remote_clipboard.update(frame);
++                            let epoch = remote_clipboard.current;
++                            if epoch != previous {
++                                clipboard_epoch.store(epoch, Ordering::Release);
++                                if epoch != 0 && clipboard.is_none() {
++                                    match managed_clipboard::Worker::start(
++                                        ClipboardSide::Client, active_epoch.clone(), clipboard_sender.clone(),
++                                    ) {
++                                        Ok(worker) => clipboard = Some(worker),
++                                        Err(_) => break,
++                                    }
++                                }
++                                self.handler.set_permission("clipboard", epoch != 0);
++                            }
++                            if let Some(worker) = clipboard.as_ref() {
++                                if let Some(packet) = managed_clipboard::Packet::from_wire(frame, active_epoch()) {
++                                    worker.apply(packet);
++                                }
++                            }
++                        }
++                        continue;
++                    }
+                     let muted = self.handler.lc.read().unwrap().disable_audio.v;
+                     if audio.handle(&mut message, audio_admitted, self.is_connected, muted) {
+                         continue;
+@@ -1896,6 +1945,16 @@ impl<T: InvokeUiSession> Remote<T> {
+                         break;
+                     }
+                 }
++                packet = clipboard_packets.recv(), if clipboard.is_some() => {
++                    if let Some(packet) = packet {
++                        let epoch = packet.epoch();
++                        if packet.is_current(active_epoch()) && send_authorized(
++                            peer, &packet.into_message(), || active_epoch() == epoch,
++                        ).await.is_err() {
++                            break;
++                        }
++                    }
++                }
+                 command = self.receiver.recv() => match command {
+                     None | Some(Data::Close) => {
+                         base::deskrealm_endpoint::send_controller_end(peer).await;
+@@ -1917,6 +1976,11 @@ impl<T: InvokeUiSession> Remote<T> {
+                 }
+             }
+         }
++        clipboard_epoch.store(0, Ordering::Release);
++        if let Some(worker) = clipboard {
++            self.handler.set_permission("clipboard", false);
++            let _ = tokio::task::spawn_blocking(move || worker.stop()).await;
++        }
+     }
+ 
+     async fn handle_msg_from_peer(
+diff --git a/src/clipboard.rs b/src/clipboard.rs
+index 78136a8..3835f12 100644
+--- a/src/clipboard.rs
++++ b/src/clipboard.rs
+@@ -356,6 +356,53 @@ impl ClipboardContext {
+         Ok(ClipboardContext { inner: board })
+     }
+ 
++    #[cfg(not(target_os = "ios"))]
++    pub(crate) fn get_managed_text(
++        &mut self,
++        side: ClipboardSide,
++        permitted: impl FnOnce() -> bool,
++    ) -> ResultType<Option<String>> {
++        let _lock = ARBOARD_MTX.lock().unwrap();
++        if !permitted() {
++            return Ok(None);
++        }
++        let data = self.inner.get_formats(&[
++            ClipboardFormat::Text,
++            #[cfg(any(target_os = "linux", target_os = "macos"))]
++            ClipboardFormat::FileUrl,
++            ClipboardFormat::Special(RUSTDESK_CLIPBOARD_OWNER_FORMAT),
++        ])?;
++        if data.iter().any(|item| match item {
++            #[cfg(any(target_os = "linux", target_os = "macos"))]
++            ClipboardData::FileUrl(_) => true,
++            ClipboardData::Special((name, marker)) => {
++                name == RUSTDESK_CLIPBOARD_OWNER_FORMAT && side.is_owner(marker)
++            }
++            _ => false,
++        }) {
++            return Ok(None);
++        }
++        Ok(data.into_iter().find_map(|item| match item {
++            ClipboardData::Text(text) => Some(text),
++            _ => None,
++        }))
++    }
++
++    #[cfg(not(target_os = "ios"))]
++    pub(crate) fn set_managed_text(
++        &mut self,
++        text: String,
++        side: ClipboardSide,
++        permitted: impl FnOnce() -> bool,
++    ) -> ResultType<()> {
++        let data = append_owner_marker(vec![ClipboardData::Text(text)], side);
++        let _lock = ARBOARD_MTX.lock().unwrap();
++        if permitted() {
++            self.inner.set_formats(&data)?;
++        }
++        Ok(())
++    }
++
+     fn get_formats(&mut self, formats: &[ClipboardFormat]) -> ResultType<Vec<ClipboardData>> {
+         // If there're multiple threads or processes trying to access the clipboard at the same time,
+         // the previous clipboard owner will fail to access the clipboard.
+diff --git a/src/deskrealm_desktop.rs b/src/deskrealm_desktop.rs
+index 9d8fb66..a40242b 100644
+--- a/src/deskrealm_desktop.rs
++++ b/src/deskrealm_desktop.rs
+@@ -46,6 +46,7 @@ const SETTINGS: &[&str] = &[
+     "DESKREALM_MANAGED_PURPOSE",
+     "DESKREALM_MANAGED_INPUT",
+     "DESKREALM_MANAGED_AUDIO",
++    "DESKREALM_MANAGED_CLIPBOARD",
+ ];
+ const ONLINE_INTERVAL: Duration = Duration::from_secs(12);
+ const REGISTRATION_INTERVAL: Duration = Duration::from_secs(8);
+@@ -54,6 +55,7 @@ const LOOKUP_TIMEOUT: Duration = Duration::from_secs(5);
+ const VIEW: u8 = ManagedAction::View as u8;
+ const INPUT: u8 = ManagedAction::Input as u8;
+ const AUDIO: u8 = ManagedAction::Audio as u8;
++const CLIPBOARD: u8 = ManagedAction::Clipboard as u8;
+ 
+ pub(crate) fn enabled() -> bool {
+     cfg!(feature = "deskrealm-managed") || SETTINGS.iter().any(|var| env::var_os(var).is_some())
+@@ -232,7 +234,11 @@ pub(crate) async fn connect(peer: &str, force_relay: bool) -> ResultType<(Stream
+     };
+     let requested = VIEW
+         | requested_action("DESKREALM_MANAGED_INPUT", INPUT)?
+-        | requested_action("DESKREALM_MANAGED_AUDIO", AUDIO)?;
++        | requested_action("DESKREALM_MANAGED_AUDIO", AUDIO)?
++        | requested_action("DESKREALM_MANAGED_CLIPBOARD", CLIPBOARD)?;
++    if requested & CLIPBOARD != 0 && !crate::server::managed_clipboard::available() {
++        bail!("managed clipboard is unavailable on this desktop");
++    }
+     let route = desktop
+         .authority
+         .issue(
+@@ -379,7 +385,7 @@ pub(crate) async fn authorize_target(
+         .ok_or_else(|| anyhow!("no managed policy applied"))?;
+     if grant.policy_version() != policy.version()
+         || grant.allowed_mask() & VIEW == 0
+-        || grant.allowed_mask() & !(VIEW | INPUT | AUDIO) != 0
++        || grant.allowed_mask() & !(VIEW | INPUT | AUDIO | CLIPBOARD) != 0
+         || grant.allowed_mask() & !policy.allowed_mask() != 0
+     {
+         bail!("managed grant does not match locally applied policy");
+@@ -393,6 +399,9 @@ pub(crate) async fn authorize_target(
+     if grant.allowed_mask() & AUDIO != 0 && !crate::server::managed_audio::available() {
+         bail!("managed system audio is unavailable on this desktop");
+     }
++    if grant.allowed_mask() & CLIPBOARD != 0 && !crate::server::managed_clipboard::available() {
++        bail!("managed clipboard is unavailable on this desktop");
++    }
+     let capture = capture
+         .try_acquire_owned()
+         .map_err(|_| anyhow!("managed display is busy"))?;
+@@ -438,6 +447,9 @@ pub(crate) async fn authorize_target(
+             |request| async move { ask_local_user(request, prompts).await },
+         )
+         .await?;
++    if lease.permits(ManagedAction::Clipboard) {
++        stream.set_max_packet_length(crate::server::managed_clipboard::MAX_WIRE_BYTES);
++    }
+     let view = crate::server::managed_view::Capture::new(capture, lease.allowed_mask);
+     let worker = view.clone();
+     desktop
+diff --git a/src/server.rs b/src/server.rs
+index 2fa6103..9be1389 100644
+--- a/src/server.rs
++++ b/src/server.rs
+@@ -77,6 +77,8 @@ pub(crate) mod managed_view;
+ pub(crate) mod managed_input;
+ #[cfg(not(any(target_os = "android", target_os = "ios")))]
+ pub(crate) mod managed_audio;
++#[cfg(not(any(target_os = "android", target_os = "ios")))]
++pub(crate) mod managed_clipboard;
+ mod login_failure_check;
+ pub(crate) mod port_forward_mux;
+ pub mod display_service;
+diff --git a/src/server/managed_clipboard.rs b/src/server/managed_clipboard.rs
+new file mode 100644
+index 0000000..b772ff8
+--- /dev/null
++++ b/src/server/managed_clipboard.rs
+@@ -0,0 +1,325 @@
++//! Session-scoped plain-text clipboard for both managed endpoints.
++
++use crate::clipboard::{ClipboardContext, ClipboardSide};
++use base::{
++    deskrealm_endpoint::{ManagedAction, SessionAccess},
++    message_proto::{desk_realm_clipboard, DeskRealmClipboard, Message},
++};
++use hbb_common::{tokio::sync::mpsc, ResultType};
++use std::{
++    sync::{
++        atomic::{AtomicBool, Ordering},
++        mpsc as sync, Arc,
++    },
++    thread::{self, JoinHandle},
++    time::{Duration, Instant},
++};
++
++pub(crate) const POLL_INTERVAL: Duration = Duration::from_millis(120);
++const MAX_TEXT_BYTES: usize = 64 * 1024;
++pub(crate) const MAX_WIRE_BYTES: usize = MAX_TEXT_BYTES + 256;
++const MAX_PACKET_AGE: Duration = Duration::from_secs(1);
++const QUEUE_DEPTH: usize = 2;
++
++pub(crate) fn available() -> bool {
++    super::managed_input::available()
++}
++
++pub(crate) fn target_epoch(access: &SessionAccess) -> u64 {
++    access
++        .generation(ManagedAction::Clipboard)
++        .filter(|_| available())
++        .map_or(0, |generation| generation + 1)
++}
++
++fn valid_text(text: &str) -> bool {
++    !text.is_empty() && text.len() <= MAX_TEXT_BYTES && !text.contains('\0')
++}
++
++pub(crate) fn state_message(epoch: u64) -> Message {
++    let mut message = Message::new();
++    let state = message.mut_deskrealm_clipboard();
++    state.epoch = epoch;
++    state.set_state(epoch != 0);
++    message
++}
++
++#[derive(Default)]
++pub(crate) struct RemoteEpoch {
++    pub(crate) current: u64,
++    newest: u64,
++}
++
++impl RemoteEpoch {
++    pub(crate) fn update(&mut self, frame: &DeskRealmClipboard) {
++        match frame.union {
++            Some(desk_realm_clipboard::Union::State(false)) if frame.epoch == 0 => self.current = 0,
++            Some(desk_realm_clipboard::Union::State(true)) if frame.epoch > self.newest => {
++                self.newest = frame.epoch;
++                self.current = frame.epoch;
++            }
++            _ => {}
++        }
++    }
++}
++
++pub(crate) struct Packet {
++    epoch: u64,
++    text: String,
++    queued_at: Instant,
++}
++
++impl Packet {
++    fn new(epoch: u64, text: String) -> Self {
++        Self {
++            epoch,
++            text,
++            queued_at: Instant::now(),
++        }
++    }
++
++    pub(crate) fn from_wire(frame: &DeskRealmClipboard, epoch: u64) -> Option<Self> {
++        if epoch == 0
++            || frame.epoch != epoch
++            || !frame.has_text()
++            || frame.text().len() > MAX_TEXT_BYTES
++        {
++            return None;
++        }
++        let text = std::str::from_utf8(frame.text()).ok()?;
++        valid_text(text).then(|| Self::new(epoch, text.to_owned()))
++    }
++
++    pub(crate) fn is_current(&self, epoch: u64) -> bool {
++        epoch != 0 && self.epoch == epoch && self.queued_at.elapsed() < MAX_PACKET_AGE
++    }
++
++    pub(crate) fn into_message(self) -> Message {
++        let mut message = Message::new();
++        let frame = message.mut_deskrealm_clipboard();
++        frame.epoch = self.epoch;
++        frame.set_text(self.text.into_bytes().into());
++        message
++    }
++
++    pub(crate) fn epoch(&self) -> u64 {
++        self.epoch
++    }
++}
++
++pub(crate) struct Worker {
++    input: sync::SyncSender<Packet>,
++    stopped: Arc<AtomicBool>,
++    thread: Option<JoinHandle<()>>,
++}
++
++impl Worker {
++    pub(crate) fn start(
++        side: ClipboardSide,
++        active_epoch: impl Fn() -> u64 + Send + 'static,
++        output: mpsc::Sender<Packet>,
++    ) -> ResultType<Self> {
++        let (input, queue) = sync::sync_channel(QUEUE_DEPTH);
++        let stopped = Arc::new(AtomicBool::new(false));
++        let cancelled = stopped.clone();
++        let thread = thread::Builder::new()
++            .name("managed-clipboard".into())
++            .spawn(move || run(side, queue, output, &cancelled, active_epoch))?;
++        Ok(Self {
++            input,
++            stopped,
++            thread: Some(thread),
++        })
++    }
++
++    pub(crate) fn apply(&self, packet: Packet) {
++        let _ = self.input.try_send(packet);
++    }
++
++    pub(crate) fn stop(mut self) -> ResultType<()> {
++        self.stopped.store(true, Ordering::Release);
++        if let Some(thread) = self.thread.take() {
++            thread
++                .join()
++                .map_err(|_| hbb_common::anyhow::anyhow!("managed clipboard worker panicked"))?;
++        }
++        Ok(())
++    }
++}
++
++impl Drop for Worker {
++    fn drop(&mut self) {
++        self.stopped.store(true, Ordering::Release);
++    }
++}
++
++fn run(
++    side: ClipboardSide,
++    input: sync::Receiver<Packet>,
++    output: mpsc::Sender<Packet>,
++    stopped: &AtomicBool,
++    active_epoch: impl Fn() -> u64,
++) {
++    let mut context = None;
++    let mut last: Option<(u64, Option<String>)> = None;
++    let mut next_poll = Instant::now();
++    loop {
++        if stopped.load(Ordering::Acquire) || output.is_closed() {
++            return;
++        }
++        let pending = match input.recv_timeout(next_poll.saturating_duration_since(Instant::now())) {
++            Ok(packet) => Some(packet),
++            Err(sync::RecvTimeoutError::Timeout) => None,
++            Err(sync::RecvTimeoutError::Disconnected) => return,
++        };
++        let poll = Instant::now() >= next_poll;
++        if poll {
++            next_poll = Instant::now() + POLL_INTERVAL;
++        }
++        let epoch = active_epoch();
++        if epoch == 0 {
++            last = None;
++            continue;
++        }
++        let pending = pending.filter(|packet| packet.is_current(epoch));
++        if !poll && pending.is_none() {
++            continue;
++        }
++        if context.is_none() {
++            context = ClipboardContext::new().ok();
++        }
++        let Some(context) = context.as_mut() else {
++            continue;
++        };
++        let permitted = || active_epoch() == epoch && !stopped.load(Ordering::Acquire);
++        if let Some(packet) = pending {
++            let queued_at = packet.queued_at;
++            let _ = context.set_managed_text(packet.text, side, || {
++                permitted() && queued_at.elapsed() < MAX_PACKET_AGE
++            });
++        }
++        if !poll {
++            continue;
++        }
++        let Ok(text) = context.get_managed_text(side, permitted) else {
++            continue;
++        };
++        if !permitted() {
++            last = None;
++            continue;
++        }
++        let text = text.filter(|text| valid_text(text));
++        // Existing clipboard contents become the baseline at each newly authorized epoch.
++        let changed = last
++            .as_ref()
++            .is_some_and(|(previous, value)| *previous == epoch && value != &text);
++        if let Some(text) = text.as_ref().filter(|_| changed) {
++            if output.try_send(Packet::new(epoch, text.clone())).is_err() {
++                continue;
++            }
++        }
++        last = Some((epoch, text));
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn managed_clipboard_validates_text_and_discards_stale_epochs() {
++        let mut state = RemoteEpoch::default();
++        state.update(state_message(1).deskrealm_clipboard());
++        assert_eq!(state.current, 1);
++        state.update(state_message(0).deskrealm_clipboard());
++        state.update(state_message(1).deskrealm_clipboard());
++        assert_eq!(state.current, 0);
++        state.update(state_message(3).deskrealm_clipboard());
++        state.update(state_message(2).deskrealm_clipboard());
++        assert_eq!(state.current, 3);
++
++        let mut packet = Packet::new(3, "受管剪贴板".to_owned());
++        assert!(packet.is_current(3));
++        assert!(!packet.is_current(0));
++        assert!(!packet.is_current(1));
++        packet.queued_at = Instant::now() - MAX_PACKET_AGE;
++        assert!(!packet.is_current(3));
++
++        let mut frame = packet.into_message();
++        assert!(Packet::from_wire(frame.deskrealm_clipboard(), 1).is_none());
++        assert!(Packet::from_wire(frame.deskrealm_clipboard(), 3).is_some());
++        for invalid in [vec![], vec![0], vec![0xff], vec![b'x'; MAX_TEXT_BYTES + 1]] {
++            frame.mut_deskrealm_clipboard().set_text(invalid.into());
++            assert!(Packet::from_wire(frame.deskrealm_clipboard(), 3).is_none());
++        }
++        frame.mut_deskrealm_clipboard().set_text(vec![b'x'; MAX_TEXT_BYTES].into());
++        assert!(Packet::from_wire(frame.deskrealm_clipboard(), 3).is_some());
++        assert!(Packet::from_wire(state_message(3).deskrealm_clipboard(), 3).is_none());
++    }
++
++    #[cfg(target_os = "linux")]
++    #[tokio::test]
++    #[ignore = "requires Xvfb or a real X11 display"]
++    async fn managed_clipboard_x11_applies_text_only_under_current_permission() -> ResultType<()> {
++        use hbb_common::tokio::time::{sleep, timeout};
++        use std::sync::atomic::{AtomicU64, AtomicUsize};
++
++        let mut native = arboard::Clipboard::new()?;
++        native.set_text("initial local text".to_owned())?;
++        let epoch = Arc::new(AtomicU64::new(0));
++        let calls = Arc::new(AtomicUsize::new(0));
++        let (output, mut packets) = mpsc::channel(QUEUE_DEPTH);
++        let worker = Worker::start(ClipboardSide::Host, {
++            let epoch = epoch.clone();
++            let calls = calls.clone();
++            move || {
++                let epoch = epoch.load(Ordering::Acquire);
++                if epoch != 0 {
++                    calls.fetch_add(1, Ordering::Release);
++                }
++                epoch
++            }
++        }, output)?;
++
++        worker.apply(Packet::new(1, "denied".to_owned()));
++        assert!(timeout(POLL_INTERVAL * 2, packets.recv()).await.is_err());
++        assert_eq!(native.get_text()?, "initial local text");
++        assert_eq!(calls.load(Ordering::Acquire), 0);
++        epoch.store(1, Ordering::Release);
++        timeout(Duration::from_secs(5), async {
++            while calls.load(Ordering::Acquire) < 3 {
++                sleep(Duration::from_millis(10)).await;
++            }
++        }).await?;
++        assert!(packets.try_recv().is_err());
++        native.set_text("从本端复制".to_owned())?;
++        let packet = timeout(Duration::from_secs(5), packets.recv()).await?.unwrap();
++        assert!(packet.is_current(1));
++        assert_eq!(packet.text, "从本端复制");
++
++        worker.apply(Packet::new(1, "来自另一端".to_owned()));
++        timeout(Duration::from_secs(5), async {
++            while native.get_text().ok().as_deref() != Some("来自另一端") {
++                sleep(Duration::from_millis(10)).await;
++            }
++        }).await?;
++        assert!(timeout(POLL_INTERVAL * 2, packets.recv()).await.is_err());
++
++        epoch.store(0, Ordering::Release);
++        native.set_text("copied while paused".to_owned())?;
++        worker.apply(Packet::new(1, "must not overwrite".to_owned()));
++        assert!(timeout(POLL_INTERVAL * 2, packets.recv()).await.is_err());
++        assert_eq!(native.get_text()?, "copied while paused");
++        epoch.store(3, Ordering::Release);
++        worker.apply(Packet::new(1, "still stale".to_owned()));
++        assert!(timeout(POLL_INTERVAL * 2, packets.recv()).await.is_err());
++        assert_eq!(native.get_text()?, "copied while paused");
++        native.set_text("copied after resume".to_owned())?;
++        let packet = timeout(Duration::from_secs(5), packets.recv()).await?.unwrap();
++        assert!(packet.is_current(3));
++        assert_eq!(packet.text, "copied after resume");
++        worker.stop()?;
++        assert!(packets.recv().await.is_none());
++        Ok(())
++    }
++}
+diff --git a/src/server/managed_view.rs b/src/server/managed_view.rs
+index 1e2ed32..0adfd4b 100644
+--- a/src/server/managed_view.rs
++++ b/src/server/managed_view.rs
+@@ -1,7 +1,7 @@
+ //! Monitor and input sessions after a DeskRealm redemption.
+ 
+ use super::{
+-    display_service, managed_audio,
++    display_service, managed_audio, managed_clipboard,
+     managed_input::{Input, InputWorker, Screen},
+     service::{GenericService, Service},
+     video_service, ConnInner,
+@@ -35,6 +35,7 @@ struct CaptureState {
+     active: Mutex<Option<Monitor>>,
+     input: Mutex<Option<InputWorker>>,
+     audio: Mutex<Option<managed_audio::Capture>>,
++    clipboard: Mutex<Option<managed_clipboard::Worker>>,
+     allowed: u8,
+     _exclusive: OwnedSemaphorePermit,
+ }
+@@ -60,6 +61,7 @@ impl Capture {
+             active: Mutex::new(None),
+             input: Mutex::new(None),
+             audio: Mutex::new(None),
++            clipboard: Mutex::new(None),
+             allowed,
+             _exclusive: exclusive,
+         }))
+@@ -69,13 +71,15 @@ impl Capture {
+         // Keep the exclusive permit until the capture worker is joined, even if
+         // the session task is cancelled while waiting for this blocking job.
+         tokio::task::spawn_blocking(move || {
++            let clipboard = self.0.clipboard.lock().unwrap().take();
++            let clipboard_result = clipboard.map_or(Ok(()), managed_clipboard::Worker::stop);
+             let audio = self.0.audio.lock().unwrap().take();
+             let audio_result = audio.map_or(Ok(()), |mut audio| audio.stop());
+             let input = self.0.input.lock().unwrap().take();
+             let input_result = input.map_or(Ok(()), |mut input| input.stop());
+             let monitor = self.0.active.lock().unwrap().take();
+             drop(monitor);
+-            audio_result.and(input_result)
++            clipboard_result.and(audio_result).and(input_result)
+         })
+         .await?
+     }
+@@ -172,6 +176,20 @@ impl Capture {
+             *self.0.audio.lock().unwrap() = Some(capture);
+         }
+         let mut audio_format = None;
++        let clipboard_allowed = self.0.allowed & ManagedAction::Clipboard as u8 != 0;
++        let (clipboard_sender, mut clipboard_packets) = mpsc::channel(2);
++        let mut clipboard_epoch = 0;
++        let mut clipboard_tick = interval(managed_clipboard::POLL_INTERVAL);
++        clipboard_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
++        if clipboard_allowed {
++            let access = access.clone();
++            let worker = managed_clipboard::Worker::start(
++                crate::clipboard::ClipboardSide::Host,
++                move || managed_clipboard::target_epoch(&access),
++                clipboard_sender,
++            )?;
++            *self.0.clipboard.lock().unwrap() = Some(worker);
++        }
+         let (tx, mut rx) = mpsc::channel(4);
+         Encoder::update(EncodingUpdate::NewOnlyVP9(id));
+         let service = video_service::new_managed_view(primary);
+@@ -189,6 +207,18 @@ impl Capture {
+                 packet = stream.next() => {
+                     let Some(Ok(packet)) = packet else { return Ok(StopReason::ConnectionLost) };
+                     let message = Message::parse_from_bytes(&packet)?;
++                    if message.has_deskrealm_clipboard()
++                        && clipboard_epoch != 0
++                        && clipboard_epoch == managed_clipboard::target_epoch(access)
++                    {
++                        if let Some(packet) = managed_clipboard::Packet::from_wire(
++                            message.deskrealm_clipboard(), clipboard_epoch,
++                        ) {
++                            if let Some(worker) = self.0.clipboard.lock().unwrap().as_ref() {
++                                worker.apply(packet);
++                            }
++                        }
++                    }
+                     match request(&message, input_enabled, screen) {
+                         ViewRequest::Close => return Ok(StopReason::LocalEnd),
+                         ViewRequest::Refresh if access.permits(ManagedAction::View) => {
+@@ -229,6 +259,31 @@ impl Capture {
+                         send_media(stream, access, ManagedAction::Audio, packet.generation, &packet.frame).await?;
+                     }
+                 }
++                packet = clipboard_packets.recv(), if clipboard_allowed => {
++                    let Some(packet) = packet else { return Ok(StopReason::LocalEnd) };
++                    if packet.is_current(clipboard_epoch) {
++                        send_authorized(stream, &packet.into_message(), || {
++                            managed_clipboard::target_epoch(access) == clipboard_epoch
++                        }).await?;
++                    }
++                }
++                _ = clipboard_tick.tick(), if clipboard_allowed => {
++                    if !managed_clipboard::available() {
++                        return Ok(StopReason::LocalEnd);
++                    }
++                    let epoch = managed_clipboard::target_epoch(access);
++                    if epoch != clipboard_epoch {
++                        let message = managed_clipboard::state_message(epoch);
++                        if epoch == 0 {
++                            send(stream, &message).await?;
++                        } else {
++                            send_authorized(stream, &message, || {
++                                managed_clipboard::target_epoch(access) == epoch
++                            }).await?;
++                        }
++                        clipboard_epoch = epoch;
++                    }
++                }
+                 _ = probe.tick() => {
+                     if self.0.input.lock().unwrap().as_ref().is_some_and(InputWorker::finished) {
+                         return Ok(StopReason::LocalEnd);
+@@ -262,18 +317,29 @@ async fn send_media(
+     generation: u64,
+     message: &Message,
+ ) -> ResultType<()> {
+-    // If no write has started, discard an expired packet without touching the stream.
+-    if media_generation(access, action) != Some(generation) {
++    send_authorized(stream, message, || {
++        media_generation(access, action) == Some(generation)
++    })
++    .await
++}
++
++pub(crate) async fn send_authorized(
++    stream: &mut Stream,
++    message: &Message,
++    permitted: impl Fn() -> bool,
++) -> ResultType<()> {
++    // Discard a stale packet before writing, or close the stream if a write is interrupted.
++    if !permitted() {
+         return Ok(());
+     }
+     let permit_lost = async {
+-        while media_generation(access, action) == Some(generation) {
++        while permitted() {
+             sleep(Duration::from_millis(25)).await;
+         }
+     };
+     tokio::select! {
+         biased;
+-        _ = permit_lost => hbb_common::bail!("managed media authorization changed"),
++        _ = permit_lost => hbb_common::bail!("managed session authorization changed"),
+         result = send(stream, message) => result,
+     }
+ }

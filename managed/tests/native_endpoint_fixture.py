@@ -27,6 +27,8 @@ def decoded(raw):
 
 
 def confirmed_mask(purpose):
+    if purpose.endswith("-clipboard"):
+        return 9, ["view", "clipboard"]
     if purpose.endswith("-audio"):
         return 5, ["view", "audio"]
     if purpose.endswith("-input"):
@@ -218,7 +220,7 @@ class SessionFixture(Fixture):
             if body["target_rustdesk_id"] != TARGET or body["confirmation_mode"] != "attended":
                 return 403, {}
             purpose = body["purpose"]
-            allowed, actions = confirmed_mask(purpose) if purpose.endswith("-audio") else (3, ["view", "input"])
+            allowed, actions = confirmed_mask(purpose) if purpose.endswith(("-audio", "-clipboard")) else (3, ["view", "input"])
             if body["requested_actions"] != actions:
                 return 403, {}
             route = Route(self, "relay" if purpose.startswith("relay-") or purpose == "deny-redeem" else "direct",
@@ -301,9 +303,10 @@ def main():
                                            ("deny-redeem", True), ("direct-clean", True),
                                            ("direct-forbidden", True), ("direct-input", True),
                                            ("relay-input", True), ("direct-audio", True),
-                                           ("relay-audio", True), ("direct-supervised", True),
+                                           ("relay-audio", True), ("direct-clipboard", True),
+                                           ("relay-clipboard", True), ("direct-supervised", True),
                                            ("relay-supervised", True)]
-                assert len(fixture.redemptions) == 10 and len(fixture.renewals) == 3
+                assert len(fixture.redemptions) == 12 and len(fixture.renewals) == 3
                 assert fixture.stopped == fixture.redemptions.keys()
                 assert fixture.revoked_renewals == {
                     route.session for route in fixture.routes.values() if route.purpose == "relay-admit"

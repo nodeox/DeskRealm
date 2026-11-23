@@ -52,7 +52,10 @@ def verify_schemas(client, server):
     if encoded != bytes.fromhex("c202082a0608011001187b"):
         # The fixture pins the oneof tag and the nested admission field numbers.
         raise RuntimeError(f"unexpected managed peer admission bytes: {encoded.hex()}")
-    print("Native signaling schemas agree on direct and relay; peer admission field numbers verified.", flush=True)
+    clipboard = b"deskrealm_clipboard { epoch: 3 state: true }"
+    if protobuf(peer_proto, "encode", "Message", clipboard) != bytes.fromhex("ca020408031001"):
+        raise RuntimeError("managed clipboard state field numbers changed")
+    print("Native signaling schemas agree on direct and relay; peer admission and clipboard fields verified.", flush=True)
 
 
 def in_source(repo, cache, image, command, required=None):
@@ -131,6 +134,7 @@ def main():
     modes.add_argument("--view", action="store_true", help="run the managed capture and message tests on X11")
     modes.add_argument("--input", action="store_true", help="run the managed input dispatch and cleanup tests on X11")
     modes.add_argument("--audio", action="store_true", help="run managed audio permission and Opus queue tests")
+    modes.add_argument("--clipboard", action="store_true", help="run managed text clipboard tests on X11")
     arguments = parser.parse_args()
     # Use a Docker-mountable path on macOS, even when TMPDIR is a per-user path.
     directory = os.environ.get("DESKREALM_NATIVE_TMPDIR", "/tmp")
@@ -148,6 +152,9 @@ def main():
             cargo(source / "client", scratch / "client-cache", desktop_image(scratch),
                   "test", "--locked", "--lib", "--no-default-features", "--features",
                   DESKTOP_FEATURES, "managed_audio_", required="test result: ok. 2 passed")
+            return
+        if arguments.clipboard:
+            check_x11(source / "client", scratch / "client-cache", scratch, "managed_clipboard_", 2)
             return
         if arguments.view or arguments.input:
             selector, expected = ("managed_input_", 2) if arguments.input else ("managed_view_", 3)
