@@ -55,6 +55,7 @@ type config struct {
 	Images       imageConfig   `json:"images"`
 	Ports        portConfig    `json:"ports"`
 	Offline      offlineConfig `json:"offline,omitzero"`
+	DefaultRelay relayConfig   `json:"default_relay,omitzero"`
 }
 
 var (
@@ -126,6 +127,9 @@ func validateConfig(c config, now time.Time) (config, error) {
 	c.PublicOrigin = origin.String()
 	if c.IDServer, err = normalizeEndpoint(c.IDServer); err != nil {
 		return c, fmt.Errorf("id_server: %w", err)
+	}
+	if c.DefaultRelay, err = normalizeRelay(c.DefaultRelay); err != nil {
+		return c, err
 	}
 	for _, image := range []struct{ field, value string }{
 		{"center", c.Images.Center},

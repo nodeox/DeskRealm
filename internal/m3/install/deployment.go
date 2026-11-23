@@ -41,12 +41,20 @@ type publicDeployment struct {
 	SigningKey          string          `json:"signing_public_key"`
 	SigningKeySHA256    string          `json:"signing_public_key_sha256"`
 	Offline             offlineIdentity `json:"offline,omitzero"`
+	DefaultRelay        publicRelay     `json:"default_relay,omitzero"`
 }
 
 var requiredFiles = []string{
 	composeName, "postgres-init.sql",
 	"secrets/center.env", "secrets/migrate.env", "secrets/postgres.env", "secrets/rendezvous.env",
 	"secrets/signing.seed", "rendezvous/id_ed25519", "rendezvous/id_ed25519.pub",
+}
+
+func deploymentFiles(c config) []string {
+	if c.DefaultRelay.ID != "" {
+		return append(append([]string(nil), requiredFiles...), relayEnvFile)
+	}
+	return requiredFiles
 }
 
 func prepareDeployment(c config) (publicDeployment, error) {
@@ -80,7 +88,7 @@ func prepareDeployment(c config) (publicDeployment, error) {
 	if err != nil {
 		return publicDeployment{}, err
 	}
-	for _, name := range requiredFiles {
+	for _, name := range deploymentFiles(c) {
 		mode := os.FileMode(0600)
 		if name == "postgres-init.sql" {
 			mode = 0644
@@ -166,6 +174,13 @@ func newDeployment(c config) (deployment, map[string][]byte, error) {
 		"rendezvous/id_ed25519":     []byte(base64.StdEncoding.EncodeToString(routePrivate)),
 		"rendezvous/id_ed25519.pub": []byte(d.Center.RendezvousKey),
 	}
+	if c.DefaultRelay.ID != "" {
+		token, err := deploymentRelayToken(c, rendezvousToken)
+		if err != nil {
+			return d, nil, err
+		}
+		files[relayEnvFile] = []byte(relayTokenEnv + "=" + token + "\n")
+	}
 	files[composeName], err = renderCompose(d)
 	return d, files, err
 }
@@ -177,6 +192,7 @@ func describeDeployment(c config, id string, route, signing ed25519.PublicKey) p
 		RendezvousKey: base64.StdEncoding.EncodeToString(route), RendezvousKeySHA256: sha256Hex(route),
 		SigningKeyID: "center-" + id[:16],
 		SigningKey:   base64.RawURLEncoding.EncodeToString(signing), SigningKeySHA256: sha256Hex(signing),
+		DefaultRelay: publicRelay{ID: c.DefaultRelay.ID, Address: c.DefaultRelay.Address},
 	}
 }
 
@@ -210,8 +226,9 @@ func readPrepared(c config) (publicDeployment, error) {
 	if info, _ := os.Lstat(filepath.Join(c.Directory, "secrets")); info == nil || info.Mode().Perm()&0077 != 0 {
 		return failed("secrets permissions")
 	}
-	files := make(map[string][]byte, len(requiredFiles))
-	for _, name := range requiredFiles {
+	required := deploymentFiles(c)
+	files := make(map[string][]byte, len(required))
+	for _, name := range required {
 		data, err := readSmallRegular(filepath.Join(c.Directory, name), name != "postgres-init.sql")
 		if err != nil || sha256Hex(data) != d.Checksums[name] {
 			return failed(name)

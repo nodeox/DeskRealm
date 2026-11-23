@@ -60,12 +60,28 @@ Compose 包含 PostgreSQL、一次性迁移、Go 中心和受管会合四个服�
 
 使用自建 CA 时，可通过 `https.ca_certificate` 指定 PEM 绝对路径供受管会合校验中心 HTTPS。已有反代模式发布回环 API 端口，提供证书模式由 Go 服务读取挂载的证书和私钥。
 
-密钥和服务凭据保存在受限权限的部署目录。检查 Compose 时保留服务环境文件的路径，以免在输出中展开凭据。 [Compose 配置命令](https://docs.docker.com/reference/cli/docker/compose/config/)
+密钥和服务凭据保存在受限权限的部署目录。检查 Compose 时保留服务环境文件的路径，以免在输出中展开凭据。[Compose 配置命令](https://docs.docker.com/reference/cli/docker/compose/config/)
 
 ```sh
 docker compose --env-file /dev/null -f /var/lib/deskrealm/compose.json \
   config --no-env-resolution
 ```
+
+## 使用已有默认中继
+
+部署时可选择一台已有的受管 `hbbr`。
+
+```json
+"default_relay": {
+  "id": "primary-relay",
+  "address": "relay.example.test:21117",
+  "token_file": "/etc/deskrealm/relay-token"
+}
+```
+
+`token_file` 使用权限为 0600 的普通文件，内容是与该 `hbbr` 共享的 32 字节随机凭据，按无填充 base64url 编码。首次 `prepare` 会把凭据快照保存到中心私有部署目录，并输出配置该 `hbbr` 所需的公开签名密钥和密钥 ID。已有中继需要使用同一中继 ID、凭据、HTTPS 中心和签名公钥。原始凭据文件用于预检和首次准备，重跑沿用已保存的快照。
+
+设置默认中继后，`install` 和 `status` 会核对运行中中心和 `hbbs` 的中继配置，并从安装器所在主机检查中继 TCP 端口。失败时报告 `default-relay`。跨网可达性、认证配对与端点传输由后续中继及目标环境验收覆盖。
 
 ## 启动、验活和首次管理员
 
@@ -142,6 +158,7 @@ npm --prefix web exec -- playwright install chromium
 bash scripts/deskrealm-m3-test install-bootstrap
 bash scripts/deskrealm-m3-test install-offline
 bash scripts/deskrealm-m3-test install-resume
+bash scripts/deskrealm-m3-test install-relay
 ```
 
 检查构建本机 Docker 架构的 Go 中心、生产 Vue 静态文件和锁定受管源码的会合服务。两个临时镜像经回环 Registry 取得摘要后写入测试配置。安装器使用 Compose 启动四项服务并验活，Chromium 用一次性链接完成首管登录。随后模拟迁移后的 HTTPS 校验失败和安装中断，重跑后核对数据库和原公钥，再验证数据缺失或标识不符会阻止服务启动。数据库、测试 CA、镜像及 Compose 项目均为临时资源。

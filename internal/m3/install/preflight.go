@@ -50,6 +50,7 @@ type preflightResult struct {
 	ComposeVersion string          `json:"compose_version"`
 	Ports          []portBinding   `json:"ports"`
 	Offline        offlineIdentity `json:"offline,omitzero"`
+	DefaultRelay   publicRelay     `json:"default_relay,omitzero"`
 }
 
 type dockerRunner func(context.Context, ...string) ([]byte, error)
@@ -101,6 +102,11 @@ func check(ctx context.Context, c config, run dockerRunner) (preflightResult, er
 		return result, err
 	}
 	var offline offlineIdentity
+	if c.DefaultRelay.ID != "" {
+		if _, err := readRelayToken(c.DefaultRelay.TokenFile); err != nil {
+			return result, err
+		}
+	}
 	if c.Offline != (offlineConfig{}) {
 		bundle, err := readOfflineBundle(c)
 		if err != nil {
@@ -129,7 +135,8 @@ func check(ctx context.Context, c config, run dockerRunner) (preflightResult, er
 	return preflightResult{
 		Directory: c.Directory, PublicOrigin: c.PublicOrigin, IDServer: c.IDServer,
 		HTTPSMode: c.HTTPS.Mode, DockerPlatform: platform, ComposeVersion: compose, Ports: bindings,
-		Offline: offline,
+		Offline:      offline,
+		DefaultRelay: publicRelay{ID: c.DefaultRelay.ID, Address: c.DefaultRelay.Address},
 	}, nil
 }
 

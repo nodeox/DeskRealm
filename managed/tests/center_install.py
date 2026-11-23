@@ -35,19 +35,19 @@ def cleanup(*args):
     subprocess.run(args, cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
-def available_ports():
+def available_ports(default_relay):
     with ExitStack() as stack:
         ports = []
-        for _ in range(3):
+        for _ in range(4 if default_relay else 3):
             tcp = stack.enter_context(socket.socket())
             tcp.bind((LOOPBACK, 0))
             ports.append(tcp.getsockname()[1])
         udp = stack.enter_context(socket.socket(type=socket.SOCK_DGRAM))
-        udp.bind((LOOPBACK, ports[-1]))
+        udp.bind((LOOPBACK, ports[2]))
         return ports
 
 
-def publish_images(scratch, resources, offline):
+def publish_images(scratch, resources, offline, default_relay):
     architecture = output("docker", "version", "--format", "{{.Server.Os}}/{{.Server.Arch}}")
     if architecture not in {"linux/arm64", "linux/amd64"}:
         raise RuntimeError(f"unsupported development engine: {architecture}")
@@ -59,7 +59,8 @@ def publish_images(scratch, resources, offline):
     source = scratch / "source"
     run(ROOT / "scripts/deskrealm-managed-source", "prepare", source, "--apply-patches")
     server = source / "server"
-    cargo(server, scratch / "cargo", SERVER_IMAGE, "build", "--locked", "--bin", "hbbs")
+    binaries = ("--bin", "hbbs", "--bin", "hbbr") if default_relay else ("--bin", "hbbs")
+    cargo(server, scratch / "cargo", SERVER_IMAGE, "build", "--locked", *binaries)
     run("docker", "run", "--rm", "--network", "none",
         "--mount", f"type=bind,src={target_directory(server) / 'debug' / 'hbbs'},dst=/hbbs,readonly",
         "--mount", f"type=bind,src={context},dst=/output",
@@ -184,8 +185,34 @@ def browser_bootstrap(scratch, origin, certificate, ticket):
         raise RuntimeError("required Chromium bootstrap regression did not pass")
 
 
-def exercise(scratch, images, resources, offline=None):
-    api_port, check_port, route_port = available_ports()
+def start_default_relay(scratch, resources, origin, ca, prepared, token_file, port):
+    work = scratch / "existing-relay"
+    work.mkdir()
+    binary = target_directory(scratch / "source" / "server") / "debug" / "hbbr"
+    args = ("docker", "run", "--detach", "--publish", f"{LOOPBACK}:{port}:21117",
+            "--mount", f"type=bind,src={binary},dst=/hbbr,readonly",
+            "--mount", f"type=bind,src={work},dst=/relay",
+            "--mount", f"type=bind,src={ca},dst=/relay-ca.pem,readonly",
+            "--workdir", "/relay", "--entrypoint", "/hbbr")
+    settings = {
+        "DESKREALM_MANAGED_MODE": "1",
+        "DESKREALM_MANAGED_CENTER": origin,
+        "DESKREALM_MANAGED_CENTER_KID": prepared["signing_key_id"],
+        "DESKREALM_MANAGED_CENTER_PUBLIC_KEY": prepared["signing_public_key"],
+        "DESKREALM_MANAGED_RELAY_ID": prepared["default_relay"]["id"],
+        "DESKREALM_MANAGED_RELAY_TOKEN": token_file.read_text().strip(),
+        "DESKREALM_MANAGED_CA_FILE": "/relay-ca.pem",
+    }
+    env_file = work / "relay.env"
+    env_file.touch(mode=0o600)
+    env_file.write_text("".join(f"{name}={value}\n" for name, value in settings.items()))
+    container = output(*args, "--env-file", env_file, SERVER_IMAGE, "-k", "_")
+    resources.callback(cleanup, "docker", "rm", "--force", container)
+    return container
+
+
+def exercise(scratch, images, resources, offline=None, default_relay=False):
+    api_port, check_port, route_port, *extra_ports = available_ports(default_relay)
     origin = f"https://{HOST}:{api_port}"
     ca, _ = tls_context(scratch, f"DNS:{HOST}")
     certificate, private_key = scratch / "server.pem", scratch / "server.key"
@@ -201,11 +228,21 @@ def exercise(scratch, images, resources, offline=None):
     }
     if offline:
         configuration["offline"] = offline
+    if default_relay:
+        relay_port = extra_ports[0]
+        relay_token = scratch / "default-relay.token"
+        relay_token.touch(mode=0o600)
+        relay_token.write_text(base64.urlsafe_b64encode(os.urandom(32)).decode().rstrip("=") + "\n")
+        configuration["default_relay"] = {
+            "id": "existing-relay", "address": f"{LOOPBACK}:{relay_port}", "token_file": str(relay_token),
+        }
     config.write_text(json.dumps(configuration))
     installer = scratch / "deskrealm-install"
     run("go", "build", "-o", installer, "./cmd/deskrealm-install")
     flags = ("--config", config)
     run(installer, "preflight", *flags)
+    if default_relay:
+        assert_image_failure(scratch, installer, configuration)
     prepared = json.loads(output(installer, "prepare", *flags))
     compose = ("docker", "compose", "--env-file", "/dev/null", "-f", prepared["compose_file"])
     resources.callback(cleanup, *compose, "down", "--volumes", "--remove-orphans")
@@ -214,6 +251,8 @@ def exercise(scratch, images, resources, offline=None):
     pending = json.loads(output(installer, "install-record", *flags))
     if pending["version"] != 1 or any(step["state"] != "pending" for step in pending["steps"]):
         raise RuntimeError("a prepared installation did not have a pending task record")
+    if default_relay:
+        relay = start_default_relay(scratch, resources, origin, ca, prepared, relay_token, relay_port)
     if offline:
         archive = Path(offline["manifest"]).parent / "images.tar"
         with archive.open("r+b") as file:
@@ -230,6 +269,17 @@ def exercise(scratch, images, resources, offline=None):
         raise RuntimeError("installation did not reach ready before issuing a ticket")
     if any(installed.get(key) != value for key, value in prepared.items()):
         raise RuntimeError("starting services changed the persisted deployment identity")
+    if default_relay:
+        if installed["default_relay"] != {"id": "existing-relay", "address": f"{LOOPBACK}:{relay_port}"}:
+            raise RuntimeError("installer did not report the configured default relay")
+        run("docker", "stop", relay, stdout=subprocess.DEVNULL)
+        unreachable = json.loads(output(installer, "status", *flags))
+        if unreachable["phase"] != "default-relay" or "unreachable" not in unreachable["detail"]:
+            raise RuntimeError("installer advertised a ready center after the default relay became unavailable")
+        run("docker", "start", relay, stdout=subprocess.DEVNULL)
+        if json.loads(output(installer, "install", *flags))["phase"] != "ready":
+            raise RuntimeError("installer did not recover after restarting the default relay")
+        print("Existing managed hbbr configuration and TCP reachability verified independently from center startup.", flush=True)
     completed = json.loads(output(installer, "install-record", *flags))
     if (completed["task_id"] != pending["task_id"] or completed["revision"] <= pending["revision"] or
             not all(step["state"] == "completed" for step in completed["steps"])):
@@ -329,6 +379,23 @@ def assert_install_refusal(installer, flags, compose, reason):
         raise RuntimeError(f"installer did not stop at expected failed check: {reason}")
 
 
+def assert_image_failure(scratch, installer, configuration):
+    config = scratch / "unavailable-image.json"
+    wrong = {**configuration, "directory": str(scratch / "unavailable-image")}
+    reference = configuration["images"]["center"].split("@")[0]
+    wrong["images"] = {**configuration["images"], "center": f"{reference}@sha256:{'0' * 64}"}
+    config.write_text(json.dumps(wrong))
+    flags = ("--config", config)
+    prepared = json.loads(output(installer, "prepare", *flags))
+    compose = ("docker", "compose", "--env-file", "/dev/null", "-f", prepared["compose_file"])
+    assert_install_refusal(installer, flags, compose, "center image: cannot pull")
+    record = json.loads(output(installer, "install-record", *flags))
+    steps = {step["name"]: step["state"] for step in record["steps"]}
+    if steps != {"images": "failed", "database": "pending", "services": "pending", "health": "pending"}:
+        raise RuntimeError("unavailable image was not recorded at the image step")
+    print("Unavailable pinned image stopped installation and recorded the failed image step.", flush=True)
+
+
 def assert_initialized(installer, flags, prepared):
     for command in ("install", "status"):
         status = json.loads(output(installer, command, *flags))
@@ -367,13 +434,15 @@ def interrupted_rebuild(scratch, installer, flags, ca):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--offline", action="store_true")
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument("--offline", action="store_true")
+    modes.add_argument("--default-relay", action="store_true")
     options = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix="deskrealm-center-", dir="/tmp") as directory, ExitStack() as resources:
         scratch = Path(directory).resolve()
-        images, registry = publish_images(scratch, resources, options.offline)
+        images, registry = publish_images(scratch, resources, options.offline, options.default_relay)
         offline = prepare_offline_bundle(scratch, images, registry, resources) if options.offline else None
-        exercise(scratch, images, resources, offline)
+        exercise(scratch, images, resources, offline, options.default_relay)
 
 
 if __name__ == "__main__":

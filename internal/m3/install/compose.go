@@ -158,6 +158,12 @@ func renderCompose(d deployment) ([]byte, error) {
 		rendezvous.Volumes = append(rendezvous.Volumes,
 			bind(c.HTTPS.CACertificate, "/run/deskrealm/center-ca.pem", true))
 	}
+	if c.DefaultRelay.ID != "" {
+		center.Environment[relayIDEnv] = c.DefaultRelay.ID
+		center.EnvFile = append(center.EnvFile, "./"+relayEnvFile)
+		rendezvous.Environment[relayIDEnv] = c.DefaultRelay.ID
+		rendezvous.Environment[relayAddressEnv] = c.DefaultRelay.Address
+	}
 	return json.MarshalIndent(composeConfig{
 		Name:     d.Center.Project,
 		Services: map[string]composeService{"database": db, "migrate": migrate, "center": center, "rendezvous": rendezvous},

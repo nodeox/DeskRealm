@@ -149,6 +149,12 @@ func inspectCenter(ctx context.Context, c config, center publicDeployment, run d
 		result.Phase, result.Detail = "rendezvous", err.Error()
 		return result, nil
 	}
+	if c.DefaultRelay.ID != "" {
+		if err := checkDefaultRelay(ctx, c, center, run); err != nil {
+			result.Phase, result.Detail = "default-relay", err.Error()
+			return result, nil
+		}
+	}
 	result.Phase = "ready"
 	return result, nil
 }

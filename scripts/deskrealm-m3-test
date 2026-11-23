@@ -36,8 +36,14 @@ case "${1:-}" in
       TestInstallRecordAdoptsLegacyAndRejectsLostRecord
     )
     ;;
+  install-relay)
+    required=(
+      TestDefaultRelayPersistsPublicConfigurationAndPrivateCredential
+      TestDefaultRelayChecksRunningConfigurationAndEndpoint
+    )
+    ;;
   *)
-    echo "usage: $0 install-preflight|install-prepare|install-bootstrap|install-offline|install-resume" >&2
+    echo "usage: $0 install-preflight|install-prepare|install-bootstrap|install-offline|install-resume|install-relay" >&2
     exit 2
     ;;
 esac
@@ -70,4 +76,6 @@ if [[ "$1" == install-offline ]]; then
   python3 -B managed/tests/center_install.py --offline
 elif [[ "$1" == install-resume ]]; then
   python3 -B managed/tests/center_install.py
+elif [[ "$1" == install-relay ]]; then
+  python3 -B managed/tests/center_install.py --default-relay
 fi
