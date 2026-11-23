@@ -95,18 +95,47 @@ index 33e13c8..e7b7846 100644
          let session_id = Uuid::from_slice(grant.session_id())?;
          let connection_id = Uuid::from_bytes(connection);
 diff --git a/libs/base/tests/deskrealm_interop.rs b/libs/base/tests/deskrealm_interop.rs
-index 3acb807..b0c1659 100644
+index 3acb807..846186a 100644
 --- a/libs/base/tests/deskrealm_interop.rs
 +++ b/libs/base/tests/deskrealm_interop.rs
-@@ -88,7 +88,6 @@ async fn managed_endpoint_admission_on_direct_and_relay() -> ResultType<()> {
-         )
-         .await
-         .is_err());
--    let target_udp = register(rendezvous, &target).await?;
-     for (path, purpose, selection, success) in [
-         (Path::Direct, "direct-admit", Some(1), true),
-         (Path::Relay, "relay-admit", Some(1), true),
-@@ -108,7 +107,14 @@ async fn managed_endpoint_admission_on_direct_and_relay() -> ResultType<()> {
+@@ -7,7 +7,7 @@ use hbb_common::{
+     base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _},
+     bytes::Bytes,
+     deskrealm_protocol::Path,
+-    rendezvous_proto::{rendezvous_message, RegisterPk, RendezvousMessage},
++    rendezvous_proto::{register_pk_response, rendezvous_message, RegisterPeer, RegisterPk, RendezvousMessage},
+     sodiumoxide::crypto::sign,
+     uuid::Uuid,
+     ResultType,
+@@ -41,10 +41,26 @@ async fn register(rendezvous: SocketAddr, target: &DeviceIdentity) -> ResultType
+     socket.send(&message.write_to_bytes()?).await?;
+     let mut bytes = [0; 4096];
+     let n = timeout(WAIT, socket.recv(&mut bytes)).await??;
+-    assert!(RendezvousMessage::parse_from_bytes(&bytes[..n])?.has_register_pk_response());
++    let reply = RendezvousMessage::parse_from_bytes(&bytes[..n])?;
++    assert!(reply.has_register_pk_response());
++    assert_eq!(reply.register_pk_response().result.enum_value(), Ok(register_pk_response::Result::OK));
+     Ok(socket)
+ }
+ 
++async fn refresh_registration(socket: &UdpSocket) -> ResultType<()> {
++    let mut message = RendezvousMessage::new();
++    message.set_register_peer(RegisterPeer {
++        id: DEVICE_RUSTDESK_ID.to_owned(),
++        ..Default::default()
++    });
++    socket.send(&message.write_to_bytes()?).await?;
++    let mut bytes = [0; 4096];
++    let n = timeout(WAIT, socket.recv(&mut bytes)).await??;
++    let reply = RendezvousMessage::parse_from_bytes(&bytes[..n])?;
++    assert!(reply.has_register_peer_response() && !reply.register_peer_response().request_pk);
++    Ok(())
++}
++
+ #[tokio::test]
+ async fn managed_endpoint_admission_on_direct_and_relay() -> ResultType<()> {
+     for invalid in [
+@@ -108,7 +124,14 @@ async fn managed_endpoint_admission_on_direct_and_relay() -> ResultType<()> {
          (Path::Relay, "relay-file", Some(16), true),
          (Path::Direct, "direct-supervised", Some(1), true),
          (Path::Relay, "relay-supervised", Some(1), true),
@@ -116,12 +145,12 @@ index 3acb807..b0c1659 100644
 +        (Path::Direct, "direct-console-unavailable", Some(1), false),
      ] {
 +        // A long lease scenario can outlive the rendezvous registration.
-+        let target_udp = register(rendezvous, &target).await?;
++        refresh_registration(&target_udp).await?;
 +        let attended = !purpose.contains("-unattended");
          let requested = if purpose.ends_with("-file") {
              16
          } else if purpose.ends_with("-clipboard") {
-@@ -131,7 +137,7 @@ async fn managed_endpoint_admission_on_direct_and_relay() -> ResultType<()> {
+@@ -131,7 +154,7 @@ async fn managed_endpoint_admission_on_direct_and_relay() -> ResultType<()> {
                      Uuid::new_v4(),
                      purpose,
                      requested,
@@ -130,7 +159,7 @@ index 3acb807..b0c1659 100644
                  )
                  .await?;
              let mut stream = network
-@@ -176,14 +182,16 @@ async fn managed_endpoint_admission_on_direct_and_relay() -> ResultType<()> {
+@@ -176,14 +199,16 @@ async fn managed_endpoint_admission_on_direct_and_relay() -> ResultType<()> {
                          policy: AppliedPolicy {
                              version: if purpose == "policy-mismatch" { 2 } else { 1 },
                              allowed_mask: requested,
@@ -148,7 +177,7 @@ index 3acb807..b0c1659 100644
                  )
                  .await?;
              Ok::<_, hbb_common::anyhow::Error>((lease, stream))
-@@ -199,13 +207,23 @@ async fn managed_endpoint_admission_on_direct_and_relay() -> ResultType<()> {
+@@ -199,13 +224,23 @@ async fn managed_endpoint_admission_on_direct_and_relay() -> ResultType<()> {
              }
              let (client, mut controller_stream) = client?;
              let (mut host, mut target_stream) = host?;
@@ -241,7 +270,7 @@ index 4d74dc6..e0e048f 100644
  mod tests {
      use crate::{client, flutter::FlutterHandler, ui_session_interface::Session};
 diff --git a/src/deskrealm_desktop.rs b/src/deskrealm_desktop.rs
-index a2bb17a..3be5bed 100644
+index a2bb17a..029e0ad 100644
 --- a/src/deskrealm_desktop.rs
 +++ b/src/deskrealm_desktop.rs
 @@ -1,8 +1,11 @@
@@ -257,7 +286,19 @@ index a2bb17a..3be5bed 100644
          ManagedAction, SessionTarget, TargetSession,
      },
      deskrealm_transport::{Network, RelayNode},
-@@ -215,6 +218,7 @@ pub(crate) async fn connect(
+@@ -14,7 +17,10 @@ use hbb_common::{
+     config::{option2bool, Config},
+     deskrealm_protocol::{valid_rustdesk_id, Path, PeerRole},
+     protobuf::Message as _,
+-    rendezvous_proto::{rendezvous_message, DeskRealmSignal, RegisterPk, RendezvousMessage},
++    rendezvous_proto::{
++        register_pk_response, rendezvous_message, DeskRealmSignal, RegisterPeer, RegisterPk,
++        RendezvousMessage,
++    },
+     sodiumoxide::crypto::sign,
+     tokio::{
+         self,
+@@ -215,6 +221,7 @@ pub(crate) async fn connect(
      peer: &str,
      force_relay: bool,
      file_session: bool,
@@ -265,7 +306,7 @@ index a2bb17a..3be5bed 100644
  ) -> ResultType<(Stream, bool, u8)> {
      if hbb_common::config::is_incoming_only() {
          bail!("managed controller is unavailable in incoming-only mode");
-@@ -258,7 +262,7 @@ pub(crate) async fn connect(
+@@ -258,7 +265,7 @@ pub(crate) async fn connect(
              Uuid::new_v4(),
              &purpose,
              requested,
@@ -274,7 +315,73 @@ index a2bb17a..3be5bed 100644
          )
          .await?;
      let grant = desktop
-@@ -456,6 +460,13 @@ pub(crate) async fn authorize_target(
+@@ -306,6 +313,12 @@ pub(crate) async fn serve() -> ResultType<()> {
+     };
+     let socket = UdpSocket::bind(address).await?;
+     socket.connect(desktop.rendezvous).await?;
++    let mut announcement = RendezvousMessage::new();
++    announcement.set_register_peer(RegisterPeer {
++        id: desktop.rustdesk_id.clone(),
++        ..Default::default()
++    });
++    let announcement = announcement.write_to_bytes()?;
+     let mut registration = RendezvousMessage::new();
+     registration.set_register_pk(RegisterPk {
+         id: desktop.rustdesk_id.clone(),
+@@ -314,6 +327,7 @@ pub(crate) async fn serve() -> ResultType<()> {
+         ..Default::default()
+     });
+     let registration = registration.write_to_bytes()?;
++    let mut announce_key = true;
+     let mut registration_timer = interval(REGISTRATION_INTERVAL);
+     registration_timer.set_missed_tick_behavior(MissedTickBehavior::Skip);
+     let mut center_timer = interval(ONLINE_INTERVAL);
+@@ -327,8 +341,12 @@ pub(crate) async fn serve() -> ResultType<()> {
+     loop {
+         tokio::select! {
+             _ = registration_timer.tick() => {
+-                if !stopped() {
++                if stopped() {
++                    announce_key = true;
++                } else if announce_key {
+                     socket.send(&registration).await?;
++                } else {
++                    socket.send(&announcement).await?;
+                 }
+             }
+             _ = center_timer.tick() => {
+@@ -349,10 +367,28 @@ pub(crate) async fn serve() -> ResultType<()> {
+             }
+             size = socket.recv(&mut bytes) => {
+                 let size = size?;
+-                let Some(state) = runtime.as_ref().filter(|state| state.policy.is_some()) else { continue };
+                 if stopped() || size == bytes.len() { continue; }
+                 let Ok(message) = RendezvousMessage::parse_from_bytes(&bytes[..size]) else { continue };
+-                let Some(rendezvous_message::Union::DeskrealmSignal(signal)) = message.union else { continue };
++                let signal = match message.union {
++                    Some(rendezvous_message::Union::RegisterPeerResponse(reply)) => {
++                        if reply.request_pk {
++                            announce_key = true;
++                            socket.send(&registration).await?;
++                        }
++                        continue;
++                    }
++                    Some(rendezvous_message::Union::RegisterPkResponse(reply)) => {
++                        announce_key = reply.result.enum_value() != Ok(register_pk_response::Result::OK);
++                        if !announce_key {
++                            // A same-key response by itself does not refresh the live UDP address.
++                            socket.send(&announcement).await?;
++                        }
++                        continue;
++                    }
++                    Some(rendezvous_message::Union::DeskrealmSignal(signal)) => signal,
++                    _ => continue,
++                };
++                let Some(state) = runtime.as_ref().filter(|state| state.policy.is_some()) else { continue };
+                 let Ok(permit) = pending.clone().try_acquire_owned() else { continue };
+                 let desktop = desktop.clone();
+                 let state = state.clone();
+@@ -456,6 +492,13 @@ pub(crate) async fn authorize_target(
      } else {
          ""
      };
@@ -288,7 +395,7 @@ index a2bb17a..3be5bed 100644
      let lease = desktop
          .authority
          .connect_target(
-@@ -472,7 +483,19 @@ pub(crate) async fn authorize_target(
+@@ -472,7 +515,19 @@ pub(crate) async fn authorize_target(
                      unattended_purposes: &unattended,
                  },
              },
@@ -309,7 +416,7 @@ index a2bb17a..3be5bed 100644
          )
          .await?;
      let device_bearer = || {
-@@ -482,13 +505,6 @@ pub(crate) async fn authorize_target(
+@@ -482,13 +537,6 @@ pub(crate) async fn authorize_target(
              .filter(|credential| !credential.expires_within(Duration::ZERO))
              .map(|credential| credential.bearer().to_owned())
      };
@@ -323,7 +430,7 @@ index a2bb17a..3be5bed 100644
      if let Some(root) = file_root {
          use crate::server::managed_files;
          use base::deskrealm_endpoint::{FileResult, SessionFileReceipts};
-@@ -543,35 +559,43 @@ pub(crate) async fn authorize_target(
+@@ -543,35 +591,43 @@ pub(crate) async fn authorize_target(
      Ok(())
  }
  
