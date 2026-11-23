@@ -53,4 +53,19 @@ status: in_progress
 
 日志在本地 Git 目录下的 `deskrealm-evidence/m3/4bf6943cf4a940c1bf40eec8967cfc9a4aaf9d4e/install-bootstrap.log`，SHA-256 为 `8d06f6ff51062f329598b9bcca51e4ff59792f1ed5db04f3591895e7a2941458`。
 
-Task 1 的已有 Docker 首装开发验证通过。Task 2 继续空机 Docker 准备、签名离线清单、完整可恢复步骤与安装记录交接，并验证已有默认中继选择。实际 Linux 中心、中继和双 Windows 仍按 Phase 5 验收。
+Task 1 的已有 Docker 首装开发验证通过。
+
+## 04-01 签名离线包
+
+2026-11-23，在 `df132f85516dbe8a0bd5927da92c0facc82b5cd4` 运行 `bash scripts/deskrealm-m3-test install-offline`，退出 0。运行环境为 Linux ARM64 Docker 29.8.2、containerd 镜像存储和 Compose 5.5.0。
+
+| 检查 | 结果 |
+| --- | --- |
+| 具名竞态用例 | 校验独立可信 Ed25519 公钥、原始签名、配置中的摘要引用、相对归档文件名和引擎架构。签名不匹配、路径越界、重签其他清单、同长度归档篡改及加载后的架构不符均被拒绝。 |
+| 实际离线导入 | 归档包含三个镜像，关闭临时 Registry 并清除测试构建的中心和会合镜像。篡改归档时启动被拒绝；恢复后通过本地镜像 ID 导入，实际启动四项服务并完成 Chromium 首管。 |
+| 复用与重建 | 移除离线介质，重建整组 Compose 服务并模拟迁移后的安装中断。重跑复用已核验缓存、原 PostgreSQL 集群和两套公钥。 |
+| 基础回归 | 通过原 Registry 摘要路径的 `install-bootstrap`、全仓 Go 测试和 vet、M3 预检和准备竞态用例；安装器静态交叉编译为 Linux amd64 和 arm64。 |
+
+验证清单的 SHA-256 为 `b28c07b45c6e5d6421ce27113851f9811813769052342bf8734ef53af2f3c154`。日志在本地 Git 目录下的 `deskrealm-evidence/m3/df132f85516dbe8a0bd5927da92c0facc82b5cd4/install-offline.log`，SHA-256 为 `fc0f5b87c261eafdda9b4c3e87c0c5f17bf4045ab459ded74dc53e9a2ed63fbe`。
+
+Task 2 继续空机 Docker 运行时准备、完整可恢复步骤与安装记录交接，并验证已有默认中继选择。目标 Linux 中心、中继和双 Windows 仍按 Phase 5 验收。
