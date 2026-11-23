@@ -3,10 +3,10 @@ gsd_state_version: "1.0"
 current_phase: 3
 current_phase_name: M2 受管连接与策略
 status: executing
-last_updated: "2026-11-23T02:55:25Z"
+last_updated: "2026-11-23T03:28:42Z"
 last_activity: 2026-11-22
-last_activity_desc: 03-04 Task 2 原生端点租约、状态查询与停止回执接入
-state_head: a2c54e1ed361ca10dc9bb2ee9fd00bf7bcc1bc9c
+last_activity_desc: 03-04 Task 2 受管 TCP 生命周期接入续租、撤销和到期关闭
+state_head: e8132a3d553ba39fb04a60cd621828b43f7622d0
 progress:
   total_phases: 5
   completed_phases: 2
@@ -27,9 +27,9 @@ See: .planning/PROJECT.md (updated 2026-11-22)
 ## Current Position
 
 Phase: 3 — M2 受管连接与策略
-Plan: 03-04 of 5，Task 2 进行中。原生端点租约已接入。接续桌面消息和资源分派、周期续租、在线撤销与实际停控。
+Plan: 03-04 of 5，Task 2 进行中。受管 TCP 生命周期已接入。接续将权限检查和关闭清理接入桌面操作的订阅、消息分派和队列。
 Status: In progress
-Last activity: 2026-11-22 — 接入首次请求绑定的单调租约、睡眠到期检查、状态查询和停止回执。Windows 完整构建与实际弹窗仍待原生验证。
+Last activity: 2026-11-22 — 验证续租阻塞期间的在线撤销、中继失联后的租约到期关闭及停止回执重试。Windows 完整构建和睡眠恢复仍待原生验证。
 
 ## Accumulated Context
 
