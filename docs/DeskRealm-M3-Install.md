@@ -2,7 +2,7 @@
 
 ## 预检
 
-使用 `deskrealm-install preflight` 检查准备安装的主机。预检读取中心配置，核对 HTTPS 模式、镜像摘要引用、Docker Engine、Compose 和主机端口，并输出归一化的公开端点。它不创建部署目录或启动服务。安装、迁移和首管票据流程在 [04-01](../.planning/phases/04-m3/04-01-PLAN.md) 的后续检查点交付。
+使用 `deskrealm-install preflight` 检查准备安装的主机。预检以只读方式读取中心配置，核对 HTTPS 模式、镜像摘要引用、Docker Engine、Compose 和主机端口，并输出归一化的公开端点。安装、迁移和首管票据流程在 [04-01](../.planning/phases/04-m3/04-01-PLAN.md) 的后续检查点交付。
 
 ```sh
 go build -o /tmp/deskrealm-install ./cmd/deskrealm-install

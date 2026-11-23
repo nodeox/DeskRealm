@@ -3,9 +3,9 @@ gsd_state_version: "1.0"
 current_phase: 3
 current_phase_name: M2 受管连接与策略
 status: executing
-last_updated: "2026-11-23T18:15:07Z"
+last_updated: "2026-11-23T18:38:16Z"
 last_activity: 2026-11-23
-last_activity_desc: M3 六项实施计划已编写，03-06 双架构构建进行中
+last_activity_desc: M3 中心安装预检已验证，03-06 双架构构建进行中
 state_head: c37fde79c99c840cfc234b8e17e9fd15499665af
 progress:
   total_phases: 5
@@ -41,4 +41,4 @@ M0–M3 开发完成后进入目标环境验收。先 Linux 中心和一台中�
 
 由当前会话继续执行。M0 与 M1 已完成开发验证。M2 依次执行受管源码与身份、规则与策略、中心会话、RustDesk 两端及会合接入、中文工作台与全套回归。M1 交接包括账号停用后的续租拒绝、通讯录连接 ACL、实际会话回执和 Windows 受管入口。详见 `02-VERIFICATION.md`。
 
-M3 的六个实施计划已编写。M2 候选构建与聚合门禁通过后，从 [04-01 正式中心安装](phases/04-m3/04-01-PLAN.md) 开始。
+M3 的六个实施计划已编写。 [04-01](phases/04-m3/04-01-PLAN.md) 的中心安装器预检通过，从 Compose 配置、身份持久化和启动验活继续。受管中心联调接续 M2 聚合门禁。 [预检记录](phases/04-m3/04-VALIDATION.md)
