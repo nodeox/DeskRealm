@@ -3,10 +3,10 @@ gsd_state_version: "1.0"
 current_phase: 3
 current_phase_name: M2 受管连接与策略
 status: executing
-last_updated: "2026-11-23T13:11:12Z"
+last_updated: "2026-11-23T14:14:26Z"
 last_activity: 2026-11-23
-last_activity_desc: 03-04 开发验证完成，Windows 双架构构建与证据核验通过
-state_head: f488f2bfacbd04f2257909d6c765914e24860c87
+last_activity_desc: 03-05 Task 1 中文策略与会话工作台开发及浏览器验证通过
+state_head: 24c0586648b51aeee7c89264414015fbafa01321
 progress:
   total_phases: 5
   completed_phases: 2
@@ -27,9 +27,9 @@ See: .planning/PROJECT.md (updated 2026-11-22)
 ## Current Position
 
 Phase: 3 — M2 受管连接与策略
-Plan: 03-05 of 5，待开始。接续中文策略与会话工作台及完整开发回归。
+Plan: 03-05 of 5，Task 1 已完成。接续 Task 2 的 M2 全量门禁和运行手册。
 Status: In progress
-Last activity: 2026-11-23 — `endpoint` 通过。Windows x64 和 ARM64 原生构建、每架构 13 项测试和 `windows-builds` 通过。工件绑定提交 `f488f2b`。
+Last activity: 2026-11-23 — `managed-browser` 在 `24c0586` 通过，覆盖中文工作台、四类角色、会话路径和回执、撤销及按会话导出。
 
 ## Accumulated Context
 
