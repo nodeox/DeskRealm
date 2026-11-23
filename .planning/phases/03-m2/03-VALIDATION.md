@@ -55,3 +55,7 @@ M0–M3 开发完成后执行用户指定顺序。Linux 中心和一台中继先
 03-04 Task 1 在提交 `402660772f8fe84024a1ed0c1374fbf786e61685` 执行 `bash scripts/deskrealm-m2-test managed-interop`，退出状态为 0。全新检出固定客户端、服务端及子模块并重放补丁，重新构建 `hbbs`、`hbbr`。Linux ARM64 回环夹具验证设备挑战签名、心跳、策略生效和失败回执、跨组织拒绝、无策略与拒绝全部动作，以及两条 TCP 路径的在线核销和已关闭连接的认证回执。两路测试使用夹具确认。Go/Rust 签名向量和通道证明通过。Linux ARM64 的 RustDesk Rust 库通过 `cargo check --locked --lib --no-default-features --features deskrealm-managed,linux-pkg-config,use_dasp`，镜像 ID 为 `sha256:3a5d4ea042d6ccb631093fdcf76294707a0ac796a82a150ba48eee440da250cd`。中心的 `identity`、`policies`、`leases` 和 `sessions` PostgreSQL 竞态回归也分别通过。
 
 Windows 本地确认函数单独通过 x64 和 ARM64 MSVC 的 Win32 API 类型检查。完整 Windows 制品、真实弹窗和远程操作执行留待 Task 2。当前构建在核销后关闭 TCP 流并报告实际关闭。使用真实 Linux 中心、中继和双 Windows 终端的拓扑证据留待 Phase 5。
+
+03-04 Task 2 的端点租约检查点在提交 `a2c54e1ed361ca10dc9bb2ee9fd00bf7bcc1bc9c` 通过 `managed-interop`、`leases` 和 `sessions`，退出状态均为 0。全新锁定源码在 Linux ARM64 上重放补丁并通过四个租约单测，覆盖五类操作的独立许可、模拟睡眠与墙上时钟回拨、重试保留首次请求上限、迟到响应及错误会话、连接、序号和权限。实际 `hbbs`、`hbbr` 的回环开发夹具在两条加密 TCP 流保持在线时模拟续租响应丢失并取回原结果。两条路径随后交换探测消息，主控观察到连接关闭后受控端才提交回执。中继还覆盖撤销状态、拒绝续租和撤销回执。Linux 桌面 Rust 库编译检查与 Go/Rust 签名向量通过。
+
+Windows 启动时钟函数单独通过 x64 和 ARM64 MSVC 类型检查。持续续租和撤销轮询、真实操作停控、完整 Windows 构建与实际睡眠恢复仍待验证。当前桌面入口仍在核销后关闭 TCP 流。
