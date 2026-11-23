@@ -54,6 +54,10 @@ func installCenter(ctx context.Context, c config, run dockerRunner) (centerStatu
 	if err != nil {
 		return centerStatus{}, err
 	}
+	record, err := ensureInstallRecord(c.Directory, center.ID)
+	if err != nil {
+		return centerStatus{}, fmt.Errorf("load installation task: %w", err)
+	}
 	recordedCluster, err := readDatabaseRecord(c.Directory, center.ID)
 	if err != nil {
 		return centerStatus{}, err
@@ -62,48 +66,92 @@ func installCenter(ctx context.Context, c config, run dockerRunner) (centerStatu
 	if err != nil {
 		return centerStatus{}, err
 	}
-	if err := ensureImages(ctx, c, center, platform, recordedCluster != "", run); err != nil {
+	if err := record.step(ctx, c.Directory, imagesStep, func() error {
+		haveVerifiedImages := recordedCluster != "" || !record.Steps[imagesStep].FirstSuccess.IsZero()
+		return ensureImages(ctx, c, center, platform, haveVerifiedImages, run)
+	}); err != nil {
 		return centerStatus{}, err
 	}
+	if err := record.step(ctx, c.Directory, databaseStep, func() error {
+		if recordedCluster == "" && !record.Steps[databaseStep].FirstSuccess.IsZero() {
+			return errors.New("PostgreSQL initialization record is missing; restore the original deployment record")
+		}
+		return ensureDatabase(ctx, c, center, recordedCluster, services, run)
+	}); err != nil {
+		return centerStatus{}, err
+	}
+	if err := record.step(ctx, c.Directory, servicesStep, func() error {
+		return ensureServices(ctx, c, center, run)
+	}); err != nil {
+		return centerStatus{}, err
+	}
+	var status centerStatus
+	err = record.step(ctx, c.Directory, healthStep, func() error {
+		var err error
+		status, err = waitForCenter(ctx, c, center, run)
+		return err
+	})
+	return status, err
+}
+
+func ensureDatabase(ctx context.Context, c config, center publicDeployment, recordedCluster string, services map[string]containerStatus, run dockerRunner) error {
 	postgresImage := center.runtimeImages(c.Images).PostgreSQL
 	cluster, empty, err := databaseStorage(ctx, c.Directory, postgresImage, run)
 	if err != nil {
-		return centerStatus{}, err
+		return err
 	}
 	// A database that has already hosted the schema must never be recreated
 	// automatically after its bind directory has been emptied or replaced.
 	if cluster == "" && (!empty || recordedCluster != "" || services["database"].State == "running" ||
 		services["migrate"].State != "" || services["center"].State != "") {
-		return centerStatus{}, errors.New("PostgreSQL data is missing or incomplete; restore the original database before starting services")
+		return errors.New("PostgreSQL data is missing or incomplete; restore the original database before starting services")
 	}
 	if recordedCluster != "" && cluster != recordedCluster {
-		return centerStatus{}, errors.New("PostgreSQL data belongs to a different cluster; restore the original database before starting services")
+		return errors.New("PostgreSQL data belongs to a different cluster; restore the original database before starting services")
 	}
 	if !serviceReady("database", services["database"]) {
-		if err := startServices(ctx, run, center, "database"); err != nil {
-			return centerStatus{}, err
+		if err := startServices(ctx, run, center, false, "database"); err != nil {
+			return err
 		}
 		actual, _, err := databaseStorage(ctx, c.Directory, postgresImage, run)
 		if err != nil || actual == "" || (cluster != "" && cluster != actual) {
-			return centerStatus{}, errors.New("PostgreSQL started without a verified persistent data directory")
+			return errors.New("PostgreSQL started without a verified persistent data directory")
 		}
 		cluster = actual
 	}
 	if recordedCluster == "" {
 		if err := recordDatabase(c.Directory, center.ID, cluster); err != nil {
-			return centerStatus{}, fmt.Errorf("record PostgreSQL initialization: %w", err)
+			return fmt.Errorf("record PostgreSQL initialization: %w", err)
 		}
 	}
-	if step, _ := serviceHealth(services); step != "" {
-		if err := startServices(ctx, run, center); err != nil {
-			return centerStatus{}, err
-		}
-	}
-	return waitForCenter(ctx, c, center, run)
+	return nil
 }
 
-func startServices(ctx context.Context, run dockerRunner, center publicDeployment, service ...string) error {
+func ensureServices(ctx context.Context, c config, center publicDeployment, run dockerRunner) error {
+	services, err := runningServices(ctx, c, center, run)
+	if err != nil {
+		return err
+	}
+	if step, _ := serviceHealth(services); step == "" {
+		return nil
+	}
+	if serviceReady("database", services["database"]) && serviceReady("migrate", services["migrate"]) {
+		var remaining []string
+		for _, service := range []string{"center", "rendezvous"} {
+			if !serviceReady(service, services[service]) {
+				remaining = append(remaining, service)
+			}
+		}
+		return startServices(ctx, run, center, true, remaining...)
+	}
+	return startServices(ctx, run, center, false)
+}
+
+func startServices(ctx context.Context, run dockerRunner, center publicDeployment, noDependencies bool, service ...string) error {
 	args := []string{"up", "--detach", "--no-build", "--pull", "never", "--wait", "--wait-timeout", "90"}
+	if noDependencies {
+		args = append(args, "--no-deps")
+	}
 	_, err := composeCommand(ctx, run, center, append(args, service...)...)
 	if err == nil {
 		return nil
@@ -111,7 +159,7 @@ func startServices(ctx context.Context, run dockerRunner, center publicDeploymen
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
-	if len(service) == 1 {
+	if len(service) == 1 && service[0] == "database" {
 		return errors.New("PostgreSQL startup failed; check the database container and its persistent bind")
 	}
 	return errors.New("center service startup failed; use status to identify the failed migration, center or rendezvous service")
@@ -161,16 +209,20 @@ func validClusterID(value string) bool {
 }
 
 func recordDatabase(directory, id, cluster string) error {
-	stage, err := os.MkdirTemp(directory, ".database-ready-")
+	return writeAtomic(directory, databaseRecord, []byte("1 "+id+" "+cluster+"\n"), 0600)
+}
+
+func writeAtomic(directory, name string, data []byte, mode os.FileMode) error {
+	stage, err := os.MkdirTemp(directory, "."+name+"-")
 	if err != nil {
 		return err
 	}
 	defer os.RemoveAll(stage)
-	file := filepath.Join(stage, databaseRecord)
-	if err := writeSynced(file, []byte("1 "+id+" "+cluster+"\n"), 0600); err != nil {
+	file := filepath.Join(stage, name)
+	if err := writeSynced(file, data, mode); err != nil {
 		return err
 	}
-	if err := os.Rename(file, filepath.Join(directory, databaseRecord)); err != nil {
+	if err := os.Rename(file, filepath.Join(directory, name)); err != nil {
 		return err
 	}
 	return syncDirectory(directory)

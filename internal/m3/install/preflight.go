@@ -18,16 +18,20 @@ import (
 
 const usage = `DeskRealm center installer
 
+  deskrealm-install prepare-runtime [--plan]
   deskrealm-install preflight --config FILE
   deskrealm-install prepare   --config FILE
   deskrealm-install install   --config FILE
   deskrealm-install status    --config FILE
+  deskrealm-install install-record --config FILE
   deskrealm-install bootstrap-ticket --config FILE
 
 Preflight checks configuration, TLS materials, local Docker and host ports.
+Prepare-runtime reuses local Docker or prepares pinned Docker packages on supported Linux hosts.
 Prepare writes the persistent center identity and Compose configuration.
 Install starts the deployment and checks its HTTPS and rendezvous services.
 Status inspects the persisted deployment and running services.
+Install-record prints the versioned local installation task and step outcomes.
 Bootstrap-ticket prints a one-time initialization link for a ready center.
 `
 
@@ -157,8 +161,36 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
 		return errors.New("expected a command with --config FILE; see --help")
 	}
+	if args[0] == "prepare-runtime" {
+		flags := flag.NewFlagSet(args[0], flag.ContinueOnError)
+		flags.SetOutput(stderr)
+		onlyPlan := flags.Bool("plan", false, "print the pinned runtime selection")
+		if err := flags.Parse(args[1:]); err != nil {
+			if errors.Is(err, flag.ErrHelp) {
+				return nil
+			}
+			return errors.New("invalid runtime preparation flags")
+		}
+		if flags.NArg() != 0 {
+			return errors.New("unexpected runtime preparation arguments")
+		}
+		plan, err := hostRuntimePlan()
+		if err != nil {
+			return err
+		}
+		encoder := json.NewEncoder(stdout)
+		encoder.SetIndent("", "  ")
+		if *onlyPlan {
+			return encoder.Encode(plan)
+		}
+		result, err := prepareRuntime(ctx, plan)
+		if err != nil {
+			return err
+		}
+		return encoder.Encode(result)
+	}
 	switch args[0] {
-	case "preflight", "prepare", "install", "status", "bootstrap-ticket":
+	case "preflight", "prepare", "install", "status", "bootstrap-ticket", "install-record":
 	default:
 		return errors.New("unknown installer command; see --help")
 	}
@@ -193,6 +225,16 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 			return err
 		}
 		return encoder.Encode(result)
+	case "install-record":
+		center, err := readPrepared(c)
+		if err != nil {
+			return err
+		}
+		record, err := loadInstallRecord(c.Directory, center.ID)
+		if err != nil {
+			return errors.New("no valid local installation record; run install to record a legacy deployment")
+		}
+		return encoder.Encode(record)
 	case "status", "bootstrap-ticket":
 		ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 		defer cancel()

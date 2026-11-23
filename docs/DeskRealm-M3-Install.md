@@ -1,5 +1,18 @@
 # DeskRealm M3 中心安装
 
+## 空机 Docker 运行时
+
+在 Ubuntu 24.04 或 Debian 12 的 amd64、arm64 主机上，可先查看安装器固定的运行时选择。
+
+```sh
+deskrealm-install prepare-runtime --plan
+sudo deskrealm-install prepare-runtime
+```
+
+已有兼容的本地 Docker Engine 和 Compose 会直接复用。空机准备使用 Docker 官方 APT 源，凭内置发布公钥验证 APT 索引，再安装固定版本的 Engine、CLI、containerd 和 Compose，最后启动并检查 systemd 的 Docker 服务。此步骤需要可达发行版和 Docker APT 源。签名离线镜像包用于已有 Docker 的主机。[Docker Ubuntu 安装说明](https://docs.docker.com/engine/install/ubuntu/) · [Docker Debian 安装说明](https://docs.docker.com/engine/install/debian/)
+
+软件包准备中断后可重跑。安装器保留 `/var/lib/deskrealm-runtime/selection.json` 以核对原选择。发现不可用的既有 Docker 或 containerd 实例时，先修复该运行时，再使用安装器。
+
 ## 预检
 
 使用 `deskrealm-install preflight` 检查准备安装的主机。预检以只读方式读取中心配置，核对 HTTPS 模式、镜像摘要引用、Docker Engine、Compose 和主机端口，并输出归一化的公开端点。
@@ -66,7 +79,13 @@ docker compose --env-file /dev/null -f /var/lib/deskrealm/compose.json \
 
 `status` 读取部署记录及当前 Compose 服务状态。停机时返回 `stopped`，仅准备完成时返回 `prepared`，验活失败时返回对应阶段和原因。首次启动达到 `ready` 后，由 `bootstrap-ticket` 生成一次性初始化链接。将链接直接交给首位管理员，并在浏览器完成初始化和登录。
 
-中断后用同一配置重新执行 `install`。备份部署目录时保留 `database-ready`、原密钥和 PostgreSQL 数据。安装器按记录核对 PostgreSQL 系统标识，遇到数据缺失或不同实例时停止启动。
+中断后用同一配置重新执行 `install`。备份部署目录时保留 `database-ready`、`install-record.json`、原密钥和 PostgreSQL 数据。安装器按记录核对 PostgreSQL 系统标识，遇到数据缺失或不同实例时停止启动。
+
+```sh
+deskrealm-install install-record --config /absolute/path/to/center.json
+```
+
+安装记录包含稳定的部署与任务 ID、递增修订号、镜像准备、数据库、服务启动和验活的步骤状态及尝试次数。记录使用固定故障码，便于后续导入任务中心。健康重跑核对服务实际状态并保持已完成的记录。
 
 ## 签名离线包
 
@@ -122,6 +141,7 @@ npm --prefix web ci --ignore-scripts
 npm --prefix web exec -- playwright install chromium
 bash scripts/deskrealm-m3-test install-bootstrap
 bash scripts/deskrealm-m3-test install-offline
+bash scripts/deskrealm-m3-test install-resume
 ```
 
 检查构建本机 Docker 架构的 Go 中心、生产 Vue 静态文件和锁定受管源码的会合服务。两个临时镜像经回环 Registry 取得摘要后写入测试配置。安装器使用 Compose 启动四项服务并验活，Chromium 用一次性链接完成首管登录。随后模拟迁移后的 HTTPS 校验失败和安装中断，重跑后核对数据库和原公钥，再验证数据缺失或标识不符会阻止服务启动。数据库、测试 CA、镜像及 Compose 项目均为临时资源。

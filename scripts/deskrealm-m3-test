@@ -29,8 +29,15 @@ case "${1:-}" in
       TestOfflineImportVerifiesBytesAndLoadedImageIdentity
     )
     ;;
+  install-resume)
+    required=(
+      TestRuntimePlanPinsSupportedHosts
+      TestInstallRecordResumesWithStableTaskAndRedactedOutcome
+      TestInstallRecordAdoptsLegacyAndRejectsLostRecord
+    )
+    ;;
   *)
-    echo "usage: $0 install-preflight|install-prepare|install-bootstrap|install-offline" >&2
+    echo "usage: $0 install-preflight|install-prepare|install-bootstrap|install-offline|install-resume" >&2
     exit 2
     ;;
 esac
@@ -61,4 +68,6 @@ go build -o "$scratch/deskrealm-install" ./cmd/deskrealm-install
 "$scratch/deskrealm-install" --help
 if [[ "$1" == install-offline ]]; then
   python3 -B managed/tests/center_install.py --offline
+elif [[ "$1" == install-resume ]]; then
+  python3 -B managed/tests/center_install.py
 fi

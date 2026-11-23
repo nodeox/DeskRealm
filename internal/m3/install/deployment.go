@@ -21,11 +21,12 @@ const (
 )
 
 type deployment struct {
-	Version   int               `json:"version"`
-	Config    config            `json:"config"`
-	Center    publicDeployment  `json:"center"`
-	RunAs     string            `json:"run_as"`
-	Checksums map[string]string `json:"checksums"`
+	Version              int               `json:"version"`
+	Config               config            `json:"config"`
+	Center               publicDeployment  `json:"center"`
+	RunAs                string            `json:"run_as"`
+	Checksums            map[string]string `json:"checksums"`
+	InstallRecordVersion int               `json:"install_record_version,omitempty"`
 }
 
 type publicDeployment struct {
@@ -89,6 +90,9 @@ func prepareDeployment(c config) (publicDeployment, error) {
 		}
 		d.Checksums[name] = sha256Hex(files[name])
 	}
+	if err := writeInstallRecord(stage, newInstallRecord(d.Center.ID), true); err != nil {
+		return publicDeployment{}, fmt.Errorf("write installation record: %w", err)
+	}
 	manifest, err := json.MarshalIndent(d, "", "  ")
 	if err != nil {
 		return publicDeployment{}, err
@@ -117,7 +121,8 @@ func prepareDeployment(c config) (publicDeployment, error) {
 func newDeployment(c config) (deployment, map[string][]byte, error) {
 	d := deployment{
 		Version: 1, Config: c, Checksums: make(map[string]string),
-		RunAs: strconv.Itoa(os.Geteuid()) + ":" + strconv.Itoa(os.Getegid()),
+		RunAs:                strconv.Itoa(os.Geteuid()) + ":" + strconv.Itoa(os.Getegid()),
+		InstallRecordVersion: 1,
 	}
 	var material [16 + 6*32]byte
 	if _, err := rand.Read(material[:]); err != nil {
@@ -186,6 +191,15 @@ func readPrepared(c config) (publicDeployment, error) {
 	}
 	if d.Config != c {
 		return publicDeployment{}, errors.New("requested configuration differs from the persisted deployment")
+	}
+	switch d.InstallRecordVersion {
+	case 0:
+	case 1:
+		if _, err := loadInstallRecord(c.Directory, d.Center.ID); err != nil {
+			return failed(journalName)
+		}
+	default:
+		return failed(manifestName)
 	}
 	for _, name := range []string{"postgres", "rendezvous", "secrets"} {
 		info, err := os.Lstat(filepath.Join(c.Directory, name))

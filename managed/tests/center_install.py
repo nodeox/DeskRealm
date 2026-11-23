@@ -211,6 +211,9 @@ def exercise(scratch, images, resources, offline=None):
     resources.callback(cleanup, *compose, "down", "--volumes", "--remove-orphans")
     if json.loads(output(installer, "status", *flags))["phase"] != "prepared":
         raise RuntimeError("status did not identify a prepared deployment")
+    pending = json.loads(output(installer, "install-record", *flags))
+    if pending["version"] != 1 or any(step["state"] != "pending" for step in pending["steps"]):
+        raise RuntimeError("a prepared installation did not have a pending task record")
     if offline:
         archive = Path(offline["manifest"]).parent / "images.tar"
         with archive.open("r+b") as file:
@@ -227,6 +230,10 @@ def exercise(scratch, images, resources, offline=None):
         raise RuntimeError("installation did not reach ready before issuing a ticket")
     if any(installed.get(key) != value for key, value in prepared.items()):
         raise RuntimeError("starting services changed the persisted deployment identity")
+    completed = json.loads(output(installer, "install-record", *flags))
+    if (completed["task_id"] != pending["task_id"] or completed["revision"] <= pending["revision"] or
+            not all(step["state"] == "completed" for step in completed["steps"])):
+        raise RuntimeError("the installation task did not record all completed steps")
     if offline:
         media = Path(offline["manifest"]).parent
         media.rename(media.with_name("detached-bundle"))
@@ -246,6 +253,8 @@ def exercise(scratch, images, resources, offline=None):
     assert_initialized(installer, flags, prepared)
     if output(*compose, "ps", "--all", "--quiet") != container_ids:
         raise RuntimeError("re-running install replaced a healthy service")
+    if json.loads(output(installer, "install-record", *flags)) != completed:
+        raise RuntimeError("a healthy recheck changed the completed installation record")
     denied = subprocess.run([installer, "bootstrap-ticket", *flags], capture_output=True, text=True)
     if not denied.returncode or denied.stdout or "already initialized" not in denied.stderr:
         raise RuntimeError("installer allowed another initialization link after bootstrap")
@@ -254,14 +263,46 @@ def exercise(scratch, images, resources, offline=None):
     if json.loads(output(installer, "status", *flags))["phase"] != "stopped":
         raise RuntimeError("status did not identify a stopped deployment")
     interrupted_rebuild(scratch, installer, flags, ca)
+    interrupted = json.loads(output(installer, "install-record", *flags))
+    interrupted_steps = {step["name"]: step["state"] for step in interrupted["steps"]}
+    if interrupted["task_id"] != completed["task_id"] or interrupted_steps != {
+            "images": "completed", "database": "completed", "services": "completed", "health": "interrupted"}:
+        raise RuntimeError("rebuild did not record the actual interrupted step")
+    migration = output(*compose, "ps", "--all", "--quiet", "migrate")
+    if not migration:
+        raise RuntimeError("cannot identify the completed migration container")
+    migration_started = output("docker", "inspect", "--format", "{{.State.StartedAt}}", migration)
     run(*compose, "stop", "rendezvous")
     assert_initialized(installer, flags, prepared)
+    if (output(*compose, "ps", "--all", "--quiet", "migrate") != migration or
+            output("docker", "inspect", "--format", "{{.State.StartedAt}}", migration) != migration_started):
+        raise RuntimeError("resuming the rendezvous service re-ran an already completed migration")
+    resumed = json.loads(output(installer, "install-record", *flags))
+    if (resumed["task_id"] != interrupted["task_id"] or resumed["revision"] <= interrupted["revision"] or
+            not all(step["state"] == "completed" for step in resumed["steps"])):
+        raise RuntimeError("installation did not resume to completion on the same task")
     if output(*compose, "ps", "--all", "--quiet") == container_ids:
         raise RuntimeError("the test did not rebuild the Compose services")
     print("Interrupted rebuild retained the database, deployment ID and both public keys.", flush=True)
+    print("Installation journal preserved the task across interruption; migration was not re-run to recover rendezvous.", flush=True)
 
     run(*compose, "down")
+    journal = installation / "install-record.json"
+    original_journal = journal.with_suffix(".original")
+    journal.rename(original_journal)
+    try:
+        assert_install_refusal(installer, flags, compose, "install-record.json")
+    finally:
+        original_journal.rename(journal)
+
     record = installation / "database-ready"
+    original_marker = record.with_suffix(".original")
+    record.rename(original_marker)
+    try:
+        assert_install_refusal(installer, flags, compose, "initialization record is missing")
+    finally:
+        original_marker.rename(record)
+
     original_record = record.read_bytes()
     try:
         record.write_text(f"1 {prepared['deployment_id']} 1\n")
@@ -278,7 +319,7 @@ def exercise(scratch, images, resources, offline=None):
     finally:
         database.rmdir()
         original.rename(database)
-    print("A missing database or mismatched cluster ID was rejected before starting services.", flush=True)
+    print("Missing journal, missing database record and mismatched PostgreSQL state were rejected before startup.", flush=True)
 
 
 def assert_install_refusal(installer, flags, compose, reason):
