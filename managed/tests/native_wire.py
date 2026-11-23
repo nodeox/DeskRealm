@@ -90,11 +90,26 @@ def run_fixture(server, client, admission):
     subprocess.run(args, check=True)
 
 
+def check_desktop(client, cache, scratch):
+    iid = scratch / "desktop-image"
+    dockerfile = ROOT / "managed/tests/desktop-linux.Dockerfile"
+    context = scratch / "desktop-context"
+    context.mkdir()
+    subprocess.run(
+        ["docker", "build", "--quiet", "--iidfile", iid, "--file", dockerfile, context],
+        check=True,
+    )
+    image = iid.read_text().strip()
+    cargo(client, cache, image, "check", "--locked", "--lib", "--no-default-features",
+          "--features", "deskrealm-managed,linux-pkg-config,use_dasp")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument("--coordination", action="store_true", help="build and run the managed server pair")
     modes.add_argument("--admission", action="store_true", help="run managed endpoint admission on both paths")
+    modes.add_argument("--desktop", action="store_true", help="check desktop routing and run native interoperability")
     arguments = parser.parse_args()
     # Use a Docker-mountable path on macOS, even when TMPDIR is a per-user path.
     directory = os.environ.get("DESKREALM_NATIVE_TMPDIR", "/tmp")
@@ -108,13 +123,16 @@ def main():
             if actual.read_bytes() != canonical:
                 raise RuntimeError(f"{target}: managed protocol differs from the reviewed source")
         verify_schemas(source / "client", source / "server")
-        if arguments.coordination or arguments.admission:
-            if arguments.admission:
+        if arguments.coordination or arguments.admission or arguments.desktop:
+            admission = arguments.admission or arguments.desktop
+            if admission:
                 cargo(source / "client", scratch / "client-cache", CLIENT_IMAGE, "test", "--locked",
                       "-p", "base", "--test", "deskrealm_interop", "--no-run")
             cargo(source / "server", scratch / "server-cache", SERVER_IMAGE, "build", "--locked",
                   "--bin", "hbbs", "--bin", "hbbr")
-            run_fixture(source / "server", source / "client", arguments.admission)
+            run_fixture(source / "server", source / "client", admission)
+            if arguments.desktop:
+                check_desktop(source / "client", scratch / "client-cache", scratch)
             return
         cargo(source / "client", scratch / "client-cache", CLIENT_IMAGE, "test", "--locked", "-p", "hbb_common",
               "--lib", "managed_channel_binding_direct_and_forwarded", required="managed_channel_binding_direct_and_forwarded ... ok")

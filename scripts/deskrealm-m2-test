@@ -28,6 +28,10 @@ case "${1:-}" in
   native-admission)
     python3 managed/tests/native_wire.py --admission
     ;;
+  managed-interop)
+    python3 managed/tests/native_wire.py --desktop
+    bash scripts/deskrealm-m2-test vectors
+    ;;
   native-wire)
     python3 managed/tests/native_wire.py
     bash scripts/deskrealm-m2-test vectors
@@ -50,5 +54,5 @@ case "${1:-}" in
     [[ "$rust_result" == *'test tests::shared_signing_vectors ... ok'* ]] || { echo "missing Rust signing-vector test" >&2; exit 1; }
     [[ "$rust_result" == *'test tests::managed_peer_proofs_are_channel_and_role_bound ... ok'* ]] || { echo "missing Rust native-proof test" >&2; exit 1; }
     ;;
-  *) echo "usage: $0 sources|vectors|identity|rules|policies|sessions|leases|native-wire|native-coordination|native-admission" >&2; exit 2 ;;
+  *) echo "usage: $0 sources|vectors|identity|rules|policies|sessions|leases|native-wire|native-coordination|native-admission|managed-interop" >&2; exit 2 ;;
 esac

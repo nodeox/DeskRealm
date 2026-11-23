@@ -204,6 +204,9 @@ class Fixture:
     def session_request(self, path, authorization, body):
         return None
 
+    def policy_request(self, path, authorization):
+        return None
+
     @contextlib.contextmanager
     def center_server(self):
         fixture = self
@@ -212,17 +215,25 @@ class Fixture:
             def log_message(self, *_):
                 pass
 
+            def reply_json(self, result):
+                status, body = result
+                payload = b"" if status == 204 else json.dumps(body).encode()
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                if payload:
+                    self.wfile.write(payload)
+
+            def do_GET(self):
+                result = fixture.policy_request(self.path, self.headers.get("Authorization"))
+                self.reply_json(result or (404, {}))
+
             def do_POST(self):
                 request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                 session_result = fixture.session_request(self.path, self.headers.get("Authorization"), request)
                 if session_result is not None:
-                    status, body = session_result
-                    payload = json.dumps(body).encode()
-                    self.send_response(status)
-                    self.send_header("Content-Type", "application/json")
-                    self.send_header("Content-Length", str(len(payload)))
-                    self.end_headers()
-                    self.wfile.write(payload)
+                    self.reply_json(session_result)
                     return
                 route = fixture.routes.get(request.get("session_id"))
                 token = b64(RENDEZVOUS_TOKEN) if self.path == ROUTE_ENDPOINT else b64(RELAY_TOKEN)

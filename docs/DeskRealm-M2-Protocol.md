@@ -164,7 +164,7 @@ TCP 的绑定摘要使用 HMAC-SHA256，密钥为 RustDesk 方向密钥协商中
 
 中继要求两端分别证明其角色，核对授权、连接 UUID 和会合通知后请求中心登记配对。收到中心 204 后，中继向两端发送 `relay_ready`，随后开始原样转发。客户端必须等待 `relay_ready` 才能开始端到端数据握手。中心拒绝或超时会关闭两个连接。
 
-运行 `bash scripts/deskrealm-m2-test native-coordination` 可从锁定源码构建和运行两种服务。测试使用本机 TLS 中心夹具和签名端点，覆盖真实会合通知、直连候选回应、中继配对及双向字节转发。完整桌面端入口与策略应用进入后续工作。
+运行 `bash scripts/deskrealm-m2-test native-coordination` 可从锁定源码构建和运行两种服务。测试使用本机 TLS 中心夹具和签名端点，覆盖真实会合通知、直连候选回应、中继配对及双向字节转发。
 
 ## 原生端点准入
 
@@ -174,7 +174,25 @@ TCP 的绑定摘要使用 HMAC-SHA256，密钥为 RustDesk 方向密钥协商中
 
 受控端要求本地策略版本和操作范围匹配授权。有人值守时，受控入口请求本地批准，签名确认动作并用 `drd_` 请求中心核销。拒绝批准、权限不匹配、证明失败或核销失败时，端点不会向主控发送准入结果。中心返回成功后，受控端将经核销的动作和租约信息告知主控，并保留私有会话凭据。
 
-`bash scripts/deskrealm-m2-test native-admission` 从锁定源码构建端点库、`hbbs` 和 `hbbr`，在只含回环网络的容器运行两条 TCP 路径。TLS 中心夹具独立核对两端签名、本地批准签名和中继配对。此门禁的策略和确认由端点测试提供。桌面客户端入口、端点身份与策略生命周期、实际批准界面和远程操作启用留待后续接入。
+`bash scripts/deskrealm-m2-test native-admission` 从锁定源码构建端点库、`hbbs` 和 `hbbr`，在只含回环网络的容器运行两条 TCP 路径。TLS 中心夹具独立核对两端签名、本地批准签名、中继配对、设备认证、策略应用回执及关闭回执。两条连接测试使用夹具提供的本地确认。
+
+## 受管桌面入口
+
+用 `DESKREALM_MANAGED_MODE=1` 启用受管桌面。同一构建也可以用 Cargo 功能 `deskrealm-managed` 将受管模式设为进程默认入口。该构建仍要求显式配置 `DESKREALM_MANAGED_MODE=1`。缺少受管参数时拒绝连接。客户端使用与服务相同的 HTTPS 中心、中心签名公钥和可选 CA 配置。
+
+| 客户端配置 | 用途 |
+| --- | --- |
+| `DESKREALM_MANAGED_ORGANIZATION_ID`、`DESKREALM_MANAGED_DEVICE_ID` | 已批准设备的组织与设备 UUID。 |
+| `DESKREALM_MANAGED_DEVICE_SEED_FILE` | 已登记的 Ed25519 设备种子文件，单行无填充 Base64url 编码的 32 字节种子。 |
+| `DESKREALM_MANAGED_RUSTDESK_ID`、`DESKREALM_MANAGED_RENDEZVOUS_ADDRESS` | 与批准记录绑定的 RustDesk ID，以及会合服务的主机和端口。 |
+| `DESKREALM_MANAGED_RELAY_ID`、`DESKREALM_MANAGED_RELAY_ADDRESS` | 可选，启用中继时两项同时配置，使用与服务一致的中继 ID、主机和端口。 |
+| `DESKREALM_MANAGED_CONTROLLER_CREDENTIAL_FILE`、`DESKREALM_MANAGED_PURPOSE` | 主控读取已绑定到本设备的 `dru_` 凭据文件。用途可选，默认为 `helpdesk`。 |
+
+受控端用设备签名完成中心挑战并定期发送心跳，按组织、设备和密钥版本核对中心策略。策略校验通过后才应用版本及动作集合，并签发应用回执。遇到支持上报的策略字段错误时签发失败回执，暂停新准入。主控当前从桌面入口申请有人值守的查看和输入，界面的强制中继选项决定申请的连接路径。
+
+Windows 本地确认发送到当前解锁的物理控制台，显示此次授权的动作，默认拒绝。无可用控制台、超时或同时已有一条确认时拒绝。端点在线核销后关闭已准入的 TCP 流，再向中心报告实际关闭。远程操作和持续租约由 03-04 Task 2 接入。受管连接不进入原版会话。
+
+`bash scripts/deskrealm-m2-test managed-interop` 运行上述隔离用例和签名向量，并检查启用受管入口的 Linux RustDesk Rust 库编译。Windows 原生制品和实际本地确认仍需 Windows 环境验证。
 
 ## 原生构建入口与证据
 
@@ -187,4 +205,4 @@ TCP 的绑定摘要使用 HMAC-SHA256，密钥为 RustDesk 方向密钥协商中
 
 服务端从固定源码准备后，在对应 Linux 构建环境的服务端目录执行 `cargo build --locked --release --bin hbbs --bin hbbr`。工具链和依赖准备参考固定上游镜像构建配方。 [固定服务端构建配方](https://github.com/rustdesk/rustdesk-server/blob/73523b31cfd25d77dee862e6fc9f5e1fb5e485ef/docker-classic/Dockerfile)
 
-开发工件建议保存到 checkout 外的 `evidence/m2/builds/<target>/<deskrealm-commit>/`。每次记录 DeskRealm 提交、上游与子模块 SHA、补丁摘要、编译器及 SDK 版本、运行命令和工件 SHA-256。本次原生协议检查使用 Linux ARM64 容器。Windows x64、ARM64 原生制品及接入会话授权后完整的 Linux 受管服务端构建留待 03-04，目标环境注册和联网验收留待 Phase 5。
+开发工件建议保存到 checkout 外的 `evidence/m2/builds/<target>/<deskrealm-commit>/`。每次记录 DeskRealm 提交、上游与子模块 SHA、补丁摘要、编译器及 SDK 版本、运行命令和工件 SHA-256。当前原生协议检查在 Linux ARM64 容器构建及运行受管会合、中继和端点测试。Windows x64、ARM64 原生制品留待 03-04 Task 2，目标环境注册和联网验收留待 Phase 5。

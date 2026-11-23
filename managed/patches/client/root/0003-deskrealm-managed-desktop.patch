@@ -1,0 +1,1032 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index 625f45d..93e9bb7 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -21,6 +21,7 @@ name = "service"
+ path = "src/service.rs"
+ 
+ [features]
++deskrealm-managed = []
+ inline = []
+ use_samplerate = ["samplerate", "libsamplerate-sys"]
+ use_rubato = ["rubato"]
+@@ -143,6 +144,7 @@ windows = { version = "0.61", features = [
+     "Win32_System_Memory",
+     "Win32_System_Pipes",
+     "Win32_System_Registry",
++    "Win32_System_RemoteDesktop",
+     "Win32_System_SystemInformation",
+     "Win32_System_Threading",
+     "Win32_System_WindowsProgramming",
+diff --git a/libs/base/src/deskrealm_endpoint.rs b/libs/base/src/deskrealm_endpoint.rs
+index 178dca2..73bc809 100644
+--- a/libs/base/src/deskrealm_endpoint.rs
++++ b/libs/base/src/deskrealm_endpoint.rs
+@@ -37,6 +37,9 @@ const INITIAL_LEASE: Duration = Duration::from_secs(30);
+ const MAX_HTTP_BODY: usize = 8192;
+ const MAX_HANDSHAKE_FRAME: usize = 1024;
+ 
++mod runtime;
++pub use runtime::{DeviceCredential, InstalledPolicy};
++
+ const ACTIONS: [&str; 5] = ["view", "input", "audio", "clipboard", "file_transfer"];
+ 
+ pub struct Authority {
+@@ -187,11 +190,18 @@ impl Authority {
+         body: serde_json::Value,
+         allowed: &[u16],
+     ) -> ResultType<Vec<u8>> {
+-        let mut response = self
+-            .client
+-            .post(self.center.join(endpoint)?)
+-            .bearer_auth(bearer)
+-            .json(&body)
++        let mut request = self.client.post(self.center.join(endpoint)?).json(&body);
++        if !bearer.is_empty() {
++            request = request.bearer_auth(bearer);
++        }
++        Self::read_response(request, allowed).await
++    }
++
++    async fn read_response(
++        request: reqwest::RequestBuilder,
++        allowed: &[u16],
++    ) -> ResultType<Vec<u8>> {
++        let mut response = request
+             .send()
+             .await
+             .map_err(|_| anyhow!("managed center is unavailable"))?;
+@@ -695,6 +705,14 @@ fn actions(mask: u8) -> Vec<&'static str> {
+ }
+ 
+ fn mask(actions: &[String]) -> ResultType<u8> {
++    let out = policy_mask(actions)?;
++    if out == 0 {
++        bail!("managed actions are empty");
++    }
++    Ok(out)
++}
++
++fn policy_mask(actions: &[String]) -> ResultType<u8> {
+     let mut out = 0;
+     for action in actions {
+         let i = ACTIONS
+@@ -707,9 +725,6 @@ fn mask(actions: &[String]) -> ResultType<u8> {
+         }
+         out |= bit;
+     }
+-    if out == 0 {
+-        bail!("managed actions are empty");
+-    }
+     Ok(out)
+ }
+ 
+diff --git a/libs/base/src/deskrealm_endpoint/runtime.rs b/libs/base/src/deskrealm_endpoint/runtime.rs
+new file mode 100644
+index 0000000..2478d8e
+--- /dev/null
++++ b/libs/base/src/deskrealm_endpoint/runtime.rs
+@@ -0,0 +1,288 @@
++use super::{
++    check_credential, decode_hex_32, encode, now_ms, policy_mask, uuid_bytes, valid_identifier,
++    Authority, DeviceIdentity, Lease, URL_SAFE_NO_PAD,
++};
++use hbb_common::{
++    anyhow::{anyhow, bail},
++    base64::Engine as _,
++    chrono::{DateTime, Utc},
++    deskrealm_protocol::{DEVICE_CHALLENGE, POLICY_RECEIPT},
++    sodiumoxide::crypto::hash::sha256,
++    uuid::Uuid,
++    ResultType,
++};
++use serde_derive::Deserialize;
++use std::time::Duration;
++use tokio::time::Instant;
++
++pub struct DeviceCredential {
++    value: String,
++    organization: Uuid,
++    device: Uuid,
++    key_epoch: u64,
++    deadline: Instant,
++}
++
++impl DeviceCredential {
++    pub fn bearer(&self) -> &str {
++        &self.value
++    }
++
++    pub fn expires_within(&self, margin: Duration) -> bool {
++        Instant::now() + margin >= self.deadline
++    }
++}
++
++pub struct InstalledPolicy {
++    version: u64,
++    allowed_mask: u8,
++    unattended_purposes: Vec<String>,
++}
++
++impl InstalledPolicy {
++    pub fn version(&self) -> u64 {
++        self.version
++    }
++
++    pub fn allowed_mask(&self) -> u8 {
++        self.allowed_mask
++    }
++
++    pub fn unattended_purposes(&self) -> &[String] {
++        &self.unattended_purposes
++    }
++}
++
++#[derive(Deserialize)]
++struct DeviceChallenge {
++    device_id: String,
++    organization_id: String,
++    challenge_id: String,
++    nonce: String,
++    expires_ms: u64,
++    key_epoch: u64,
++    protocol_version: u16,
++}
++
++#[derive(Deserialize)]
++struct CredentialResponse {
++    credential: String,
++    expires_at: String,
++}
++
++#[derive(Deserialize)]
++struct Delivery {
++    device_id: String,
++    organization_id: String,
++    delivery_id: String,
++    policy_version: u64,
++    key_epoch: u64,
++    schema_version: u16,
++    payload_sha256: String,
++    allowed_actions: Vec<String>,
++    unattended_purposes: Vec<String>,
++}
++
++#[derive(Deserialize)]
++struct PolicyResponse {
++    policy: Option<Delivery>,
++}
++
++impl Authority {
++    pub async fn authenticate_device(
++        &self,
++        device: &DeviceIdentity,
++        organization: Uuid,
++    ) -> ResultType<DeviceCredential> {
++        let body = self
++            .post(
++                "/v1/managed/devices/challenge",
++                "",
++                serde_json::json!({
++                    "device_id": device.id.to_string(), "protocol_version": 1,
++                }),
++                &[200],
++            )
++            .await?;
++        let challenge: DeviceChallenge =
++            serde_json::from_slice(&body).map_err(|_| anyhow!("invalid device challenge"))?;
++        let id = uuid_bytes(&challenge.challenge_id)?;
++        let expires = challenge.expires_ms.saturating_sub(now_ms()?);
++        if uuid_bytes(&challenge.device_id)? != device.id
++            || uuid_bytes(&challenge.organization_id)? != organization
++            || challenge.protocol_version != 1
++            || !(1..=60_000).contains(&expires)
++        {
++            bail!("device challenge does not match this identity");
++        }
++        let nonce = URL_SAFE_NO_PAD.decode(challenge.nonce)?;
++        let proof = encode(
++            DEVICE_CHALLENGE,
++            &[
++                organization.as_bytes(),
++                device.id.as_bytes(),
++                id.as_bytes(),
++                &nonce,
++                &challenge.key_epoch.to_be_bytes(),
++                &challenge.expires_ms.to_be_bytes(),
++                &challenge.protocol_version.to_be_bytes(),
++            ],
++        )
++        .ok_or_else(|| anyhow!("malformed device challenge"))?;
++        let started = Instant::now();
++        let body = self
++            .post(
++                "/v1/managed/devices/complete",
++                "",
++                serde_json::json!({
++                    "device_id": device.id.to_string(), "challenge_id": id.to_string(),
++                    "signature": URL_SAFE_NO_PAD.encode(device.sign(&proof)),
++                }),
++                &[201],
++            )
++            .await?;
++        let result: CredentialResponse = serde_json::from_slice(&body)
++            .map_err(|_| anyhow!("invalid device credential response"))?;
++        check_credential(&result.credential, "drd_")?;
++        let expiry = DateTime::parse_from_rfc3339(&result.expires_at)?;
++        let lifetime = expiry
++            .signed_duration_since(Utc::now())
++            .to_std()
++            .map_err(|_| anyhow!("expired device credential"))?;
++        let deadline = started + lifetime.min(Duration::from_secs(15 * 60));
++        if deadline <= Instant::now() {
++            bail!("expired device credential");
++        }
++        Ok(DeviceCredential {
++            value: result.credential,
++            organization,
++            device: device.id,
++            key_epoch: challenge.key_epoch,
++            deadline,
++        })
++    }
++
++    pub async fn heartbeat(&self, credential: &DeviceCredential, build: &str) -> ResultType<()> {
++        self.post(
++            "/v1/managed/devices/heartbeat",
++            credential.bearer(),
++            serde_json::json!({
++                "device_id": credential.device.to_string(), "reported_build": build,
++            }),
++            &[204],
++        )
++        .await?;
++        Ok(())
++    }
++
++    pub async fn install_policy(
++        &self,
++        device: &DeviceIdentity,
++        credential: &DeviceCredential,
++    ) -> ResultType<Option<InstalledPolicy>> {
++        if credential.device != device.id || credential.expires_within(Duration::ZERO) {
++            bail!("managed policy credential does not match the device");
++        }
++        let endpoint = format!("/v1/managed/devices/{}/policy", device.id);
++        let request = self
++            .client
++            .get(self.center.join(&endpoint)?)
++            .bearer_auth(credential.bearer());
++        let body = Self::read_response(request, &[200]).await?;
++        let response: PolicyResponse = serde_json::from_slice(&body)
++            .map_err(|_| anyhow!("invalid policy delivery response"))?;
++        let Some(delivery) = response.policy else {
++            return Ok(None);
++        };
++        let delivery_id = uuid_bytes(&delivery.delivery_id)?;
++        if uuid_bytes(&delivery.device_id)? != device.id
++            || uuid_bytes(&delivery.organization_id)? != credential.organization
++            || delivery.key_epoch != credential.key_epoch
++        {
++            bail!("policy delivery does not match the authenticated device");
++        }
++        let digest = decode_hex_32(&delivery.payload_sha256)?;
++        let (policy, failed_mask, failed_fields) = delivery.install(digest);
++        let verified = policy.is_some();
++        let proof = encode(
++            POLICY_RECEIPT,
++            &[
++                credential.organization.as_bytes(),
++                device.id.as_bytes(),
++                delivery_id.as_bytes(),
++                &delivery.policy_version.to_be_bytes(),
++                &digest,
++                &credential.key_epoch.to_be_bytes(),
++                &[if verified { 1 } else { 2 }],
++                &[failed_mask],
++            ],
++        )
++        .ok_or_else(|| anyhow!("malformed policy receipt"))?;
++        self.post("/v1/managed/devices/policy-receipts", credential.bearer(), serde_json::json!({
++            "device_id": device.id.to_string(), "delivery_id": delivery_id.to_string(),
++            "policy_version": delivery.policy_version, "payload_sha256": delivery.payload_sha256,
++            "result": if verified { "applied" } else { "failed" }, "failed_fields": failed_fields,
++            "signature": URL_SAFE_NO_PAD.encode(device.sign(&proof)),
++        }), &[204]).await?;
++        Ok(policy)
++    }
++
++    /// After the desktop has closed a connection, reconcile its center state.
++    pub async fn report_local_end(&self, lease: &Lease) -> ResultType<()> {
++        let endpoint = format!("/v1/sessions/{}/stopped", lease.session_id);
++        self.post(&endpoint, lease.credential(), serde_json::json!({
++            "connection_id": lease.connection_id.to_string(), "lease_sequence": lease.sequence, "reason": "local_end",
++        }), &[204]).await?;
++        Ok(())
++    }
++}
++
++impl Delivery {
++    fn install(&self, digest: [u8; 32]) -> (Option<InstalledPolicy>, u8, Vec<&'static str>) {
++        let mut fields = Vec::new();
++        if self.schema_version != 1 {
++            return (None, 4, vec!["schema_version"]);
++        }
++        let mut failure = 0;
++        let actions = match policy_mask(&self.allowed_actions) {
++            Ok(actions) => actions,
++            Err(_) => {
++                fields.push("allowed_actions");
++                failure |= 1;
++                0
++            }
++        };
++        let mut purposes = self.unattended_purposes.clone();
++        purposes.sort_unstable();
++        if purposes.len() > 32
++            || purposes.iter().any(|v| !valid_identifier(v, 64))
++            || purposes.windows(2).any(|pair| pair[0] == pair[1])
++            || (actions == 0 && !purposes.is_empty() && failure == 0)
++        {
++            fields.push("unattended_purposes");
++            failure |= 2;
++        }
++        if failure != 0 {
++            return (None, failure, fields);
++        }
++        let mut hash = sha256::State::new();
++        hash.update(b"DR-M2-policy-v1\0");
++        hash.update(&[actions]);
++        for purpose in &purposes {
++            hash.update(purpose.as_bytes());
++            hash.update(&[0]);
++        }
++        if hash.finalize().0 != digest {
++            return (None, 3, vec!["allowed_actions", "unattended_purposes"]);
++        }
++        (
++            Some(InstalledPolicy {
++                version: self.policy_version,
++                allowed_mask: actions,
++                unattended_purposes: purposes,
++            }),
++            0,
++            fields,
++        )
++    }
++}
+diff --git a/libs/base/tests/deskrealm_interop.rs b/libs/base/tests/deskrealm_interop.rs
+index 9a0ef49..650420d 100644
+--- a/libs/base/tests/deskrealm_interop.rs
++++ b/libs/base/tests/deskrealm_interop.rs
+@@ -164,6 +164,7 @@ async fn managed_endpoint_admission_on_direct_and_relay() -> ResultType<()> {
+             assert_eq!(client.lease_sequence, host.sequence);
+             assert_eq!(client.lease_until_ms, host.until_ms);
+             assert_eq!(host.credential(), bearer("drc_", 13));
++            authority.report_local_end(&host).await?;
+         } else {
+             assert!(client.is_err(), "client opened a denied session");
+             assert!(host.is_err(), "host opened a denied session");
+@@ -171,3 +172,60 @@ async fn managed_endpoint_admission_on_direct_and_relay() -> ResultType<()> {
+     }
+     Ok(())
+ }
++
++#[tokio::test]
++async fn managed_device_policy_api_roundtrip() -> ResultType<()> {
++    let device = DeviceIdentity::from_seed(
++        env::var("DESKREALM_FIXTURE_TARGET")?.parse()?,
++        &sign::Seed([3; 32]),
++    )?;
++    let organization = env::var("DESKREALM_FIXTURE_ORGANIZATION")?.parse()?;
++    let ca = std::fs::read(env::var("DESKREALM_FIXTURE_CA")?)?;
++    let (center_key, _) = sign::keypair_from_seed(&sign::Seed([1; 32]));
++    let authority = Authority::new(
++        &env::var("DESKREALM_FIXTURE_CENTER")?,
++        "fixture-center".to_owned(),
++        center_key,
++        Some(&ca),
++    )?;
++    let credential = authority.authenticate_device(&device, organization).await?;
++    assert!(!credential.expires_within(Duration::from_secs(60)));
++    authority
++        .heartbeat(&credential, "native-runtime-fixture")
++        .await?;
++    let first = authority
++        .install_policy(&device, &credential)
++        .await?
++        .expect("fixture policy");
++    assert_eq!(first.version(), 1);
++    assert_eq!(first.allowed_mask(), 3);
++    assert_eq!(first.unattended_purposes(), &["helpdesk", "support"]);
++    assert!(
++        authority
++            .install_policy(&device, &credential)
++            .await?
++            .is_none(),
++        "unsupported schema applied"
++    );
++    assert!(
++        authority
++            .install_policy(&device, &credential)
++            .await
++            .is_err(),
++        "wrong organization accepted"
++    );
++    assert!(
++        authority
++            .install_policy(&device, &credential)
++            .await?
++            .is_none(),
++        "missing policy applied"
++    );
++    let deny_all = authority
++        .install_policy(&device, &credential)
++        .await?
++        .expect("deny-all fixture");
++    assert_eq!(deny_all.version(), 5);
++    assert_eq!(deny_all.allowed_mask(), 0);
++    Ok(())
++}
+diff --git a/src/client.rs b/src/client.rs
+index ea71ca4..a15b9b5 100644
+--- a/src/client.rs
++++ b/src/client.rs
+@@ -390,6 +390,14 @@ impl Client {
+         debug_assert!(peer == interface.get_id());
+         interface.update_direct(None);
+         interface.update_received(false);
++        #[cfg(not(any(target_os = "android", target_os = "ios")))]
++        if crate::deskrealm_desktop::enabled() {
++            if conn_type != ConnType::DEFAULT_CONN {
++                bail!("managed mode requires the desktop connection entry");
++            }
++            crate::deskrealm_desktop::connect(peer, interface.is_force_relay()).await?;
++            bail!("受管会话准入已通过，当前构建尚未启用远程操作。");
++        }
+         match Self::_start(peer, key, token, conn_type, interface.clone()).await {
+             Err(err) => {
+                 let err_str = err.to_string();
+diff --git a/src/deskrealm_desktop.rs b/src/deskrealm_desktop.rs
+new file mode 100644
+index 0000000..cb3c426
+--- /dev/null
++++ b/src/deskrealm_desktop.rs
+@@ -0,0 +1,436 @@
++//! Wires the desktop process to managed admission without legacy transport fallback.
++
++use base::{
++    deskrealm_endpoint::{
++        AppliedPolicy, Authority, DeviceCredential, DeviceIdentity, InstalledPolicy, LocalConsent,
++        TargetSession,
++    },
++    deskrealm_transport::{Network, RelayNode},
++};
++use hbb_common::{
++    anyhow::{anyhow, bail},
++    base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _},
++    bytes::Bytes,
++    config::{option2bool, Config},
++    deskrealm_protocol::{valid_rustdesk_id, Path, PeerRole},
++    protobuf::Message as _,
++    rendezvous_proto::{rendezvous_message, DeskRealmSignal, RegisterPk, RendezvousMessage},
++    sodiumoxide::crypto::sign,
++    tokio::{
++        self,
++        net::{lookup_host, UdpSocket},
++        sync::Semaphore,
++        time::{interval, timeout, MissedTickBehavior},
++    },
++    uuid::Uuid,
++    ResultType,
++};
++use std::{
++    env, fs::File, io::Read, net::SocketAddr, path::Path as FilePath, sync::Arc, time::Duration,
++};
++
++const SETTINGS: &[&str] = &[
++    "DESKREALM_MANAGED_MODE",
++    "DESKREALM_MANAGED_CENTER",
++    "DESKREALM_MANAGED_CENTER_KID",
++    "DESKREALM_MANAGED_CENTER_PUBLIC_KEY",
++    "DESKREALM_MANAGED_CA_FILE",
++    "DESKREALM_MANAGED_DEVICE_ID",
++    "DESKREALM_MANAGED_ORGANIZATION_ID",
++    "DESKREALM_MANAGED_DEVICE_SEED_FILE",
++    "DESKREALM_MANAGED_RUSTDESK_ID",
++    "DESKREALM_MANAGED_RENDEZVOUS_ADDRESS",
++    "DESKREALM_MANAGED_RELAY_ADDRESS",
++    "DESKREALM_MANAGED_RELAY_ID",
++    "DESKREALM_MANAGED_CONTROLLER_CREDENTIAL_FILE",
++    "DESKREALM_MANAGED_PURPOSE",
++];
++const ONLINE_INTERVAL: Duration = Duration::from_secs(12);
++const REGISTRATION_INTERVAL: Duration = Duration::from_secs(8);
++const REFRESH_MARGIN: Duration = Duration::from_secs(120);
++const LOOKUP_TIMEOUT: Duration = Duration::from_secs(5);
++
++pub(crate) fn enabled() -> bool {
++    cfg!(feature = "deskrealm-managed") || SETTINGS.iter().any(|var| env::var_os(var).is_some())
++}
++
++fn required(name: &'static str) -> ResultType<String> {
++    optional(name)?.ok_or_else(|| anyhow!("missing managed configuration: {}", name))
++}
++
++fn optional(name: &'static str) -> ResultType<Option<String>> {
++    match env::var(name) {
++        Ok(value) if !value.is_empty() => Ok(Some(value)),
++        Ok(_) | Err(env::VarError::NotPresent) => Ok(None),
++        Err(_) => bail!("invalid managed configuration: {}", name),
++    }
++}
++
++fn read_limited(path: &str, limit: u64) -> ResultType<Vec<u8>> {
++    let mut buffer = Vec::new();
++    File::open(FilePath::new(path))
++        .and_then(|file| file.take(limit + 1).read_to_end(&mut buffer))
++        .map_err(|_| anyhow!("managed configuration file is unavailable"))?;
++    if buffer.is_empty() || buffer.len() as u64 > limit {
++        bail!("invalid managed configuration file");
++    }
++    Ok(buffer)
++}
++
++fn decode_key(input: &str) -> ResultType<[u8; 32]> {
++    let decoded = URL_SAFE_NO_PAD
++        .decode(input)
++        .map_err(|_| anyhow!("invalid managed key"))?;
++    decoded
++        .try_into()
++        .map_err(|_| anyhow!("invalid managed key"))
++}
++
++async fn resolve(authority: &str) -> ResultType<SocketAddr> {
++    let mut addresses = timeout(LOOKUP_TIMEOUT, lookup_host(authority))
++        .await
++        .map_err(|_| anyhow!("managed server lookup timed out"))?
++        .map_err(|_| anyhow!("invalid managed server address"))?;
++    addresses
++        .find(|addr| addr.port() != 0 && !addr.ip().is_unspecified() && !addr.ip().is_multicast())
++        .ok_or_else(|| anyhow!("managed server address is unavailable"))
++}
++
++struct Relay {
++    id: String,
++    authority: String,
++    address: SocketAddr,
++}
++
++pub(crate) struct Desktop {
++    authority: Authority,
++    device: DeviceIdentity,
++    organization: Uuid,
++    rustdesk_id: String,
++    rendezvous: SocketAddr,
++    relay: Option<Relay>,
++}
++
++impl Desktop {
++    async fn configured() -> ResultType<Self> {
++        if optional("DESKREALM_MANAGED_MODE")?.as_deref() != Some("1") {
++            bail!("managed desktop configuration is incomplete");
++        }
++        let device = required("DESKREALM_MANAGED_DEVICE_ID")?.parse()?;
++        let organization = required("DESKREALM_MANAGED_ORGANIZATION_ID")?.parse()?;
++        let seed = read_limited(&required("DESKREALM_MANAGED_DEVICE_SEED_FILE")?, 128)?;
++        let device = DeviceIdentity::from_seed(
++            device,
++            &sign::Seed(decode_key(std::str::from_utf8(&seed)?.trim())?),
++        )?;
++        let rustdesk_id = required("DESKREALM_MANAGED_RUSTDESK_ID")?;
++        if !valid_rustdesk_id(&rustdesk_id) {
++            bail!("invalid managed RustDesk ID");
++        }
++        let key = sign::PublicKey(decode_key(&required(
++            "DESKREALM_MANAGED_CENTER_PUBLIC_KEY",
++        )?)?);
++        let ca = optional("DESKREALM_MANAGED_CA_FILE")?
++            .map(|path| read_limited(&path, 128 * 1024))
++            .transpose()?;
++        let authority = Authority::new(
++            &required("DESKREALM_MANAGED_CENTER")?,
++            required("DESKREALM_MANAGED_CENTER_KID")?,
++            key,
++            ca.as_deref(),
++        )?;
++        let rendezvous = resolve(&required("DESKREALM_MANAGED_RENDEZVOUS_ADDRESS")?).await?;
++        let relay = match (
++            optional("DESKREALM_MANAGED_RELAY_ID")?,
++            optional("DESKREALM_MANAGED_RELAY_ADDRESS")?,
++        ) {
++            (None, None) => None,
++            (Some(id), Some(authority)) => Some(Relay {
++                id,
++                address: resolve(&authority).await?,
++                authority,
++            }),
++            _ => bail!("managed relay configuration is incomplete"),
++        };
++        Ok(Self {
++            authority,
++            device,
++            organization,
++            rustdesk_id,
++            rendezvous,
++            relay,
++        })
++    }
++
++    fn network(&self) -> Network<'_> {
++        Network {
++            rendezvous: self.rendezvous,
++            relay: self.relay.as_ref().map(|relay| RelayNode {
++                authority: &relay.authority,
++                address: relay.address,
++            }),
++        }
++    }
++
++    async fn refresh(&self, previous: Option<Arc<Runtime>>) -> ResultType<Runtime> {
++        let credential = match previous {
++            Some(previous) if !previous.credential.expires_within(REFRESH_MARGIN) => {
++                previous.credential.clone()
++            }
++            _ => Arc::new(
++                self.authority
++                    .authenticate_device(&self.device, self.organization)
++                    .await?,
++            ),
++        };
++        self.authority
++            .heartbeat(&credential, crate::VERSION)
++            .await?;
++        let policy = self
++            .authority
++            .install_policy(&self.device, &credential)
++            .await?;
++        Ok(Runtime { credential, policy })
++    }
++}
++
++pub(crate) async fn connect(peer: &str, force_relay: bool) -> ResultType<()> {
++    if hbb_common::config::is_incoming_only() {
++        bail!("managed controller is unavailable in incoming-only mode");
++    }
++    let desktop = Desktop::configured().await?;
++    let credential = desktop
++        .authority
++        .authenticate_device(&desktop.device, desktop.organization)
++        .await?;
++    desktop
++        .authority
++        .heartbeat(&credential, crate::VERSION)
++        .await?;
++    let bearer = read_limited(
++        &required("DESKREALM_MANAGED_CONTROLLER_CREDENTIAL_FILE")?,
++        128,
++    )?;
++    let purpose = optional("DESKREALM_MANAGED_PURPOSE")?.unwrap_or_else(|| "helpdesk".to_owned());
++    let path = if force_relay {
++        Path::Relay
++    } else {
++        Path::Direct
++    };
++    let route = desktop
++        .authority
++        .issue(
++            &desktop.device,
++            std::str::from_utf8(&bearer)?.trim(),
++            peer,
++            Uuid::new_v4(),
++            &purpose,
++            3,
++            true,
++        )
++        .await?;
++    let grant = desktop
++        .authority
++        .verify(&route, &desktop.device, PeerRole::Controller)?;
++    if grant.organization_id() != desktop.organization.as_bytes() {
++        bail!("managed grant belongs to a different organization");
++    }
++    let mut stream = desktop
++        .network()
++        .connect_controller(&desktop.authority, &desktop.device, &route, path)
++        .await?;
++    desktop
++        .authority
++        .connect_controller(&mut stream, &route, &desktop.device, path)
++        .await?;
++    // Managed admission intentionally does not return a stream to the legacy
++    // session dispatcher. Operation and lease enforcement will own this handoff.
++    Ok(())
++}
++
++pub(crate) struct Runtime {
++    credential: Arc<DeviceCredential>,
++    policy: Option<InstalledPolicy>,
++}
++
++pub(crate) async fn serve() -> ResultType<()> {
++    let desktop = Arc::new(Desktop::configured().await?);
++    let address = if desktop.rendezvous.is_ipv4() {
++        "0.0.0.0:0"
++    } else {
++        "[::]:0"
++    };
++    let socket = UdpSocket::bind(address).await?;
++    socket.connect(desktop.rendezvous).await?;
++    let mut registration = RendezvousMessage::new();
++    registration.set_register_pk(RegisterPk {
++        id: desktop.rustdesk_id.clone(),
++        uuid: Bytes::copy_from_slice(desktop.device.id.as_bytes()),
++        pk: Bytes::copy_from_slice(desktop.device.public_key.as_ref()),
++        ..Default::default()
++    });
++    let registration = registration.write_to_bytes()?;
++    let mut registration_timer = interval(REGISTRATION_INTERVAL);
++    registration_timer.set_missed_tick_behavior(MissedTickBehavior::Skip);
++    let mut center_timer = interval(ONLINE_INTERVAL);
++    center_timer.set_missed_tick_behavior(MissedTickBehavior::Skip);
++    let pending = Arc::new(Semaphore::new(8));
++    let prompts = Arc::new(Semaphore::new(1));
++    let mut runtime = None;
++    let mut bytes = [0u8; 4096];
++    loop {
++        tokio::select! {
++            _ = registration_timer.tick() => {
++                if !stopped() {
++                    socket.send(&registration).await?;
++                }
++            }
++            _ = center_timer.tick() => {
++                runtime = if stopped() {
++                    None
++                } else {
++                    match desktop.refresh(runtime.take()).await {
++                        Ok(state) => Some(Arc::new(state)),
++                        Err(_) => {
++                            hbb_common::log::warn!("managed device or policy refresh failed");
++                            None
++                        }
++                    }
++                };
++            }
++            size = socket.recv(&mut bytes) => {
++                let size = size?;
++                let Some(state) = runtime.as_ref().filter(|state| state.policy.is_some()) else { continue };
++                if stopped() || size == bytes.len() { continue; }
++                let Ok(message) = RendezvousMessage::parse_from_bytes(&bytes[..size]) else { continue };
++                let Some(rendezvous_message::Union::DeskrealmSignal(signal)) = message.union else { continue };
++                let Ok(permit) = pending.clone().try_acquire_owned() else { continue };
++                let desktop = desktop.clone();
++                let state = state.clone();
++                let prompts = prompts.clone();
++                tokio::spawn(async move {
++                    let _permit = permit;
++                    if let Err(error) = crate::server::create_managed_tcp_connection(desktop, state, signal, prompts).await {
++                        hbb_common::log::debug!("managed connection closed: {}", error);
++                    }
++                });
++            }
++        }
++    }
++}
++
++fn stopped() -> bool {
++    option2bool("stop-service", &Config::get_option("stop-service"))
++        || crate::platform::installing_service()
++}
++
++pub(crate) async fn authorize_target(
++    desktop: &Desktop,
++    state: &Runtime,
++    signal: DeskRealmSignal,
++    prompts: Arc<Semaphore>,
++) -> ResultType<()> {
++    let route = signal
++        .route
++        .as_ref()
++        .ok_or_else(|| anyhow!("managed route is missing"))?;
++    let grant = desktop
++        .authority
++        .verify(route, &desktop.device, PeerRole::Target)?;
++    if grant.organization_id() != desktop.organization.as_bytes()
++        || stopped()
++        || state.credential.expires_within(Duration::ZERO)
++    {
++        bail!("managed target is unavailable");
++    }
++    let policy = state
++        .policy
++        .as_ref()
++        .ok_or_else(|| anyhow!("no managed policy applied"))?;
++    if grant.policy_version() != policy.version()
++        || grant.allowed_mask() & !policy.allowed_mask() != 0
++    {
++        bail!("managed grant does not match locally applied policy");
++    }
++    let (mut stream, route, path) = desktop
++        .network()
++        .accept_target(
++            &desktop.authority,
++            &desktop.device,
++            &desktop.rustdesk_id,
++            signal,
++        )
++        .await?;
++    let unattended = policy
++        .unattended_purposes()
++        .iter()
++        .map(String::as_str)
++        .collect::<Vec<_>>();
++    let relay_id = if path == Path::Relay {
++        &desktop
++            .relay
++            .as_ref()
++            .ok_or_else(|| anyhow!("managed relay is not configured"))?
++            .id
++    } else {
++        ""
++    };
++    let lease = desktop
++        .authority
++        .connect_target(
++            &mut stream,
++            TargetSession {
++                route: &route,
++                device: &desktop.device,
++                device_credential: state.credential.bearer(),
++                path,
++                relay_id,
++                policy: AppliedPolicy {
++                    version: policy.version(),
++                    allowed_mask: policy.allowed_mask(),
++                    unattended_purposes: &unattended,
++                },
++            },
++            |request| async move { ask_local_user(request, prompts).await },
++        )
++        .await?;
++    // Keep the data channel out of the legacy input and media dispatcher until
++    // managed operations and the local lease deadline are enforced there.
++    drop(stream);
++    desktop.authority.report_local_end(&lease).await
++}
++
++async fn ask_local_user(request: LocalConsent, prompts: Arc<Semaphore>) -> Option<u8> {
++    if stopped() {
++        return None;
++    }
++    let permit = prompts.try_acquire_owned().ok()?;
++    tokio::task::spawn_blocking(move || {
++        // Keep the permit until the native dialog has closed, even if the
++        // networking task is cancelled while waiting for it.
++        let _permit = permit;
++        #[cfg(target_os = "windows")]
++        {
++            let names = ["查看画面", "键鼠控制", "音频", "剪贴板", "文件传输"];
++            let operations = names
++                .iter()
++                .enumerate()
++                .filter_map(|(bit, name)| (request.allowed_mask & (1 << bit) != 0).then_some(*name))
++                .collect::<Vec<_>>()
++                .join("、");
++            let text = format!(
++                "是否允许本次受管会话？\n\n主控用户 {}\n主控设备 {}\n用途 {}\n操作 {}",
++                request.user_id, request.controller_device_id, request.purpose, operations
++            );
++            if crate::platform::confirm_deskrealm_consent(&text) && !stopped() {
++                return Some(request.allowed_mask);
++            }
++        }
++        #[cfg(not(target_os = "windows"))]
++        let _ = request;
++        None
++    })
++    .await
++    .ok()
++    .flatten()
++}
+diff --git a/src/lib.rs b/src/lib.rs
+index f6e48a1..035f54d 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -14,6 +14,8 @@ mod server;
+ #[cfg(not(any(target_os = "ios")))]
+ pub use self::server::*;
+ mod client;
++#[cfg(not(any(target_os = "android", target_os = "ios")))]
++mod deskrealm_desktop;
+ mod lan;
+ #[cfg(not(any(target_os = "ios")))]
+ mod rendezvous_mediator;
+diff --git a/src/platform/windows.rs b/src/platform/windows.rs
+index a09783d..ed19368 100644
+--- a/src/platform/windows.rs
++++ b/src/platform/windows.rs
+@@ -4171,6 +4171,51 @@ pub fn try_kill_broker() {
+         .spawn());
+ }
+ 
++// The RustDesk service may run in Session 0. Send the prompt to the
++// unlocked physical console, and accept only an explicit Yes from that seat.
++pub(crate) fn confirm_deskrealm_consent(message: &str) -> bool {
++    use windows::{
++        core::PCWSTR,
++        Win32::{
++            System::RemoteDesktop::{WTSGetActiveConsoleSessionId, WTSSendMessageW},
++            UI::WindowsAndMessaging::{
++                IDYES, MB_DEFBUTTON2, MB_ICONWARNING, MB_YESNO, MESSAGEBOX_RESULT,
++            },
++        },
++    };
++
++    let session = unsafe { WTSGetActiveConsoleSessionId() };
++    let available = || {
++        session != 0 && session != u32::MAX
++            && (unsafe { WTSGetActiveConsoleSessionId() }) == session
++            && is_session_prelogin(session) == Some(false)
++            && is_session_locked_flag(session) == Some(false)
++    };
++    if !available() {
++        return false;
++    }
++    let title: Vec<u16> = "DeskRealm 远程访问确认".encode_utf16().chain([0]).collect();
++    let body: Vec<u16> = message.encode_utf16().chain([0]).collect();
++    let title_bytes = ((title.len() - 1) * std::mem::size_of::<u16>()) as u32;
++    let body_bytes = ((body.len() - 1) * std::mem::size_of::<u16>()) as u32;
++    let mut response = MESSAGEBOX_RESULT::default();
++    let displayed = unsafe {
++        WTSSendMessageW(
++            None,
++            session,
++            PCWSTR(title.as_ptr()),
++            title_bytes,
++            PCWSTR(body.as_ptr()),
++            body_bytes,
++            MB_YESNO | MB_DEFBUTTON2 | MB_ICONWARNING,
++            25,
++            &mut response,
++            true,
++        )
++    };
++    displayed.is_ok() && response == IDYES && available()
++}
++
+ pub fn message_box(text: &str) {
+     let mut text = text.to_owned();
+     let nodialog = std::env::var("NO_DIALOG").unwrap_or_default() == "Y";
+diff --git a/src/rendezvous_mediator.rs b/src/rendezvous_mediator.rs
+index 7e7ea5f..c0167e6 100644
+--- a/src/rendezvous_mediator.rs
++++ b/src/rendezvous_mediator.rs
+@@ -310,6 +310,15 @@ impl RendezvousMediator {
+     }
+ 
+     pub async fn start_all() {
++        #[cfg(not(any(target_os = "android", target_os = "ios")))]
++        if crate::deskrealm_desktop::enabled() {
++            if !config::is_outgoing_only() {
++                if let Err(error) = crate::deskrealm_desktop::serve().await {
++                    log::error!("managed rendezvous stopped: {}", error);
++                }
++            }
++            return;
++        }
+         crate::test_nat_type();
+         if config::is_outgoing_only() {
+             loop {
+diff --git a/src/server.rs b/src/server.rs
+index a88e33a..14efc72 100644
+--- a/src/server.rs
++++ b/src/server.rs
+@@ -210,6 +210,16 @@ async fn accept_connection_(
+     Ok(())
+ }
+ 
++#[cfg(not(any(target_os = "android", target_os = "ios")))]
++pub(crate) async fn create_managed_tcp_connection(
++    desktop: Arc<crate::deskrealm_desktop::Desktop>,
++    state: Arc<crate::deskrealm_desktop::Runtime>,
++    offer: DeskRealmSignal,
++    prompts: Arc<tokio::sync::Semaphore>,
++) -> ResultType<()> {
++    crate::deskrealm_desktop::authorize_target(&desktop, &state, offer, prompts).await
++}
++
+ pub async fn create_tcp_connection(
+     server: ServerPtr,
+     stream: Stream,
+@@ -217,6 +227,10 @@ pub async fn create_tcp_connection(
+     secure: bool,
+     meta: ConnectionMeta,
+ ) -> ResultType<()> {
++    #[cfg(not(any(target_os = "android", target_os = "ios")))]
++    if crate::deskrealm_desktop::enabled() {
++        bail!("legacy connections are disabled in managed mode");
++    }
+     let mut stream = stream;
+     // The address the connection layer keys on, whitelist and admission alike.
+     let addr = hbb_common::try_into_v4(addr);
