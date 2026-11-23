@@ -1,0 +1,200 @@
+name: DeskRealm Windows native builds
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/deskrealm-windows.yml'
+      - 'managed/windows_build.py'
+      - 'managed/tests/windows_build_test.py'
+      - 'managed/upstream.lock'
+      - 'managed/native/**'
+      - 'managed/patches/**'
+      - 'scripts/deskrealm-managed-source'
+      - 'scripts/deskrealm-m2-test'
+
+permissions:
+  contents: read
+
+env:
+  VCPKG_COMMIT: 9e593bb18ea69cc5095e012465dcd675a822ed0d
+  RUST_VERSION: '1.75.0'
+  PYTHONUTF8: '1'
+  GIT_CONFIG_COUNT: '1'
+  GIT_CONFIG_KEY_0: core.autocrlf
+  GIT_CONFIG_VALUE_0: 'false'
+
+jobs:
+  bridge:
+    name: Generate bridge (${{ matrix.arch }})
+    runs-on: ubuntu-22.04
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            target: x86_64-pc-windows-msvc
+            flutter: '3.22.3'
+          - arch: arm64
+            target: aarch64-pc-windows-msvc
+            flutter: '3.44.8'
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          components: rustfmt
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          channel: stable
+          flutter-version: ${{ matrix.flutter }}
+      - name: Install pinned bridge generator
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang libclang-dev llvm-dev libgtk-3-dev nasm ninja-build
+          cargo install cargo-expand --version 1.0.95 --locked
+          cargo install flutter_rust_bridge_codegen --version 1.80.1 --features uuid --locked
+      - name: Generate managed bridge
+        env:
+          DESKREALM_TARGET: ${{ matrix.target }}
+        run: python3 managed/windows_build.py bridge "$DESKREALM_TARGET" "$RUNNER_TEMP/bridge-source" "$RUNNER_TEMP/bridge"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: bridge-${{ matrix.arch }}
+          path: ${{ runner.temp }}/bridge
+          if-no-files-found: error
+
+  build:
+    name: Native build and tests (${{ matrix.arch }})
+    needs: bridge
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 220
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: windows-2022
+            target: x86_64-pc-windows-msvc
+            flutter: '3.24.5'
+          - arch: arm64
+            runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            flutter: '3.44.9'
+    env:
+      DESKREALM_TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: bridge-${{ matrix.arch }}
+          path: ${{ runner.temp }}/bridge
+      - name: Select native MSVC developer environment
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
+        with:
+          arch: ${{ matrix.arch }}
+      - name: Install Rust for the native host
+        run: |
+          $toolchain = "$env:RUST_VERSION-$env:DESKREALM_TARGET"
+          rustup toolchain install $toolchain --profile minimal
+          if ($LASTEXITCODE -ne 0) { throw 'Rust toolchain installation failed' }
+          "RUSTUP_TOOLCHAIN=$toolchain" >> $env:GITHUB_ENV
+      - name: Install x64 LLVM
+        if: matrix.arch == 'x64'
+        uses: KyleMayes/install-llvm-action@ebc0426251bc40c7cd31162802432c68818ab8f0 # v2.0.9
+        with:
+          version: '15.0.6'
+      - name: Install native ARM64 LLVM
+        if: matrix.arch == 'arm64'
+        shell: pwsh
+        run: |
+          $uri = 'https://github.com/llvm/llvm-project/releases/download/llvmorg-20.1.8/LLVM-20.1.8-woa64.exe'
+          $installer = Join-Path $env:RUNNER_TEMP 'llvm-arm64.exe'
+          $destination = Join-Path $env:RUNNER_TEMP 'LLVM-ARM64'
+          Invoke-WebRequest -Uri $uri -OutFile $installer
+          $expected = '7c4ac97eb2ae6b960ca5f9caf3ff6124c8d2a18cc07a7840a4d2ea15537bad8e'
+          if ((Get-FileHash $installer -Algorithm SHA256).Hash -ne $expected) { throw 'LLVM hash mismatch' }
+          $process = Start-Process $installer -ArgumentList @('/S', "/D=$destination") -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "LLVM installer exited $($process.ExitCode)" }
+          "LIBCLANG_PATH=$destination\bin" >> $env:GITHUB_ENV
+          "$destination\bin" >> $env:GITHUB_PATH
+      - name: Locate x64 libclang
+        if: matrix.arch == 'x64'
+        run: |
+          $clangDirectory = Split-Path -Parent (Get-Command clang.exe).Source
+          "LIBCLANG_PATH=$clangDirectory" >> $env:GITHUB_ENV
+      - name: Install pinned Flutter
+        uses: subosito/flutter-action@2783a3f08e1baf891508463f8c6653c258246225 # v2.12.0
+        with:
+          channel: stable
+          flutter-version: ${{ matrix.flutter }}
+          architecture: x64
+      - name: Prepare native ARM64 Dart and Flutter engine
+        if: matrix.arch == 'arm64'
+        shell: pwsh
+        run: |
+          if ($env:PROCESSOR_ARCHITECTURE -ne 'ARM64') { throw 'Native ARM64 runner required' }
+          $flutterRoot = Split-Path -Parent (Split-Path -Parent (Get-Command flutter.bat).Source)
+          Remove-Item "$flutterRoot\bin\cache\engine-dart-sdk.stamp" -ErrorAction SilentlyContinue
+          & "$flutterRoot\bin\internal\update_dart_sdk.ps1"
+          $dart = dart --version 2>&1 | Out-String
+          if ($LASTEXITCODE -ne 0 -or $dart -notmatch 'windows_arm64') { throw "Wrong Dart SDK: $dart" }
+          flutter precache --windows
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path "$flutterRoot\bin\cache\artifacts\engine\windows-arm64-release")) {
+            throw 'Native Windows ARM64 engine missing'
+          }
+      - name: Install pinned RustDesk x64 Flutter engine
+        if: matrix.arch == 'x64'
+        shell: pwsh
+        run: |
+          $flutterRoot = Split-Path -Parent (Split-Path -Parent (Get-Command flutter.bat).Source)
+          flutter precache --windows
+          if ($LASTEXITCODE -ne 0) { throw 'Flutter precache failed' }
+          $archive = Join-Path $env:RUNNER_TEMP 'windows-x64-release.zip'
+          Invoke-WebRequest https://github.com/rustdesk/engine/releases/download/main/windows-x64-release.zip -OutFile $archive
+          $expected = 'ec8cabf36ee4ff24c8d98de25b00e70781eb03876265aee84d0fe554a110036e'
+          if ((Get-FileHash $archive -Algorithm SHA256).Hash -ne $expected) { throw 'Flutter engine hash mismatch' }
+          Expand-Archive $archive "$flutterRoot\bin\cache\artifacts\engine\windows-x64-release" -Force
+      - name: Set up pinned vcpkg
+        uses: lukka/run-vcpkg@b1a0dd252f06b9e25b3c022a9a03bd7a427fb6a2 # v11
+        with:
+          vcpkgDirectory: C:\deskrealm-vcpkg
+          vcpkgGitCommitId: ${{ env.VCPKG_COMMIT }}
+      - name: Compile managed Windows client and run tests
+        shell: pwsh
+        run: |
+          python managed/windows_build.py build $env:DESKREALM_TARGET "$env:RUNNER_TEMP\deskrealm-source" "$env:RUNNER_TEMP\evidence" --bridge "$env:RUNNER_TEMP\bridge"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: windows-${{ matrix.arch }}
+          path: ${{ runner.temp }}/evidence/
+          if-no-files-found: error
+      - name: Upload failed build logs
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: windows-${{ matrix.arch }}-failed-logs
+          path: ${{ runner.temp }}/evidence/**/*.log
+          if-no-files-found: ignore
+
+  verify:
+    name: Verify Windows build evidence
+    needs: build
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: windows-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/evidence
+      - run: python3 -m unittest discover -s managed/tests -p windows_build_test.py
+      - run: bash scripts/deskrealm-m2-test windows-builds "$RUNNER_TEMP/evidence"

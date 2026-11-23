@@ -61,10 +61,29 @@ def verify_schemas(client, server):
     print("Native signaling schemas agree on direct and relay; managed peer fields verified.", flush=True)
 
 
+def target_directory(repo):
+    root = os.environ.get("DESKREALM_NATIVE_CACHE_ROOT")
+    if root:
+        return (Path(root).resolve() / f"{repo.name}-target").resolve()
+    return repo / "target"
+
+
 def in_source(repo, cache, image, command, required=None):
-    cache.mkdir(exist_ok=True)
+    root = os.environ.get("DESKREALM_NATIVE_CACHE_ROOT")
+    offline = os.environ.get("DESKREALM_NATIVE_OFFLINE") == "1"
+    if offline and not root:
+        raise RuntimeError("offline native tests require DESKREALM_NATIVE_CACHE_ROOT")
+    args = ["docker", "run", "--rm", "--volume", f"{repo}:/source"]
+    if root:
+        cache = (Path(root).resolve() / f"{repo.name}-cache").resolve()
+        target = target_directory(repo)
+        target.mkdir(parents=True, exist_ok=True)
+        args += ["--volume", f"{target}:/source/target"]
+    if offline:
+        args += ["--network", "none", "--env", "CARGO_NET_OFFLINE=true"]
+    cache.mkdir(parents=True, exist_ok=True)
     run = subprocess.run(
-        ["docker", "run", "--rm", "--volume", f"{repo}:/source", "--volume", f"{cache}:/cargo-cache",
+        [*args, "--volume", f"{cache}:/cargo-cache",
          "--env", "CARGO_HOME=/cargo-cache", "--env", "CARGO_NET_GIT_FETCH_WITH_CLI=true",
          "--workdir", "/source", image, *command],
         text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -73,23 +92,44 @@ def in_source(repo, cache, image, command, required=None):
         print(run.stdout[-12000:], flush=True)
         raise RuntimeError(f"{repo.name}: locked native check did not pass")
     print(run.stdout[-1800:], flush=True)
+    return run.stdout
 
 
 def cargo(repo, cache, image, *args, required=None):
-    in_source(repo, cache, image, ["cargo", *args], required=required)
+    return in_source(repo, cache, image, ["cargo", *args], required=required)
 
 
-def run_fixture(server, client, admission):
-    binary = server / "target/debug"
+def interoperability_binary(client, cache):
+    output = cargo(client, cache, CLIENT_IMAGE, "test", "--locked", "-p", "base", "--test",
+                   "deskrealm_interop", "--no-run", "--message-format=json")
+    executables = []
+    for line in output.splitlines():
+        if not line.startswith("{"):
+            continue
+        record = json.loads(line)
+        if (record.get("reason") == "compiler-artifact"
+                and record.get("target", {}).get("name") == "deskrealm_interop"
+                and record.get("executable")):
+            executable = Path(record["executable"]).relative_to("/source/target")
+            executables.append(target_directory(client) / executable)
+    if len(executables) != 1 or not executables[0].is_file():
+        raise RuntimeError("expected exactly one built interoperability test executable")
+    return executables[0]
+
+
+def run_fixture(server, client, admission, executable=None):
+    binary = target_directory(server) / "debug"
     args = ["docker", "run", "--rm", "--network", "none",
             "--volume", f"{ROOT / 'managed/tests'}:/fixture:ro",
             "--volume", f"{binary}:/server:ro"]
     if admission:
-        candidates = sorted(path for path in (client / "target/debug/deps").glob("deskrealm_interop-*")
-                            if path.is_file() and os.access(path, os.X_OK))
-        if len(candidates) != 1:
-            raise RuntimeError("expected exactly one native interoperability test executable")
-        args += ["--volume", f"{candidates[0]}:/endpoint:ro", SERVER_IMAGE,
+        if executable is None:
+            candidates = sorted(path for path in (target_directory(client) / "debug/deps").glob("deskrealm_interop-*")
+                                if path.is_file() and os.access(path, os.X_OK))
+            if len(candidates) != 1:
+                raise RuntimeError("expected exactly one native interoperability test executable")
+            executable = candidates[0]
+        args += ["--volume", f"{executable}:/endpoint:ro", SERVER_IMAGE,
                  "python3", "/fixture/native_endpoint_fixture.py", "/server", "/endpoint"]
     else:
         args += [SERVER_IMAGE, "python3", "/fixture/native_coord_fixture.py", "/server"]
@@ -139,6 +179,7 @@ def main():
     modes.add_argument("--audio", action="store_true", help="run managed audio permission and Opus queue tests")
     modes.add_argument("--clipboard", action="store_true", help="run managed text clipboard tests on X11")
     modes.add_argument("--files", action="store_true", help="run managed file and cleanup tests")
+    modes.add_argument("--endpoint", action="store_true", help="run admission, leases and all managed desktop tests")
     arguments = parser.parse_args()
     # Use a Docker-mountable path on macOS, even when TMPDIR is a per-user path.
     directory = os.environ.get("DESKREALM_NATIVE_TMPDIR", "/tmp")
@@ -169,11 +210,11 @@ def main():
             selector, expected = ("managed_input_", 2) if arguments.input else ("managed_view_", 3)
             check_x11(source / "client", scratch / "client-cache", scratch, selector, expected)
             return
-        if arguments.coordination or arguments.admission or arguments.desktop:
-            admission = arguments.admission or arguments.desktop
+        if arguments.coordination or arguments.admission or arguments.desktop or arguments.endpoint:
+            admission = arguments.admission or arguments.desktop or arguments.endpoint
+            executable = None
             if admission:
-                cargo(source / "client", scratch / "client-cache", CLIENT_IMAGE, "test", "--locked",
-                      "-p", "base", "--test", "deskrealm_interop", "--no-run")
+                executable = interoperability_binary(source / "client", scratch / "client-cache")
                 cargo(source / "client", scratch / "client-cache", CLIENT_IMAGE, "test", "--locked",
                       "-p", "base", "--lib", "deskrealm_endpoint::lease::tests::managed_lease_",
                       required="test result: ok. 4 passed")
@@ -182,7 +223,9 @@ def main():
                       required="resume_requires_revalidation_before_any_access ... ok")
             cargo(source / "server", scratch / "server-cache", SERVER_IMAGE, "build", "--locked",
                   "--bin", "hbbs", "--bin", "hbbr")
-            run_fixture(source / "server", source / "client", admission)
+            run_fixture(source / "server", source / "client", admission, executable)
+            if arguments.endpoint:
+                check_x11(source / "client", scratch / "client-cache", scratch, "managed_", 11)
             if arguments.desktop:
                 check_desktop(source / "client", scratch / "client-cache", scratch)
             return

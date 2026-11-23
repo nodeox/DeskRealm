@@ -216,13 +216,15 @@ Windows 本地确认发送到当前解锁的物理控制台，显示此次授权
 
 ## 原生构建入口与证据
 
-受管 Windows 构建沿用固定客户端工作流的原生 MSVC 环境。先按工作流生成对应版本的 Flutter bridge 并安装锁定的 vcpkg 依赖。上游配置为 Rust 1.75、vcpkg `9e593bb18ea69cc5095e012465dcd675a822ed0d`，ARM64 用对应版本的原生 Dart 和 Windows engine，并将 `SODIUM_LIB_DIR` 指向 ARM64 vcpkg 库。 [固定 Windows 工作流](https://github.com/rustdesk/rustdesk/blob/95cca3f661f635b3cc85c04935fe8d96d8f432ef/.github/workflows/flutter-build.yml#L157-L339)
+在配置了 GitHub Actions 的仓库运行 **DeskRealm Windows native builds**。工作流从锁定的 RustDesk 源码重放 DeskRealm 补丁，为两个架构分别生成 Flutter bridge，在原生 MSVC 上用 Rust 1.75.0 编译并运行测试，再打包带有 `deskrealm-managed` 特性的 Flutter 客户端。ARM64 使用原生 Dart、Flutter engine 与 libclang，并将 `SODIUM_LIB_DIR` 指向 ARM64 vcpkg 库。两种架构使用 vcpkg 提交 `9e593bb18ea69cc5095e012465dcd675a822ed0d`。 [固定 Windows 工作流](https://github.com/rustdesk/rustdesk/blob/95cca3f661f635b3cc85c04935fe8d96d8f432ef/.github/workflows/flutter-build.yml#L157-L339)
 
-| 目标 | 工作流环境 | 客户端目录中的构建命令 | 原生输出目录 |
+| 目标 | 运行器及 Rust 目标 | Flutter 与 vcpkg | 工作流工件 |
 | --- | --- | --- | --- |
-| Windows x64 | `windows-2022`、`x86_64-pc-windows-msvc`、Flutter 3.24.5、`x64-windows-static` | `python3 ./build.py --portable --flutter --skip-portable-pack --hwcodec --vram` | `flutter/build/windows/x64/runner/Release` |
-| Windows ARM64 | `windows-11-arm`、`aarch64-pc-windows-msvc`、Flutter 3.44.9、`arm64-windows-static` | `python3 ./build.py --portable --flutter --skip-portable-pack --hwcodec` | `flutter/build/windows/arm64/runner/Release` |
+| Windows x64 | `windows-2022`，`x86_64-pc-windows-msvc` | Flutter 3.24.5，`x64-windows-static` | `windows-x64` |
+| Windows ARM64 | `windows-11-arm`，`aarch64-pc-windows-msvc` | Flutter 3.44.9，`arm64-windows-static` | `windows-arm64` |
 
 服务端从固定源码准备后，在对应 Linux 构建环境的服务端目录执行 `cargo build --locked --release --bin hbbs --bin hbbr`。工具链和依赖准备参考固定上游镜像构建配方。 [固定服务端构建配方](https://github.com/rustdesk/rustdesk-server/blob/73523b31cfd25d77dee862e6fc9f5e1fb5e485ef/docker-classic/Dockerfile)
 
-开发工件建议保存到 checkout 外的 `evidence/m2/builds/<target>/<deskrealm-commit>/`。每次记录 DeskRealm 提交、上游与子模块 SHA、补丁摘要、编译器及 SDK 版本、运行命令和工件 SHA-256。当前原生协议检查在 Linux ARM64 容器构建及运行受管会合、中继和端点测试。Windows x64、ARM64 原生制品留待 03-04 Task 2，目标环境注册和联网验收留待 Phase 5。
+用 `bash scripts/deskrealm-m2-test endpoint` 运行隔离直连和强制中继、Rust 租约及恢复测试、Xvfb 桌面能力测试和 PostgreSQL 回归。可选设置 `DESKREALM_NATIVE_CACHE_ROOT` 复用 Cargo 与构建缓存。缓存已填充时设置 `DESKREALM_NATIVE_OFFLINE=1` 可断网运行 Cargo 容器，源码重放仍需访问锁定上游。
+
+将两架构的工件合并解压到同一个证据根目录，保留 `<rust-target>/<deskrealm-commit>/` 结构。检出同一个 DeskRealm 提交后运行 `bash scripts/deskrealm-m2-test windows-builds <证据根目录>`。门禁检查提交与构建输入摘要、上游和子模块 SHA、编译器及 SDK 版本、构建和测试日志、客户端 ZIP 摘要及关键二进制的 PE 架构。任一架构缺失或校验失败都会返回非零。目标环境注册、直连、强制中继及重建后的公钥复用在 Phase 5 验收。
