@@ -30,6 +30,9 @@ class SessionFixture(Fixture):
     def __init__(self, path):
         super().__init__(path)
         self.redemptions = {}
+        self.renewals = {}
+        self.revoked_renewals = set()
+        self.status_reads = {}
         self.results = []
         self.stopped = set()
         self.device_challenge = None
@@ -40,6 +43,22 @@ class SessionFixture(Fixture):
         self.delivery = None
 
     def policy_request(self, path, authorization):
+        if path.startswith("/v1/sessions/"):
+            route = self.routes.get(path.split("/")[3])
+            if (route is None or route.session not in self.redemptions
+                    or path != f"/v1/sessions/{route.session}/status?connection_id={route.connection}"
+                    or authorization != "Bearer " + bearer("drc_", 13)):
+                return 403, {}
+            reads = self.status_reads.get(route.session, 0) + 1
+            self.status_reads[route.session] = reads
+            if route.session in self.stopped:
+                state = "stopped"
+            elif route.path == "relay" and reads >= 3:
+                state = "revocation_requested"
+            else:
+                state = "active"
+            return 200, {"connection_id": str(route.connection), "state": state,
+                         "lease_sequence": 2 if route.session in self.renewals else 1}
         if (path != f"/v1/managed/devices/{self.target_id}/policy"
                 or authorization != "Bearer " + bearer("drd_", 12)
                 or not self.device_authenticated):
@@ -123,11 +142,32 @@ class SessionFixture(Fixture):
     def session_request(self, path, authorization, body):
         if path.startswith("/v1/managed/devices/"):
             return self.device_request(path, authorization, body)
-        if path.startswith("/v1/sessions/") and path.endswith("/stopped"):
+        if path.startswith("/v1/sessions/") and path.endswith("/renew"):
             route = self.routes.get(path.split("/")[3])
             if (route is None or route.session not in self.redemptions
+                    or authorization != "Bearer " + bearer("drd_", 12)
+                    or body.get("connection_id") != str(route.connection)
+                    or body.get("session_credential") != bearer("drc_", 13)):
+                return 403, {}
+            previous = body.get("lease_sequence")
+            if route.path == "relay" and self.status_reads.get(route.session, 0) >= 3 and previous == 2:
+                self.revoked_renewals.add(route.session)
+                return 403, {}
+            if previous != 1:
+                return 409, {}
+            if route.session not in self.renewals:
+                # The retry must retain the first request's local time bound.
+                self.renewals[route.session] = time.time_ns() // 1_000_000 + 30_000
+                return 503, {}
+            return 200, {"session_id": str(route.session), "connection_id": str(route.connection),
+                         "lease_sequence": 2, "lease_until_ms": self.renewals[route.session],
+                         "allowed_actions": ["view"]}
+        if path.startswith("/v1/sessions/") and path.endswith("/stopped"):
+            route = self.routes.get(path.split("/")[3])
+            if (route is None or route.session not in self.renewals
                     or authorization != "Bearer " + bearer("drc_", 13)
-                    or body != {"connection_id": str(route.connection), "lease_sequence": 1, "reason": "local_end"}):
+                    or body != {"connection_id": str(route.connection), "lease_sequence": 2,
+                                "reason": "revoked" if route.path == "relay" else "local_end"}):
                 return 403, {}
             self.stopped.add(route.session)
             return 204, {}
@@ -214,12 +254,16 @@ def main():
                 assert fixture.heartbeats == 1
                 assert fixture.policy_receipts == [(1, "applied"), (2, "failed"), (5, "applied")]
                 assert fixture.results == [("direct-admit", True), ("relay-admit", True), ("deny-redeem", True)]
-                assert len(fixture.redemptions) == 2 and fixture.stopped == fixture.redemptions.keys()
+                assert len(fixture.redemptions) == 2 and len(fixture.renewals) == 2
+                assert fixture.stopped == fixture.redemptions.keys()
+                assert fixture.revoked_renewals == {
+                    route.session for route in fixture.routes.values() if route.purpose == "relay-admit"
+                }
         except Exception:
             for file in sorted(fixture.directory.glob("*/output.log")):
                 print(f"{file.parent.name}:\n{file.read_text()}", file=sys.stderr)
             raise
-    print("Native managed endpoints redeemed real direct and relayed RustDesk TCP sessions.", flush=True)
+    print("Native managed endpoints checked admission, renewal and receipts on direct and relayed RustDesk TCP.", flush=True)
 
 
 if __name__ == "__main__":

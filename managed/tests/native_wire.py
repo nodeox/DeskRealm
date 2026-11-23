@@ -128,6 +128,9 @@ def main():
             if admission:
                 cargo(source / "client", scratch / "client-cache", CLIENT_IMAGE, "test", "--locked",
                       "-p", "base", "--test", "deskrealm_interop", "--no-run")
+                cargo(source / "client", scratch / "client-cache", CLIENT_IMAGE, "test", "--locked",
+                      "-p", "base", "--lib", "deskrealm_endpoint::lease::tests::managed_lease_",
+                      required="test result: ok. 4 passed")
             cargo(source / "server", scratch / "server-cache", SERVER_IMAGE, "build", "--locked",
                   "--bin", "hbbs", "--bin", "hbbr")
             run_fixture(source / "server", source / "client", admission)
