@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+case "${1:-}" in
+  install-preflight)
+    required=(
+      TestInstallConfigDefaultsAndCanonicalOrigins
+      TestInstallConfigRejectsUnsafeValues
+      TestInstallConfigFileRejectsUnknownAndExtraInput
+      TestInstallPreflightChecksTLSFiles
+      TestInstallPreflightRejectsRemoteDockerAndOccupiedPorts
+    )
+    ;;
+  *)
+    echo "usage: $0 install-preflight" >&2
+    exit 2
+    ;;
+esac
+
+scratch=$(mktemp -d "${TMPDIR:-/tmp}/deskrealm-m3.XXXXXX")
+trap 'rm -rf "$scratch"' EXIT
+results="$scratch/results.json"
+pattern=$(IFS='|'; echo "${required[*]}")
+if ! go test -json -race -count=1 ./internal/m3/install -run "^($pattern)$" >"$results"; then
+  cat "$results" >&2
+  exit 1
+fi
+python3 - "$results" "${required[@]}" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1]) as log:
+    events = [json.loads(line) for line in log]
+required = set(sys.argv[2:])
+passed = {entry.get("Test") for entry in events if entry.get("Action") == "pass"}
+skipped = {entry["Test"] for entry in events if entry.get("Action") == "skip" and "Test" in entry}
+if required - passed or skipped:
+    sys.exit(f"missing or skipped installation regressions: {sorted((required - passed) | skipped)}")
+print("Required installation regressions passed:", ", ".join(sorted(required)))
+PY
+
+go build -o "$scratch/deskrealm-install" ./cmd/deskrealm-install
+"$scratch/deskrealm-install" --help
