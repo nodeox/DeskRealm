@@ -3,10 +3,10 @@ gsd_state_version: "1.0"
 current_phase: 4
 current_phase_name: M3 部署与自动化交付
 status: executing
-last_updated: "2026-11-23T20:22:54Z"
+last_updated: "2026-11-23T21:07:05Z"
 last_activity: 2026-11-23
-last_activity_desc: M3 签名离线包隔离导入和重建验证通过
-state_head: df132f85516dbe8a0bd5927da92c0facc82b5cd4
+last_activity_desc: M3 新增空机 Docker 准备和可恢复安装记录
+state_head: 5d327b49c7445bd142b40b5a895214279b53cf2a
 progress:
   total_phases: 5
   completed_phases: 3
@@ -28,8 +28,8 @@ See: .planning/PROJECT.md (updated 2026-11-22)
 
 Phase: 4 — M3 部署与自动化交付
 Plan: [04-01](phases/04-m3/04-01-PLAN.md) Task 1 已验证，Task 2 进行中
-Status: In progress，安装器首装、签名离线包导入及迁移后中断恢复通过。接续空机运行时和脱敏步骤记录。
-Last activity: 2026-11-23 — Linux ARM64 Docker 在 Registry 关闭后成功导入签名离线包，移除介质后重建沿用原数据库和两套公钥。[M3 开发验证](phases/04-m3/04-VALIDATION.md)
+Status: In progress，Docker 空机准备和安装步骤记录已实现，在线及离线恢复回归通过。接续已有默认中继选择。
+Last activity: 2026-11-23 — 中断和重跑沿用同一安装任务 ID，已完成迁移经实际服务核对后复用。[M3 开发验证](phases/04-m3/04-VALIDATION.md)
 
 ## Accumulated Context
 
@@ -41,4 +41,4 @@ M0–M3 开发完成后进入目标环境验收。先 Linux 中心和一台中�
 
 M0、M1、M2 已完成开发验证。M2 交接包括账号停用后的续租拒绝、通讯录连接 ACL、实际会话回执和 Windows 受管入口。
 
-[04-01](phases/04-m3/04-01-PLAN.md) 继续空机准备、可恢复任务记录及已有默认中继验证。M2 受管基线 `c37fde7` 的双架构 Windows 构建及六项门禁通过。[M2 开发核对](phases/03-m2/03-VERIFICATION.md)
+[04-01](phases/04-m3/04-01-PLAN.md) 继续已有默认中继选择和实际配置核对。[04-02](phases/04-m3/04-02-PLAN.md) 将接收 `deskrealm-install install-record` 的脱敏记录。M2 受管基线 `c37fde7` 的双架构 Windows 构建及六项门禁通过。[M2 开发核对](phases/03-m2/03-VERIFICATION.md)

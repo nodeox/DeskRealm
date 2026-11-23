@@ -68,4 +68,18 @@ Task 1 的已有 Docker 首装开发验证通过。
 
 验证清单的 SHA-256 为 `b28c07b45c6e5d6421ce27113851f9811813769052342bf8734ef53af2f3c154`。日志在本地 Git 目录下的 `deskrealm-evidence/m3/df132f85516dbe8a0bd5927da92c0facc82b5cd4/install-offline.log`，SHA-256 为 `fc0f5b87c261eafdda9b4c3e87c0c5f17bf4045ab459ded74dc53e9a2ed63fbe`。
 
-Task 2 继续空机 Docker 运行时准备、完整可恢复步骤与安装记录交接，并验证已有默认中继选择。目标 Linux 中心、中继和双 Windows 仍按 Phase 5 验收。
+## 04-01 空机运行时及可恢复安装记录
+
+2026-11-23，在 `5d327b49c7445bd142b40b5a895214279b53cf2a` 验证。空机检查使用无 Docker 的 OrbStack 隔离 Linux 实例，amd64 通过 Apple Silicon 上的 x86-64 模拟执行。
+
+| 检查 | 结果 |
+| --- | --- |
+| Ubuntu 24.04 和 Debian 12，各含 amd64、arm64 | 内置公钥验证官方 APT 元数据，下载并核对四项固定版本包；`prepare-runtime` 首次为 `installed`，systemd 上 Docker Engine 29.9.3 和 Compose 5.8.0 可用，重跑为 `reused`。Ubuntu amd64 首次远程执行未返回，重启该隔离实例后从无 Docker 状态复跑通过。 |
+| 在线 `install-resume` | 三项具名竞态用例及 Linux ARM64 中心夹具通过。迁移后中断时只记录验活为中断，重跑保留任务 ID。仅恢复会合服务时，已完成的迁移容器 ID 与启动时间未变化。 |
+| 离线 `install-offline` | 两项具名竞态用例及真实隔离导入通过。在离线介质移除后，中断重建仍保留原集群、部署 ID、两套公钥及安装任务。 |
+| 丢失与冲突 | 已纳入日志版本的部署丢失日志或数据库标记时拒绝启动。原数据库为空或集群不匹配时拒绝重建。历史部署可沿用原身份并建立记录。 |
+| 基础回归 | 全仓 Go 测试、vet、预检和准备竞态检查通过，安装器静态构建支持 Linux amd64 和 arm64。 |
+
+日志位于本地 Git 目录的 `deskrealm-evidence/m3/5d327b49c7445bd142b40b5a895214279b53cf2a/`。`install-resume.log` 的 SHA-256 为 `61f0a51985709be79e502f68d8d3a86c3543810e320291c47ad0e511be5c39b3`，`install-offline.log` 为 `3e8b5f04a4c0b5e85543b3f2ee2b19ff2c9656f4e81acd616be21ac0f817d306`。
+
+04-01 继续已有默认中继选择与实际配置核对。本地安装记录由 04-02 接入任务中心。目标 Linux 中心、中继和双 Windows 仍按 Phase 5 验收。
