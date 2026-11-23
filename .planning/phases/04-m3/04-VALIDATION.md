@@ -82,4 +82,17 @@ Task 1 的已有 Docker 首装开发验证通过。
 
 日志位于本地 Git 目录的 `deskrealm-evidence/m3/5d327b49c7445bd142b40b5a895214279b53cf2a/`。`install-resume.log` 的 SHA-256 为 `61f0a51985709be79e502f68d8d3a86c3543810e320291c47ad0e511be5c39b3`，`install-offline.log` 为 `3e8b5f04a4c0b5e85543b3f2ee2b19ff2c9656f4e81acd616be21ac0f817d306`。
 
-04-01 继续已有默认中继选择与实际配置核对。本地安装记录由 04-02 接入任务中心。目标 Linux 中心、中继和双 Windows 仍按 Phase 5 验收。
+## 04-01 已有默认中继与安装收尾
+
+2026-11-23，在 `4caf823ab5e3e3a9750f2fefa530f09d553bd86c` 运行 `bash scripts/deskrealm-m3-test install-relay`，退出 0。通过 Linux ARM64 Docker 构建锁定源码的 `hbbs`、`hbbr`；`hbbr` 单独启动，未并入中心 Compose。
+
+| 检查 | 结果 |
+| --- | --- |
+| 持久配置与凭据 | 默认中继 ID 和地址归一化。中心私有文件保存中继凭据，会合只收到中继 ID 和地址。实际运行配置和凭据隔离通过具名 Go 竞态检查。 |
+| 实际启停 | 核对运行中中心和会合的中继配置。独立 `hbbr` 停机后，状态报告 `default-relay` 和 TCP 不可达；恢复后回到 `ready`，Chromium 首管通过。 |
+| 失败边界 | 模拟 Registry 缺少固定镜像，安装记录仅镜像步骤失败，未启动任一 Compose 服务。重建进入 HTTPS 验活后中断，记录挂在验活步骤。重跑沿用原任务、数据库和两套公钥，并验证会合恢复未重跑已完成的迁移。 |
+| 回归 | 未配置默认中继的 `install-resume` 同提交复跑退出 0。全仓 Go 测试和 vet、M0 与安装器竞态检查、M3 预检和准备回归通过。 |
+
+日志保存在本地 Git 目录的 `deskrealm-evidence/m3/4caf823ab5e3e3a9750f2fefa530f09d553bd86c/`。`install-relay.log` SHA-256 为 `f705f0544109932e486bf87faa9d6520467614e352fa0eb69bf84231c8a98428`，`install-resume.log` 为 `da95abbfd01da1d98c8607b49dc1f3e9625a632b25b5cd2d8e7132acff33d3fa`。首次复跑遇到 Rust 增量链接找不到目标文件，重跑通过链接。随后修正验活记录和中断测试的时序，以上使用修正后的提交取证。
+
+04-01 开发验证完成。04-02 接入安装记录导入。跨网中继认证与实际端点传输按后续计划验证，目标环境 Linux 中心、中继和双 Windows 仍按 Phase 5 顺序执行。

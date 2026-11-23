@@ -33,7 +33,7 @@
 
 ### M3 部署与自动化交付
 
-- [ ] **FR-01**: 管理员可配置镜像、HTTPS、数据与可选中继，在受支持空机上初始化中心。重跑保留公钥、中心身份和数据。
+- [x] **FR-01**: 管理员可配置镜像、HTTPS、数据与可选中继，在受支持空机上初始化中心。重跑保留公钥、中心身份和数据。
 - [ ] **FR-05**: 发布管理员可构建固定版本的品牌安装包，验证签名并查询模板、源码、摘要及公开连接配置。
 - [ ] **FR-06**: 获授权用户可获取分组发布的安装包。终端免填中心信息并用单独发放的限时凭据入组或申请审批。
 - [ ] **FR-14**: 管理员可从任务入口接入区域中继。节点注册、健康、地址及容量达到条件后入池并可重试。
@@ -79,16 +79,16 @@ M4 包括浏览器主控、原生 LDAP、邮件验证和恢复、更多平台、
 | FR-11 | Phase 3 | Complete (开发验证，Phase 5 测量时序) |
 | FR-12 | Phase 3 | Complete (开发验证) |
 | NFR-01 | Phase 3 | Complete (开发验证) |
-| FR-01 | Phase 4 | Pending |
+| FR-01 | Phase 4 | Complete (04-01 开发验证) |
 | FR-05 | Phase 4 | Pending |
 | FR-06 | Phase 4 | Pending |
 | FR-14 | Phase 4 | Pending |
 | FR-15 | Phase 4 | Pending |
-| FR-16 | Phase 4 | Pending |
+| FR-16 | Phase 4 | Partial (安装器已输出步骤记录，任务中心接入待 04-02) |
 | FR-17 | Phase 4 | Pending |
 | FR-19 | Phase 4 | Pending |
 | NFR-02 | Phase 4 | Pending |
-| NFR-04 | Phase 4 | Pending |
+| NFR-04 | Phase 4 | Partial (04-01 中心身份与数据恢复通过，任务去重和中继恢复接续后续计划) |
 | NFR-05 | Phase 4 | Pending |
 | NFR-03 | Phase 5 | Pending |
 | NFR-06 | Phase 5 | Pending |
