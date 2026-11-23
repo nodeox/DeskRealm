@@ -19,8 +19,10 @@ import (
 const usage = `DeskRealm center installer
 
   deskrealm-install preflight --config FILE
+  deskrealm-install prepare   --config FILE
 
 Preflight checks configuration, TLS materials, local Docker and host ports.
+Prepare writes the persistent center identity and Compose configuration.
 `
 
 type portBinding struct {
@@ -126,8 +128,8 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		_, err := io.WriteString(stdout, usage)
 		return err
 	}
-	if len(args) == 0 || args[0] != "preflight" {
-		return errors.New("expected preflight --config FILE; see --help")
+	if len(args) == 0 || (args[0] != "preflight" && args[0] != "prepare") {
+		return errors.New("expected preflight or prepare with --config FILE; see --help")
 	}
 	flags := flag.NewFlagSet(args[0], flag.ContinueOnError)
 	flags.SetOutput(stderr)
@@ -136,7 +138,7 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
 		}
-		return errors.New("invalid preflight flags; see --help")
+		return errors.New("invalid installer flags; see --help")
 	}
 	if flags.NArg() != 0 {
 		return errors.New("unexpected positional arguments")
@@ -145,13 +147,20 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
+	encoder := json.NewEncoder(stdout)
+	encoder.SetIndent("", "  ")
+	if args[0] == "prepare" {
+		result, err := prepareDeployment(c)
+		if err != nil {
+			return err
+		}
+		return encoder.Encode(result)
+	}
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 	result, err := check(ctx, c, docker)
 	if err != nil {
 		return err
 	}
-	encoder := json.NewEncoder(stdout)
-	encoder.SetIndent("", "  ")
 	return encoder.Encode(result)
 }

@@ -33,9 +33,10 @@ type imageConfig struct {
 }
 
 type httpsConfig struct {
-	Mode        string `json:"mode"`
-	Certificate string `json:"certificate,omitempty"`
-	PrivateKey  string `json:"private_key,omitempty"`
+	Mode          string `json:"mode"`
+	Certificate   string `json:"certificate,omitempty"`
+	PrivateKey    string `json:"private_key,omitempty"`
+	CACertificate string `json:"ca_certificate,omitempty"`
 }
 
 type portConfig struct {
@@ -152,6 +153,17 @@ func validateConfig(c config, now time.Time) (config, error) {
 		}
 	default:
 		return c, errors.New("https.mode must be provided or external")
+	}
+	if c.HTTPS.CACertificate != "" {
+		path := c.HTTPS.CACertificate
+		info, err := os.Stat(path)
+		if !filepath.IsAbs(path) || err != nil || !info.Mode().IsRegular() || info.Size() > 1<<20 {
+			return c, errors.New("https.ca_certificate must be an absolute path to a PEM certificate file")
+		}
+		data, err := os.ReadFile(path)
+		if err != nil || !x509.NewCertPool().AppendCertsFromPEM(data) {
+			return c, errors.New("https.ca_certificate does not contain a readable PEM certificate")
+		}
 	}
 	if c.Ports.RendezvousCheck == 0 {
 		c.Ports.RendezvousCheck = 21115

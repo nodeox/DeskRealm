@@ -120,6 +120,10 @@ func run(ctx context.Context, args []string) error {
 			return errors.New("development HTTP must bind to loopback")
 		}
 	}
+	tlsCert, tlsKey := os.Getenv("DESKREALM_TLS_CERT_FILE"), os.Getenv("DESKREALM_TLS_KEY_FILE")
+	if (tlsCert == "") != (tlsKey == "") || (tlsCert != "" && origin.Scheme != "https") {
+		return errors.New("TLS requires paired certificate and key files and an HTTPS public origin")
+	}
 	var web fs.FS
 	if path := os.Getenv("DESKREALM_WEB_DIR"); path != "" {
 		web = os.DirFS(path)
@@ -153,7 +157,12 @@ func run(ctx context.Context, args []string) error {
 		case <-done:
 		}
 	}()
-	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	if tlsCert != "" {
+		err = server.ListenAndServeTLS(tlsCert, tlsKey)
+	} else {
+		err = server.ListenAndServe()
+	}
+	if err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return fmt.Errorf("listen %s: %w", addr, err)
 	}
 	return nil

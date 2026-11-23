@@ -12,8 +12,16 @@ case "${1:-}" in
       TestInstallPreflightRejectsRemoteDockerAndOccupiedPorts
     )
     ;;
+  install-prepare)
+    required=(
+      TestPrepareDeploymentKeepsPrivateMaterialAndStableIdentity
+      TestPrepareDeploymentRefusesIncompleteOrChangedState
+      TestPrepareDeploymentConcurrent
+      TestRenderComposeForProvidedTLS
+    )
+    ;;
   *)
-    echo "usage: $0 install-preflight" >&2
+    echo "usage: $0 install-preflight|install-prepare" >&2
     exit 2
     ;;
 esac
