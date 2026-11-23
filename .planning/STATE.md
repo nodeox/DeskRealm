@@ -3,10 +3,10 @@ gsd_state_version: "1.0"
 current_phase: 3
 current_phase_name: M2 受管连接与策略
 status: executing
-last_updated: "2026-11-23T08:19:17Z"
+last_updated: "2026-11-23T08:53:10Z"
 last_activity: 2026-11-23
-last_activity_desc: 03-04 Task 2 受管键鼠许可、队列失效和本地输入清理
-state_head: d6af1692164f5e2fd91dd45c5d3b4a1047e56e9a
+last_activity_desc: 03-04 Task 2 受管系统音频许可、Opus 队列和传输
+state_head: 45ad377570ce703076f17c598b7b1931eec089db
 progress:
   total_phases: 5
   completed_phases: 2
@@ -27,9 +27,9 @@ See: .planning/PROJECT.md (updated 2026-11-22)
 ## Current Position
 
 Phase: 3 — M2 受管连接与策略
-Plan: 03-04 of 5，Task 2 进行中。受管主屏及键鼠已接入。接续音频、剪贴板与文件传输的独立授权、资源清理和原生构建。
+Plan: 03-04 of 5，Task 2 进行中。受管主屏、键鼠和系统音频已接入。接续剪贴板、文件传输、资源清理和原生构建。
 Status: In progress
-Last activity: 2026-11-23 — Linux X11 验证键鼠实际按下、许可失效后释放和旧队列丢弃。两路签名键鼠核销及只读画面回归通过。
+Last activity: 2026-11-23 — 受管音频许可、Opus 编解码、队列失效和 Linux X11 桌面回归通过。Windows WASAPI 采集和播放待真机验证。
 
 ## Accumulated Context
 
