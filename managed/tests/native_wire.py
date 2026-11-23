@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 
@@ -149,6 +150,19 @@ def desktop_image(scratch):
 
 
 DESKTOP_FEATURES = "deskrealm-managed,linux-pkg-config,use_dasp"
+X11_REQUIRED_TESTS = {
+    "managed_view_does_not_dispatch_legacy_or_other_capabilities",
+    "managed_view_dispatches_only_the_authorized_message_scope",
+    "managed_view_captures_and_releases_monitor",
+    "managed_input_discards_stale_queued_events_and_releases_held_buttons",
+    "managed_input_x11_injects_and_cleans_up_after_permission_loss",
+    "managed_audio_requires_independent_permission_and_valid_format",
+    "managed_audio_keeps_format_with_each_bounded_packet_and_drops_stale_audio",
+    "managed_clipboard_validates_text_and_discards_stale_epochs",
+    "managed_clipboard_x11_applies_text_only_under_current_permission",
+    "managed_file_paths_and_publication_fail_closed",
+    "managed_file_driver_moves_bytes_and_audits_cancel_and_failure",
+}
 
 
 def check_desktop(client, cache, scratch):
@@ -156,16 +170,24 @@ def check_desktop(client, cache, scratch):
           "--no-default-features", "--features", DESKTOP_FEATURES)
 
 
-def check_x11(client, cache, scratch, selector, expected):
-    in_source(
-        client, cache, desktop_image(scratch),
+def check_x11(client, cache, scratch, selector, expected, required_tests=()):
+    image = desktop_image(scratch)
+    print(f"Linux desktop test image: {image}", flush=True)
+    result = in_source(
+        client, cache, image,
         ["env", "RUSTDESK_FORCED_DISPLAY_SERVER=x11", "XDG_SESSION_TYPE=x11", "sh", "-ec",
          'xvfb-run -a -s "-screen 0 640x480x24 -noreset" "$@"\ntrue', "desktop",
          "cargo", "test", "--locked", "--lib",
          "--no-default-features", "--features", DESKTOP_FEATURES, selector,
          "--", "--include-ignored", "--nocapture"],
-        required=f"test result: ok. {expected} passed",
+        required=f"test result: ok. {expected} passed; 0 failed; 0 ignored",
     )
+    passed = set(re.findall(r"^test (?:[^\s]+::)?([^:\s]+) \.\.\. ok$", result, re.MULTILINE))
+    missing = set(required_tests) - passed
+    if missing:
+        raise RuntimeError(f"missing required desktop regressions: {', '.join(sorted(missing))}")
+    if required_tests:
+        print(f"Required Linux desktop regressions passed: {', '.join(sorted(passed))}", flush=True)
 
 
 def main():
@@ -217,7 +239,7 @@ def main():
                 executable = interoperability_binary(source / "client", scratch / "client-cache")
                 cargo(source / "client", scratch / "client-cache", CLIENT_IMAGE, "test", "--locked",
                       "-p", "base", "--lib", "deskrealm_endpoint::lease::tests::managed_lease_",
-                      required="test result: ok. 4 passed")
+                      required="test result: ok. 4 passed; 0 failed; 0 ignored")
                 cargo(source / "client", scratch / "client-cache", CLIENT_IMAGE, "test", "--locked",
                       "-p", "base", "--lib", "resume_requires_revalidation_before_any_access",
                       required="resume_requires_revalidation_before_any_access ... ok")
@@ -225,7 +247,8 @@ def main():
                   "--bin", "hbbs", "--bin", "hbbr")
             run_fixture(source / "server", source / "client", admission, executable)
             if arguments.endpoint:
-                check_x11(source / "client", scratch / "client-cache", scratch, "managed_", 11)
+                check_x11(source / "client", scratch / "client-cache", scratch, "managed_",
+                          len(X11_REQUIRED_TESTS), X11_REQUIRED_TESTS)
             if arguments.desktop:
                 check_desktop(source / "client", scratch / "client-cache", scratch)
             return

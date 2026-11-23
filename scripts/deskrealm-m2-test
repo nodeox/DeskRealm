@@ -2,7 +2,105 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
+
+windows_evidence() (
+  local evidence="$1" build_commit="${2:-}" source checkout
+  if [[ -z "$build_commit" ]]; then
+    python3 managed/windows_build.py verify "$evidence"
+    return
+  fi
+
+  source=$(git rev-parse --verify --end-of-options "$build_commit^{commit}") || return
+  git merge-base --is-ancestor "$source" HEAD || { echo "Windows build must come from this candidate's history" >&2; return 1; }
+  # This dispatcher only calls the verifier after CI has built and tested both bundles.
+  # Compare the complete verifier input list apart from the dispatcher itself.
+  python3 - "$source" <<'PY' || return
+import runpy
+import subprocess
+import sys
+
+identity = runpy.run_path("managed/windows_build.py")["source_identity"]()
+paths = ["managed/upstream.lock", "managed/patches", "managed/native/deskrealm_protocol.rs",
+         "managed/windows_build.py", "managed/tests/windows_build_test.py",
+         "scripts/deskrealm-managed-source", ".github/workflows/deskrealm-windows.yml"]
+if set(subprocess.check_output(["git", "ls-files", "--", *paths], text=True).splitlines()) != (
+        set(identity["inputs"]) - {"scripts/deskrealm-m2-test"}):
+    sys.exit("Windows build input list changed")
+subprocess.run(["git", "diff", "--exit-code", "--name-status", sys.argv[1], identity["commit"], "--", *paths], check=True)
+print(f"Equivalent Windows build inputs at {identity['commit']} and {sys.argv[1]}", flush=True)
+PY
+  checkout=$(mktemp -d "${TMPDIR:-/tmp}/deskrealm-windows-source.XXXXXX") || return
+  trap 'git worktree remove "$checkout" >/dev/null 2>&1 || rmdir "$checkout" 2>/dev/null || true' EXIT
+  git worktree add --quiet --detach "$checkout" "$source" || return
+  bash "$checkout/scripts/deskrealm-m2-test" windows-builds "$evidence"
+)
+
+record_windows_evidence() {
+  windows_evidence "$1" "$2" || return
+  local source target
+  source=$(git rev-parse --verify --end-of-options "${2:-HEAD}^{commit}") || return
+  for target in x86_64-pc-windows-msvc aarch64-pc-windows-msvc; do
+    cp "$1/$target/$source/manifest.json" "$report_dir/windows-$target.json" || return
+  done
+}
+
+run_gate() {
+  local name="$1" code
+  shift
+  printf '\n--- %s ---\n' "$name"
+  if "$@" 2>&1 | tee "$report_dir/$name.log"; then
+    printf '%s\tpass\t0\n' "$name" >> "$report_dir/results.tsv"
+  else
+    code=$?
+    printf '%s\tfail\t%s\n' "$name" "$code" >> "$report_dir/results.tsv"
+    failed=1
+  fi
+}
+
+all_gates() {
+  local evidence="$1" build_commit="$2" report_dir candidate failed=0
+  [[ -z "$(git status --porcelain)" ]] || { echo "Commit candidate inputs before running the aggregate gate" >&2; return 1; }
+  candidate=$(git rev-parse HEAD)
+  report_dir=$(mktemp -d "${DESKREALM_M2_REPORT_ROOT:-${TMPDIR:-/tmp}}/deskrealm-m2-report.XXXXXX")
+  report_dir=$(cd "$report_dir" && pwd -P)
+  export DESKREALM_M2_REPORT_DIR="$report_dir"
+  printf 'M2 evidence: %s\n' "$report_dir"
+  {
+    printf 'candidate=%s\nwindows_build_commit=%s\n' "$candidate" "${build_commit:-$candidate}"
+    printf 'started_at_utc=%s\n' "$(date -u +%FT%TZ)"
+    printf 'native_offline=%s\n' "${DESKREALM_NATIVE_OFFLINE:-0}"
+    uname -sm
+    go version
+    node --version
+    npm --version
+    protoc --version
+    docker version --format '{{.Server.Os}}/{{.Server.Arch}} Docker {{.Server.Version}}'
+    docker compose version
+    git ls-tree "$candidate" -- managed/upstream.lock managed/patches managed/tests/desktop-linux.Dockerfile web/package-lock.json
+  } | tee "$report_dir/environment.txt"
+  printf 'gate\tresult\texit_code\n' > "$report_dir/results.tsv"
+  run_gate m0-m1 bash scripts/deskrealm-m1-test all
+  run_gate managed-db env GOFLAGS="${GOFLAGS:-} -race" bash scripts/deskrealm-m1-test managed-db
+  run_gate sources bash scripts/deskrealm-m2-test sources
+  run_gate endpoint python3 managed/tests/native_wire.py --endpoint
+  run_gate managed-browser bash scripts/deskrealm-m2-test managed-browser
+  run_gate windows-builds record_windows_evidence "$evidence" "$build_commit"
+  if [[ "$(git rev-parse HEAD)" != "$candidate" || -n "$(git status --porcelain)" ]]; then
+    echo "Candidate changed during validation" >&2
+    printf 'candidate\tfail\t1\n' >> "$report_dir/results.tsv"
+    failed=1
+  fi
+  date -u '+finished_at_utc=%FT%TZ' >> "$report_dir/environment.txt"
+  cat "$report_dir/results.tsv"
+  return "$failed"
+}
+
 case "${1:-}" in
+  all)
+    [[ "$#" -le 3 ]] || { echo "usage: $0 all [Windows evidence directory] [equivalent Windows build commit]" >&2; exit 2; }
+    evidence=$(python3 -c 'import sys; from pathlib import Path; print(Path(sys.argv[1]).resolve())' "${2:-${DESKREALM_WINDOWS_EVIDENCE_DIR:-evidence/m2/builds}}")
+    all_gates "$evidence" "${3:-}"
+    ;;
   sources)
     python3 managed/tests/source_check.py
     bash scripts/deskrealm-m2-test vectors
@@ -40,7 +138,9 @@ case "${1:-}" in
     bash scripts/deskrealm-m2-test leases
     ;;
   windows-builds)
-    python3 managed/windows_build.py verify "${2:-${DESKREALM_WINDOWS_EVIDENCE_DIR:-evidence/m2/builds}}"
+    [[ "$#" -le 3 ]] || { echo "usage: $0 windows-builds [evidence directory] [equivalent build commit]" >&2; exit 2; }
+    evidence=$(python3 -c 'import sys; from pathlib import Path; print(Path(sys.argv[1]).resolve())' "${2:-${DESKREALM_WINDOWS_EVIDENCE_DIR:-evidence/m2/builds}}")
+    windows_evidence "$evidence" "${3:-}"
     ;;
   managed-view)
     python3 managed/tests/native_wire.py --view
@@ -79,5 +179,5 @@ case "${1:-}" in
     [[ "$rust_result" == *'test tests::shared_signing_vectors ... ok'* ]] || { echo "missing Rust signing-vector test" >&2; exit 1; }
     [[ "$rust_result" == *'test tests::managed_peer_proofs_are_channel_and_role_bound ... ok'* ]] || { echo "missing Rust native-proof test" >&2; exit 1; }
     ;;
-  *) echo "usage: $0 sources|vectors|identity|rules|policies|sessions|leases|managed-browser|native-wire|native-coordination|native-admission|managed-interop|endpoint|windows-builds [directory]|managed-view|managed-input|managed-audio|managed-clipboard|managed-files" >&2; exit 2 ;;
+  *) echo "usage: $0 all [Windows evidence directory] [equivalent Windows build commit] | sources|vectors|identity|rules|policies|sessions|leases|managed-browser|native-wire|native-coordination|native-admission|managed-interop|endpoint|windows-builds [directory] [equivalent build commit]|managed-view|managed-input|managed-audio|managed-clipboard|managed-files" >&2; exit 2 ;;
 esac

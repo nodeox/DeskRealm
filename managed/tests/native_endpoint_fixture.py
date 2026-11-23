@@ -3,6 +3,7 @@
 import base64
 from datetime import datetime, timedelta, timezone
 import hashlib
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -318,7 +319,13 @@ def main():
                            DESKREALM_FIXTURE_TARGET=str(fixture.target_id),
                            DESKREALM_FIXTURE_ORGANIZATION=str(fixture.org))
                 for test in ("managed_device_policy_api_roundtrip", "managed_endpoint_admission_on_direct_and_relay"):
-                    subprocess.run([endpoint, "--exact", test, "--nocapture"], check=True, timeout=180, env=env)
+                    result = subprocess.run([endpoint, "--exact", test, "--nocapture"], check=False, timeout=180,
+                                            env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                    print(result.stdout, end="", flush=True)
+                    result.check_returncode()
+                    if not all(marker in result.stdout for marker in (
+                            f"test {test} ... ok", "test result: ok. 1 passed; 0 failed; 0 ignored")):
+                        raise RuntimeError(f"required native endpoint test did not pass: {test}")
                 assert fixture.heartbeats == 1
                 assert fixture.policy_receipts == [(1, "applied"), (2, "failed"), (5, "applied")]
                 assert fixture.results == [("direct-admit", True), ("relay-admit", True),
@@ -352,6 +359,12 @@ def main():
                 assert set(fixture.supervised_receipts) == {direct, relay}
                 assert all(len(submissions) == 2 and submissions[0] == submissions[1]
                            for submissions in fixture.supervised_receipts.values())
+                for route in fixture.routes.values():
+                    if route.session in fixture.stopped:
+                        print(json.dumps({"scenario": route.purpose, "path": route.path,
+                                          "session_id": str(route.session), "connection_id": str(route.connection),
+                                          "relay_id": RELAY_ID if route.path == "relay" else None,
+                                          "stop_received": True}, sort_keys=True), flush=True)
         except Exception:
             for file in sorted(fixture.directory.glob("*/output.log")):
                 print(f"{file.parent.name}:\n{file.read_text()}", file=sys.stderr)
