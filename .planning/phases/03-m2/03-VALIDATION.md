@@ -153,4 +153,15 @@ Windows 原生输入已变更，旧工件仅作为历史证据。新候选的双
 
 该检查也发现受控端重复上报同一公钥时会合不刷新在线期限。候选改用 RustDesk 公钥登记及保活两个消息。隔离夹具在长租约后通过 `RegisterPeer` 刷新同一 UDP 会合地址，再成功建立两个无人值守会话。候选原生日志保存在本地 Git 目录的 `deskrealm-evidence/m2/c37fde79c99c840cfc234b8e17e9fd15499665af/endpoint-local.log`，SHA-256 为 `402f16b184acc8545b2e5b858c14401211d7937e3b75344acd5a1def06a7529c`。
 
-M0/M1 全量、12 项具名受管 Go 回归和四组 Chromium 流程通过，核对这些测试的 Go、Web 和 M1 脚本输入与 `c37fde7` 一致。Windows 工件验证器 8 项单元测试通过。候选的 Windows x64、ARM64 构建和同候选全量门禁仍在进行，Windows 原生提示实际操作留待 Phase 5。 [候选构建](https://github.com/nodeox/DeskRealm/actions/runs/45233877838)
+M0/M1 全量、12 项具名受管 Go 回归和四组 Chromium 流程通过，核对这些测试的 Go、Web 和 M1 脚本输入与 `c37fde7` 一致。Windows 工件验证器 8 项单元测试通过。Windows 原生提示实际操作留待 Phase 5。
+
+## 03-06 同候选全量复验
+
+2026-11-23 19:24:52–19:31:17 UTC，在 `c37fde79c99c840cfc234b8e17e9fd15499665af` 的干净独立检出运行 `bash scripts/deskrealm-m2-test all "$windows_evidence"`。M0/M1、12 项受管数据库用例、锁定源码与协议、隔离端点、受管 Chromium 和 Windows 产物校验六项均退出 0。隔离端点通过直连、强制中继、14 项 Linux 桌面、4 项租约和 1 项恢复复核。首次调度遇到前端依赖软链接触发的 Git 洁净检查，重跑用独立检出内的依赖目录。
+
+| 工件 | GitHub Artifact ID | 客户端 ZIP SHA-256 |
+| --- | --- | --- |
+| Windows x64 | `14854526373` | `607a8ae66b461bfb686eb1b06e0498da4bfc1a3dfe5cbf24f31f4d89bc2548b6` |
+| Windows ARM64 | `14851874917` | `2a7551e49ff57517f7e4b823a1b4805a80d2d2e5a2f18672b6c15a77cbdc391c` |
+
+各架构的 12 项桌面、4 项租约和 1 项恢复复核均通过。完整报告在本地 Git 目录下的 `deskrealm-evidence/m2/c37fde79c99c840cfc234b8e17e9fd15499665af/deskrealm-m2-report.TDjl53/`。`results.tsv` 的 SHA-256 为 `8fc8d07bfc1c6c4a4f2c32a71708cb6a080828bb7050811ab259c8ee78771d04`，`endpoint.log` 的 SHA-256 为 `93700ac46d057339cdfb9b48793ac5e77e028cead3b632c6b55e02ede03efe14`。[候选构建](https://github.com/nodeox/DeskRealm/actions/runs/45233877838)
