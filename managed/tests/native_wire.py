@@ -55,7 +55,10 @@ def verify_schemas(client, server):
     clipboard = b"deskrealm_clipboard { epoch: 3 state: true }"
     if protobuf(peer_proto, "encode", "Message", clipboard) != bytes.fromhex("ca020408031001"):
         raise RuntimeError("managed clipboard state field numbers changed")
-    print("Native signaling schemas agree on direct and relay; peer admission and clipboard fields verified.", flush=True)
+    file_cancel = b"deskrealm_file { id: 7 cancel: true }"
+    if protobuf(peer_proto, "encode", "Message", file_cancel) != bytes.fromhex("d2020408074801"):
+        raise RuntimeError("managed file cancel field numbers changed")
+    print("Native signaling schemas agree on direct and relay; managed peer fields verified.", flush=True)
 
 
 def in_source(repo, cache, image, command, required=None):
@@ -135,6 +138,7 @@ def main():
     modes.add_argument("--input", action="store_true", help="run the managed input dispatch and cleanup tests on X11")
     modes.add_argument("--audio", action="store_true", help="run managed audio permission and Opus queue tests")
     modes.add_argument("--clipboard", action="store_true", help="run managed text clipboard tests on X11")
+    modes.add_argument("--files", action="store_true", help="run managed file and cleanup tests")
     arguments = parser.parse_args()
     # Use a Docker-mountable path on macOS, even when TMPDIR is a per-user path.
     directory = os.environ.get("DESKREALM_NATIVE_TMPDIR", "/tmp")
@@ -152,6 +156,11 @@ def main():
             cargo(source / "client", scratch / "client-cache", desktop_image(scratch),
                   "test", "--locked", "--lib", "--no-default-features", "--features",
                   DESKTOP_FEATURES, "managed_audio_", required="test result: ok. 2 passed")
+            return
+        if arguments.files:
+            cargo(source / "client", scratch / "client-cache", desktop_image(scratch),
+                  "test", "--locked", "--lib", "--no-default-features", "--features",
+                  DESKTOP_FEATURES, "managed_file_", required="test result: ok. 2 passed")
             return
         if arguments.clipboard:
             check_x11(source / "client", scratch / "client-cache", scratch, "managed_clipboard_", 2)

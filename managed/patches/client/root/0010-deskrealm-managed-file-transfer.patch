@@ -1,0 +1,1995 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index a8faffd..4819a01 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -7165,6 +7165,7 @@ dependencies = [
+  "system_shutdown",
+  "tao",
+  "tauri-winrt-notification",
++ "tempfile",
+  "terminfo",
+  "termios 0.3.3",
+  "tiny-skia",
+diff --git a/Cargo.toml b/Cargo.toml
+index 93e9bb7..c46d293 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -62,6 +62,7 @@ serde_repr = "0.1"
+ cfg-if = "1.0"
+ lazy_static = "1.4"
+ sha2 = "0.10"
++tempfile = "=3.10.1"
+ repng = "0.2"
+ zstd = "0.13"
+ xxhash-rust = { version = "0.8", features = ["xxh3"] }
+diff --git a/libs/base/protos/message.proto b/libs/base/protos/message.proto
+index 79f8c1c..42f3ffc 100644
+--- a/libs/base/protos/message.proto
++++ b/libs/base/protos/message.proto
+@@ -1040,6 +1040,33 @@ message DeskRealmClipboard {
+   }
+ }
+ 
++message DeskRealmFileOpen {
++  bool upload = 1;
++  string name = 2;
++  uint64 size = 3;
++}
++
++enum DeskRealmFileResult {
++  Completed = 0;
++  Failed = 1;
++  Cancelled = 2;
++}
++
++// The file session accepts one transfer job at a time. Directory queries use id zero.
++message DeskRealmFile {
++  int32 id = 1;
++  oneof union {
++    bool list = 2;
++    FileDirectory directory = 3;
++    DeskRealmFileOpen open = 4;
++    uint64 accepted_size = 5;
++    bytes block = 6;
++    bool finish = 7;
++    DeskRealmFileResult result = 8;
++    bool cancel = 9;
++  }
++}
++
+ message Message {
+   oneof union {
+     SignedId signed_id = 3;
+@@ -1077,5 +1104,6 @@ message Message {
+     OSLogin os_login = 34;
+     DeskRealmHandshake deskrealm_handshake = 40;
+     DeskRealmClipboard deskrealm_clipboard = 41;
++    DeskRealmFile deskrealm_file = 42;
+   }
+ }
+diff --git a/libs/base/src/deskrealm_endpoint.rs b/libs/base/src/deskrealm_endpoint.rs
+index 16554b2..2cefab2 100644
+--- a/libs/base/src/deskrealm_endpoint.rs
++++ b/libs/base/src/deskrealm_endpoint.rs
+@@ -40,7 +40,10 @@ const MAX_HANDSHAKE_FRAME: usize = 1024;
+ mod lease;
+ mod runtime;
+ use lease::{LeaseClock, LeaseWindow};
+-pub use lease::{send_controller_end, ManagedAction, SessionAccess, SessionStatus, StopReason};
++pub use lease::{
++    send_controller_end, FileDirection, FileEvent, FileResult, ManagedAction, SessionAccess,
++    SessionFileReceipts, SessionStatus, StopReason,
++};
+ pub use runtime::{DeviceCredential, InstalledPolicy};
+ 
+ const ACTIONS: [&str; 5] = ["view", "input", "audio", "clipboard", "file_transfer"];
+diff --git a/libs/base/src/deskrealm_endpoint/lease.rs b/libs/base/src/deskrealm_endpoint/lease.rs
+index 70763d1..324f474 100644
+--- a/libs/base/src/deskrealm_endpoint/lease.rs
++++ b/libs/base/src/deskrealm_endpoint/lease.rs
+@@ -294,6 +294,71 @@ impl Authority {
+     }
+ }
+ 
++#[derive(Clone, Copy)]
++pub enum FileDirection {
++    Upload,
++    Download,
++}
++
++#[derive(Clone, Copy)]
++pub enum FileResult {
++    Completed,
++    Failed,
++    Cancelled,
++}
++
++pub struct FileEvent {
++    pub id: hbb_common::uuid::Uuid,
++    pub sequence: u64,
++    pub direction: FileDirection,
++    pub result: FileResult,
++    pub bytes: u64,
++}
++
++pub struct SessionFileReceipts {
++    connection_id: hbb_common::uuid::Uuid,
++    session_id: hbb_common::uuid::Uuid,
++    credential: String,
++}
++
++impl SessionFileReceipts {
++    pub fn for_lease(lease: &Lease) -> Option<Self> {
++        lease.permits(ManagedAction::FileTransfer).then(|| Self {
++            connection_id: lease.connection_id,
++            session_id: lease.session_id,
++            credential: lease.credential().to_owned(),
++        })
++    }
++
++    pub async fn report(&self, authority: &Authority, event: &FileEvent) -> ResultType<()> {
++        let endpoint = format!("/v1/sessions/{}/file-events", self.session_id);
++        let direction = match event.direction {
++            FileDirection::Upload => "upload",
++            FileDirection::Download => "download",
++        };
++        let result = match event.result {
++            FileResult::Completed => "completed",
++            FileResult::Failed => "failed",
++            FileResult::Cancelled => "cancelled",
++        };
++        let body = serde_json::json!({
++            "connection_id": self.connection_id.to_string(),
++            "lease_sequence": event.sequence,
++            "event_id": event.id.to_string(),
++            "direction": direction,
++            "result": result,
++            "size_bytes": event.bytes,
++        });
++        for delay in [0, 250, 500] {
++            tokio::time::sleep(Duration::from_millis(delay)).await;
++            if authority.post(&endpoint, &self.credential, body.clone(), &[204]).await.is_ok() {
++                return Ok(());
++            }
++        }
++        bail!("managed file receipt did not reach the center")
++    }
++}
++
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+diff --git a/libs/base/src/deskrealm_endpoint/lease/supervisor.rs b/libs/base/src/deskrealm_endpoint/lease/supervisor.rs
+index 9f65303..ca7ec46 100644
+--- a/libs/base/src/deskrealm_endpoint/lease/supervisor.rs
++++ b/libs/base/src/deskrealm_endpoint/lease/supervisor.rs
+@@ -29,6 +29,7 @@ struct Snapshot {
+     last_check: Duration,
+     ready: bool,
+     generation: u64,
++    sequence: u64,
+ }
+ 
+ /// A target resource checks this immediately before dispatching a managed operation.
+@@ -51,14 +52,23 @@ impl SessionAccess {
+         self.generation_at(action, LeaseClock::now().ok()?)
+     }
+ 
++    /// Returns the permission generation and last applied sequence from one snapshot.
++    pub fn scope(&self, action: ManagedAction) -> Option<(u64, u64)> {
++        self.scope_at(action, LeaseClock::now().ok()?)
++    }
++
+     fn generation_at(&self, action: ManagedAction, now: LeaseClock) -> Option<u64> {
++        self.scope_at(action, now).map(|(generation, _)| generation)
++    }
++
++    fn scope_at(&self, action: ManagedAction, now: LeaseClock) -> Option<(u64, u64)> {
+         let snapshot = self.0.read().ok()?;
+         let state = snapshot.as_ref()?;
+         (state.ready
+             && state.allowed & action as u8 != 0
+             && state.window.active_at(now)
+             && !missed_check(state.last_check, now.boot))
+-        .then_some(state.generation)
++        .then_some((state.generation, state.sequence))
+     }
+ 
+     #[cfg(test)]
+@@ -77,6 +87,7 @@ impl SessionAccess {
+                 last_check: now.boot,
+                 ready,
+                 generation,
++                sequence: lease.sequence,
+             });
+         }
+     }
+diff --git a/libs/base/tests/deskrealm_interop.rs b/libs/base/tests/deskrealm_interop.rs
+index c233583..37400ec 100644
+--- a/libs/base/tests/deskrealm_interop.rs
++++ b/libs/base/tests/deskrealm_interop.rs
+@@ -95,10 +95,14 @@ async fn managed_endpoint_admission_on_direct_and_relay() -> ResultType<()> {
+         (Path::Relay, "relay-audio", Some(5), true),
+         (Path::Direct, "direct-clipboard", Some(9), true),
+         (Path::Relay, "relay-clipboard", Some(9), true),
++        (Path::Direct, "direct-file", Some(16), true),
++        (Path::Relay, "relay-file", Some(16), true),
+         (Path::Direct, "direct-supervised", Some(1), true),
+         (Path::Relay, "relay-supervised", Some(1), true),
+     ] {
+-        let requested = if purpose.ends_with("-clipboard") {
++        let requested = if purpose.ends_with("-file") {
++            16
++        } else if purpose.ends_with("-clipboard") {
+             9
+         } else if purpose.ends_with("-audio") {
+             5
+@@ -287,6 +291,63 @@ async fn managed_endpoint_admission_on_direct_and_relay() -> ResultType<()> {
+                 assert_eq!(reason?, StopReason::LocalEnd);
+                 continue;
+             }
++            if purpose.ends_with("-file") {
++                use base::deskrealm_endpoint::{FileDirection, FileEvent, FileResult, SessionFileReceipts};
++                use base::message_proto::DeskRealmFileResult;
++                assert!(host.permits(ManagedAction::FileTransfer));
++                assert!(!host.permits(ManagedAction::View));
++                assert!(!host.permits(ManagedAction::Clipboard));
++                let receipts = SessionFileReceipts::for_lease(&host).expect("file receipts");
++                let run = authority.run_target(
++                    target_stream,
++                    host,
++                    || Some(bearer("drd_", 12)),
++                    || false,
++                    |mut stream, access| async move {
++                        while !access.permits(ManagedAction::FileTransfer) {
++                            tokio::time::sleep(Duration::from_millis(25)).await;
++                        }
++                        let wire = stream.next().await.expect("file frame").expect("secured file frame");
++                        let wire = Message::parse_from_bytes(&wire).expect("file message");
++                        assert_eq!(wire.deskrealm_file().block(), b"fixture-upload");
++                        let mut reply = Message::new();
++                        reply.mut_deskrealm_file().id = 1;
++                        reply.mut_deskrealm_file().set_result(DeskRealmFileResult::Completed);
++                        stream.send(&reply).await.expect("complete file");
++                        StopReason::LocalEnd
++                    },
++                    || async { Ok(()) },
++                );
++                let exchange = async {
++                    let mut frame = Message::new();
++                    frame.mut_deskrealm_file().id = 1;
++                    frame.mut_deskrealm_file().set_block(Bytes::from_static(b"fixture-upload"));
++                    controller_stream.send(&frame).await?;
++                    let wire = controller_stream.next().await.expect("file result")?;
++                    assert_eq!(
++                        Message::parse_from_bytes(&wire)?.deskrealm_file().result(),
++                        DeskRealmFileResult::Completed
++                    );
++                    Ok::<_, hbb_common::anyhow::Error>(())
++                };
++                let (reason, result) = timeout(WAIT, async { tokio::join!(run, exchange) }).await?;
++                result?;
++                assert_eq!(reason?, StopReason::LocalEnd);
++                for (direction, result, bytes) in [
++                    (FileDirection::Upload, FileResult::Completed, 14),
++                    (FileDirection::Download, FileResult::Failed, 0),
++                    (FileDirection::Download, FileResult::Cancelled, 4),
++                ] {
++                    receipts.report(&authority, &FileEvent {
++                        id: Uuid::new_v4(),
++                        sequence: 1,
++                        direction,
++                        result,
++                        bytes,
++                    }).await?;
++                }
++                continue;
++            }
+             if purpose.ends_with("-input") {
+                 assert!(host.permits(ManagedAction::Input));
+                 let mut received = false;
+diff --git a/src/client.rs b/src/client.rs
+index ef5a059..b0a64a8 100644
+--- a/src/client.rs
++++ b/src/client.rs
+@@ -393,11 +393,15 @@ impl Client {
+         interface.update_received(false);
+         #[cfg(not(any(target_os = "android", target_os = "ios")))]
+         if crate::deskrealm_desktop::enabled() {
+-            if conn_type != ConnType::DEFAULT_CONN {
+-                bail!("managed mode requires the desktop connection entry");
++            if !matches!(conn_type, ConnType::DEFAULT_CONN | ConnType::FILE_TRANSFER) {
++                bail!("managed mode supports desktop and file connections");
+             }
+-            let (stream, direct, allowed) =
+-                crate::deskrealm_desktop::connect(peer, interface.is_force_relay()).await?;
++            let (stream, direct, allowed) = crate::deskrealm_desktop::connect(
++                peer,
++                interface.is_force_relay(),
++                conn_type == ConnType::FILE_TRANSFER,
++            )
++            .await?;
+             return Ok(((stream, direct, None, None, "TCP"), (0, String::new()), allowed));
+         }
+         match Self::_start(peer, key, token, conn_type, interface.clone()).await {
+diff --git a/src/client/io_loop.rs b/src/client/io_loop.rs
+index 5cdaba5..9d2a2c8 100644
+--- a/src/client/io_loop.rs
++++ b/src/client/io_loop.rs
+@@ -1,3 +1,6 @@
++#[cfg(not(any(target_os = "android", target_os = "ios")))]
++mod managed_files;
++
+ #[cfg(not(any(target_os = "android", target_os = "ios")))]
+ use crate::clipboard::{clipboard_listener, update_clipboard, ClipboardSide};
+ #[cfg(not(any(target_os = "ios")))]
+@@ -118,6 +121,8 @@ fn managed_view_does_not_dispatch_legacy_or_other_capabilities() {
+     assert!(!managed_view_response(&message, true, 0));
+     message.set_file_action(Default::default());
+     assert!(!managed_view_response(&message, true, 0));
++    message.set_deskrealm_file(Default::default());
++    assert!(!managed_view_response(&message, true, 0));
+     message.set_audio_frame(Default::default());
+     assert!(!managed_view_response(&message, true, 0));
+     message.set_video_frame(Default::default());
+@@ -415,7 +420,11 @@ impl<T: InvokeUiSession> Remote<T> {
+                 self.handler.update_direct(Some(direct));
+                 #[cfg(not(any(target_os = "android", target_os = "ios")))]
+                 if managed {
+-                    self.managed_view_loop(&mut peer, _managed_actions).await;
++                    if conn_type == ConnType::FILE_TRANSFER {
++                        self.managed_file_loop(&mut peer).await;
++                    } else {
++                        self.managed_view_loop(&mut peer, _managed_actions).await;
++                    }
+                     self.handle_disconnected(round);
+                     return;
+                 }
+diff --git a/src/client/io_loop/managed_files.rs b/src/client/io_loop/managed_files.rs
+new file mode 100644
+index 0000000..0f8c20c
+--- /dev/null
++++ b/src/client/io_loop/managed_files.rs
+@@ -0,0 +1,443 @@
++use super::*;
++use crate::server::managed_files as files;
++use base::{deskrealm_endpoint::FileResult, message_proto::desk_realm_file::Union};
++use hbb_common::{anyhow::anyhow, bail, ResultType};
++use std::{collections::VecDeque, sync::atomic::AtomicBool};
++
++const MAX_QUEUED: usize = 32;
++
++struct Request {
++    id: i32,
++    local: PathBuf,
++    name: String,
++    upload: bool,
++}
++
++struct Job {
++    request: Request,
++    size: u64,
++    phase: Phase,
++}
++
++#[derive(Clone, Copy, PartialEq, Eq)]
++enum Phase {
++    Opening,
++    Sending,
++    Receiving,
++    AwaitingResult,
++    Cancelling,
++}
++
++struct ControllerFiles {
++    disk: files::Disk,
++    permission: Arc<AtomicBool>,
++    permit: files::Permit,
++    active: Option<Job>,
++    queued: VecDeque<Request>,
++    listing_pending: bool,
++}
++
++impl Default for ControllerFiles {
++    fn default() -> Self {
++        let permission = Arc::new(AtomicBool::new(false));
++        let permit = permission.clone();
++        Self {
++            disk: files::Disk::default(),
++            permission,
++            permit: Arc::new(move || permit.load(Ordering::Acquire)),
++            active: None,
++            queued: VecDeque::new(),
++            listing_pending: false,
++        }
++    }
++}
++
++impl Drop for ControllerFiles {
++    fn drop(&mut self) {
++        self.permission.store(false, Ordering::Release);
++    }
++}
++
++impl<T: InvokeUiSession> Remote<T> {
++    pub(super) async fn managed_file_loop(&mut self, peer: &mut Stream) {
++        let mut state = ControllerFiles::default();
++        if let Err(error) = self.run_managed_files(peer, &mut state).await {
++            log::debug!("managed file connection ended: {error}");
++            self.handler
++                .on_establish_connection_error("受管文件连接已断开".to_owned());
++        }
++        state.permission.store(false, Ordering::Release);
++        self.handler.set_permission("file", false);
++        if let Err(error) = state.disk.end(FileResult::Cancelled).await {
++            log::error!("managed file cleanup failed: {error}");
++        }
++        if let Some(job) = state.active.take() {
++            self.handle_job_status(job.request.id, 0, Some("文件传输已中止".into()));
++        }
++        for job in state.queued.drain(..) {
++            self.handle_job_status(job.id, 0, Some("文件传输已中止".into()));
++        }
++    }
++
++    async fn run_managed_files(
++        &mut self,
++        peer: &mut Stream,
++        state: &mut ControllerFiles,
++    ) -> ResultType<()> {
++        let mut deadline = Instant::now() + SEC30;
++        let mut tick = time::interval(files::PUMP);
++        tick.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
++        let mut windows = false;
++        loop {
++            if state.active.is_none() {
++                if let Some(request) = state.queued.pop_front() {
++                    state.open(peer, request, self).await?;
++                }
++            }
++            tokio::select! {
++                _ = time::sleep_until(deadline) => bail!("managed file session timed out"),
++                _ = tick.tick(), if state.active.as_ref().is_some_and(|job| job.phase == Phase::Sending) => {
++                    state.send_block(peer, self).await?;
++                }
++                frame = peer.next() => {
++                    let Some(Ok(bytes)) = frame else { bail!("managed file transport closed") };
++                    deadline = Instant::now() + SEC30;
++                    if !self.is_connected {
++                        self.handler.update_received(true);
++                    }
++                    let message = Message::parse_from_bytes(&bytes)?;
++                    if message.misc().has_close_reason() {
++                        return Ok(());
++                    }
++                    match message.union {
++                        Some(message::Union::LoginResponse(mut response)) if !self.is_connected => {
++                            let info = response.take_peer_info();
++                            if !info.displays.is_empty() || info.username != "DeskRealm"
++                                || info.sas_enabled || info.windows_sessions.is_some()
++                                || info.features.is_some() || !info.platform_additions.is_empty()
++                            {
++                                bail!("invalid managed file login response");
++                            }
++                            windows = info.platform == "Windows";
++                            self.is_connected = true;
++                            state.permission.store(true, Ordering::Release);
++                            self.handler.set_permission("file", true);
++                            self.handler.handle_peer_info(info);
++                        }
++                        Some(message::Union::DeskrealmFile(frame)) if self.is_connected => {
++                            state.receive(peer, frame, windows, self).await?;
++                        }
++                        _ => {}
++                    }
++                }
++                command = self.receiver.recv() => match command {
++                    None | Some(Data::Close) => {
++                        state.permission.store(false, Ordering::Release);
++                        base::deskrealm_endpoint::send_controller_end(peer).await;
++                        return Ok(());
++                    }
++                    Some(command) if self.is_connected => {
++                        state.command(peer, command, windows, self).await?;
++                    }
++                    _ => {}
++                }
++            }
++        }
++    }
++}
++
++impl ControllerFiles {
++    async fn command<T: InvokeUiSession>(
++        &mut self,
++        peer: &mut Stream,
++        command: Data,
++        windows: bool,
++        remote: &mut Remote<T>,
++    ) -> ResultType<()> {
++        match command {
++            Data::Message(message) if message.file_action().has_read_dir() => {
++                let read = message.file_action().read_dir();
++                let root = files::virtual_root(windows);
++                if !read.path.is_empty() && read.path != root {
++                    remote
++                        .handler
++                        .job_error(0, "请选择 DeskRealm 交换目录".into(), 0);
++                } else if !self.listing_pending {
++                    self.listing_pending = true;
++                    files::send(peer, &self.permit, &files::message(0, Union::List(true))).await?;
++                }
++            }
++            Data::SendFiles((id, kind, path, to, file_num, _, download)) => {
++                let queue_has_id = self.queued.iter().any(|job| job.id == id);
++                let active_has_id = self.active.as_ref().is_some_and(|job| job.request.id == id);
++                if queue_has_id || active_has_id {
++                    return Ok(());
++                }
++                let name = files::virtual_name(if download { &path } else { &to }, windows);
++                match name {
++                    Ok(name)
++                        if id > 0
++                            && file_num == 0
++                            && self.queued.len() < MAX_QUEUED
++                            && matches!(kind, fs::JobType::Generic) =>
++                    {
++                        self.queued.push_back(Request {
++                            id,
++                            name,
++                            local: PathBuf::from(if download { to } else { path }),
++                            upload: !download,
++                        });
++                    }
++                    _ => {
++                        remote.handle_job_status(id, 0, Some("选择单个普通文件，或稍后重试".into()))
++                    }
++                }
++            }
++            Data::CancelJob(id) => {
++                if let Some(index) = self.queued.iter().position(|job| job.id == id) {
++                    self.queued.remove(index);
++                    remote.handle_job_status(id, 0, Some("文件传输已取消".into()));
++                } else if let Some(job) = self.active.as_mut().filter(|job| job.request.id == id) {
++                    job.phase = Phase::Cancelling;
++                    self.disk.end(FileResult::Cancelled).await?;
++                    files::send(peer, &self.permit, &files::message(id, Union::Cancel(true)))
++                        .await?;
++                }
++            }
++            Data::AddJob((id, ..))
++            | Data::ResumeJob((id, _))
++            | Data::RemoveDirAll((id, ..))
++            | Data::RemoveDir((id, ..))
++            | Data::RemoveFile((id, ..))
++            | Data::CreateDir((id, ..))
++            | Data::RenameFile((id, ..)) => {
++                remote.handle_job_status(id, 0, Some("受管交换目录仅支持上传和下载".into()));
++            }
++            _ => {}
++        }
++        Ok(())
++    }
++
++    async fn open<T: InvokeUiSession>(
++        &mut self,
++        peer: &mut Stream,
++        request: Request,
++        remote: &mut Remote<T>,
++    ) -> ResultType<()> {
++        let id = request.id;
++        let upload = request.upload;
++        let size = if upload {
++            let path = request.local.clone();
++            match self
++                .disk
++                .perform(&self.permit, move |slot, _| {
++                    let transfer = files::Transfer::source(&path)?;
++                    let size = transfer.size;
++                    *slot = Some(transfer);
++                    Ok(size)
++                })
++                .await
++            {
++                Ok(size) => size,
++                Err(_) => {
++                    remote.handle_job_status(id, 0, Some("无法打开本地源文件".into()));
++                    return Ok(());
++                }
++            }
++        } else {
++            0
++        };
++        let open = DeskRealmFileOpen {
++            upload,
++            name: request.name.clone(),
++            size,
++            ..Default::default()
++        };
++        self.active = Some(Job {
++            request,
++            size,
++            phase: Phase::Opening,
++        });
++        files::send(peer, &self.permit, &files::message(id, Union::Open(open))).await
++    }
++
++    async fn send_block<T: InvokeUiSession>(
++        &mut self,
++        peer: &mut Stream,
++        remote: &mut Remote<T>,
++    ) -> ResultType<()> {
++        let job = self
++            .active
++            .as_mut()
++            .ok_or_else(|| anyhow!("missing active file job"))?;
++        let id = job.request.id;
++        let data = self
++            .disk
++            .perform(&self.permit, |slot, _| {
++                let transfer = files::current(slot)?;
++                Ok((transfer.next()?, transfer.bytes))
++            })
++            .await;
++        match data {
++            Ok((body, bytes)) => {
++                if matches!(body, Union::Finish(true)) {
++                    job.phase = Phase::AwaitingResult;
++                }
++                report_progress(remote, id, bytes);
++                files::send(peer, &self.permit, &files::message(id, body)).await
++            }
++            Err(_) => {
++                self.complete(remote, id, FileResult::Failed).await?;
++                files::send(
++                    peer,
++                    &self.permit,
++                    &files::result(id, DeskRealmFileResult::Failed),
++                )
++                .await
++            }
++        }
++    }
++
++    async fn receive<T: InvokeUiSession>(
++        &mut self,
++        peer: &mut Stream,
++        frame: DeskRealmFile,
++        windows: bool,
++        remote: &mut Remote<T>,
++    ) -> ResultType<()> {
++        let id = frame.id;
++        if id == 0 && self.listing_pending {
++            self.listing_pending = false;
++            match frame.union {
++                Some(Union::Directory(directory))
++                    if files::valid_directory(&directory, windows) =>
++                {
++                    remote.handler.update_folder_files(
++                        0,
++                        &directory.entries,
++                        directory.path,
++                        false,
++                        false,
++                    );
++                }
++                _ => remote
++                    .handler
++                    .job_error(0, "无法读取 DeskRealm 交换目录".into(), 0),
++            }
++            return Ok(());
++        }
++        let Some(job) = self.active.as_mut().filter(|job| job.request.id == id) else {
++            return Ok(());
++        };
++        match frame.union {
++            Some(Union::AcceptedSize(size)) if job.phase == Phase::Opening => {
++                if job.request.upload {
++                    if size != job.size {
++                        bail!("invalid upload size acknowledgement");
++                    }
++                    job.phase = Phase::Sending;
++                } else {
++                    let path = job.request.local.clone();
++                    if self
++                        .disk
++                        .perform(&self.permit, move |slot, _| {
++                            *slot = Some(files::Transfer::sink(&path, size)?);
++                            Ok(())
++                        })
++                        .await
++                        .is_err()
++                    {
++                        return self.fail_download(peer, remote, id).await;
++                    }
++                    job.phase = Phase::Receiving;
++                }
++            }
++            Some(Union::Block(bytes)) if job.phase == Phase::Receiving => {
++                let bytes = self
++                    .disk
++                    .perform(&self.permit, move |slot, permit| {
++                        files::current(slot)?.write(&bytes, permit)
++                    })
++                    .await;
++                match bytes {
++                    Ok(bytes) => report_progress(remote, id, bytes),
++                    Err(_) => return self.fail_download(peer, remote, id).await,
++                }
++            }
++            Some(Union::Finish(true)) if job.phase == Phase::Receiving => {
++                if self
++                    .disk
++                    .perform(&self.permit, |slot, permit| {
++                        files::current(slot)?.commit(permit)
++                    })
++                    .await
++                    .is_err()
++                {
++                    return self.fail_download(peer, remote, id).await;
++                }
++                self.complete(remote, id, FileResult::Completed).await?;
++                files::send(
++                    peer,
++                    &self.permit,
++                    &files::result(id, DeskRealmFileResult::Completed),
++                )
++                .await?;
++            }
++            Some(Union::Result(result)) => {
++                let value = match result.enum_value() {
++                    Ok(DeskRealmFileResult::Completed)
++                        if job.request.upload
++                            && matches!(job.phase, Phase::AwaitingResult | Phase::Cancelling) =>
++                    {
++                        FileResult::Completed
++                    }
++                    Ok(DeskRealmFileResult::Cancelled) => FileResult::Cancelled,
++                    Ok(DeskRealmFileResult::Failed) => FileResult::Failed,
++                    _ => bail!("invalid managed file result"),
++                };
++                self.complete(remote, id, value).await?;
++            }
++            _ => {}
++        }
++        Ok(())
++    }
++
++    async fn fail_download<T: InvokeUiSession>(
++        &mut self,
++        peer: &mut Stream,
++        remote: &mut Remote<T>,
++        id: i32,
++    ) -> ResultType<()> {
++        self.complete(remote, id, FileResult::Failed).await?;
++        files::send(
++            peer,
++            &self.permit,
++            &files::result(id, DeskRealmFileResult::Failed),
++        )
++        .await
++    }
++
++    async fn complete<T: InvokeUiSession>(
++        &mut self,
++        remote: &mut Remote<T>,
++        id: i32,
++        result: FileResult,
++    ) -> ResultType<()> {
++        self.disk.end(result).await?;
++        self.active = None;
++        let error = match result {
++            FileResult::Completed => None,
++            FileResult::Cancelled => Some("文件传输已取消".into()),
++            FileResult::Failed => Some("文件传输失败，目标文件可能已存在".into()),
++        };
++        remote.handle_job_status(id, 0, error);
++        Ok(())
++    }
++}
++
++fn report_progress<T: InvokeUiSession>(remote: &Remote<T>, id: i32, bytes: u64) {
++    // Limit progress notifications under continuous 64 KiB blocks.
++    if bytes % (1024 * 1024) == 0 {
++        remote.handler.job_progress(id, 0, 0.0, bytes as f64);
++    }
++}
+diff --git a/src/deskrealm_desktop.rs b/src/deskrealm_desktop.rs
+index a40242b..bf714aa 100644
+--- a/src/deskrealm_desktop.rs
++++ b/src/deskrealm_desktop.rs
+@@ -47,6 +47,7 @@ const SETTINGS: &[&str] = &[
+     "DESKREALM_MANAGED_INPUT",
+     "DESKREALM_MANAGED_AUDIO",
+     "DESKREALM_MANAGED_CLIPBOARD",
++    "DESKREALM_MANAGED_FILE_ROOT",
+ ];
+ const ONLINE_INTERVAL: Duration = Duration::from_secs(12);
+ const REGISTRATION_INTERVAL: Duration = Duration::from_secs(8);
+@@ -56,6 +57,7 @@ const VIEW: u8 = ManagedAction::View as u8;
+ const INPUT: u8 = ManagedAction::Input as u8;
+ const AUDIO: u8 = ManagedAction::Audio as u8;
+ const CLIPBOARD: u8 = ManagedAction::Clipboard as u8;
++const FILES: u8 = ManagedAction::FileTransfer as u8;
+ 
+ pub(crate) fn enabled() -> bool {
+     cfg!(feature = "deskrealm-managed") || SETTINGS.iter().any(|var| env::var_os(var).is_some())
+@@ -209,7 +211,11 @@ impl Desktop {
+     }
+ }
+ 
+-pub(crate) async fn connect(peer: &str, force_relay: bool) -> ResultType<(Stream, bool, u8)> {
++pub(crate) async fn connect(
++    peer: &str,
++    force_relay: bool,
++    file_session: bool,
++) -> ResultType<(Stream, bool, u8)> {
+     if hbb_common::config::is_incoming_only() {
+         bail!("managed controller is unavailable in incoming-only mode");
+     }
+@@ -232,10 +238,13 @@ pub(crate) async fn connect(peer: &str, force_relay: bool) -> ResultType<(Stream
+     } else {
+         Path::Direct
+     };
+-    let requested = VIEW
+-        | requested_action("DESKREALM_MANAGED_INPUT", INPUT)?
+-        | requested_action("DESKREALM_MANAGED_AUDIO", AUDIO)?
+-        | requested_action("DESKREALM_MANAGED_CLIPBOARD", CLIPBOARD)?;
++    let requested = if file_session {
++        FILES
++    } else {
++        VIEW | requested_action("DESKREALM_MANAGED_INPUT", INPUT)?
++            | requested_action("DESKREALM_MANAGED_AUDIO", AUDIO)?
++            | requested_action("DESKREALM_MANAGED_CLIPBOARD", CLIPBOARD)?
++    };
+     if requested & CLIPBOARD != 0 && !crate::server::managed_clipboard::available() {
+         bail!("managed clipboard is unavailable on this desktop");
+     }
+@@ -265,11 +274,18 @@ pub(crate) async fn connect(peer: &str, force_relay: bool) -> ResultType<(Stream
+         .authority
+         .connect_controller(&mut stream, &route, &desktop.device, path)
+         .await?;
+-    if admitted.allowed_mask & u32::from(VIEW) == 0 {
+-        bail!("managed desktop requires screen permission");
++    if file_session {
++        if admitted.allowed_mask != u32::from(FILES) {
++            bail!("managed file session requires file permission");
++        }
++        stream.set_max_packet_length(crate::server::managed_files::MAX_WIRE);
++    } else {
++        if admitted.allowed_mask & u32::from(VIEW) == 0 {
++            bail!("managed desktop requires screen permission");
++        }
++        // Only the controller reads encoded media frames after admission.
++        stream.set_max_packet_length(16 * 1024 * 1024);
+     }
+-    // Only the controller reads encoded media frames after admission.
+-    stream.set_max_packet_length(16 * 1024 * 1024);
+     Ok((stream, path == Path::Direct, admitted.allowed_mask as u8))
+ }
+ 
+@@ -383,16 +399,18 @@ pub(crate) async fn authorize_target(
+         .policy
+         .as_ref()
+         .ok_or_else(|| anyhow!("no managed policy applied"))?;
++    let allowed = grant.allowed_mask();
++    let file_session = allowed == FILES;
++    let desktop_session = allowed & VIEW != 0 && allowed & !(VIEW | INPUT | AUDIO | CLIPBOARD) == 0;
+     if grant.policy_version() != policy.version()
+-        || grant.allowed_mask() & VIEW == 0
+-        || grant.allowed_mask() & !(VIEW | INPUT | AUDIO | CLIPBOARD) != 0
+-        || grant.allowed_mask() & !policy.allowed_mask() != 0
++        || !(file_session || desktop_session)
++        || allowed & !policy.allowed_mask() != 0
+     {
+         bail!("managed grant does not match locally applied policy");
+     }
+     #[cfg(windows)]
+     let console = crate::platform::deskrealm_unlocked_console()
+-        .ok_or_else(|| anyhow!("managed view requires an unlocked console"))?;
++        .ok_or_else(|| anyhow!("managed connection requires an unlocked console"))?;
+     if grant.allowed_mask() & INPUT != 0 && !crate::server::managed_input::available() {
+         bail!("managed input is unavailable on this desktop");
+     }
+@@ -402,9 +420,18 @@ pub(crate) async fn authorize_target(
+     if grant.allowed_mask() & CLIPBOARD != 0 && !crate::server::managed_clipboard::available() {
+         bail!("managed clipboard is unavailable on this desktop");
+     }
+-    let capture = capture
+-        .try_acquire_owned()
+-        .map_err(|_| anyhow!("managed display is busy"))?;
++    let (file_root, capture) = if file_session {
++        let root = std::path::PathBuf::from(required("DESKREALM_MANAGED_FILE_ROOT")?);
++        if !root.is_absolute() {
++            bail!("managed file root must be an absolute path");
++        }
++        (Some(root), None)
++    } else {
++        let capture = capture
++            .try_acquire_owned()
++            .map_err(|_| anyhow!("managed display is busy"))?;
++        (None, Some(capture))
++    };
+     let (mut stream, route, path) = desktop
+         .network()
+         .accept_target(
+@@ -447,9 +474,58 @@ pub(crate) async fn authorize_target(
+             |request| async move { ask_local_user(request, prompts).await },
+         )
+         .await?;
++    let device_bearer = || {
++        credentials
++            .borrow()
++            .as_ref()
++            .filter(|credential| !credential.expires_within(Duration::ZERO))
++            .map(|credential| credential.bearer().to_owned())
++    };
++    let unavailable = || {
++        #[cfg(windows)]
++        if crate::platform::deskrealm_unlocked_console() != Some(console) {
++            return true;
++        }
++        stopped() || crate::privacy_mode::is_in_privacy_mode()
++    };
++    if let Some(root) = file_root {
++        use crate::server::managed_files;
++        use base::deskrealm_endpoint::{FileResult, SessionFileReceipts};
++
++        let receipts = SessionFileReceipts::for_lease(&lease)
++            .ok_or_else(|| anyhow!("managed file permission was not redeemed"))?;
++        stream.set_max_packet_length(managed_files::MAX_WIRE);
++        let disk = managed_files::Disk::default();
++        let worker = disk.clone();
++        let (events, mut queued) = tokio::sync::mpsc::channel(8);
++        let session = desktop.authority.run_target(
++            stream,
++            lease,
++            device_bearer,
++            unavailable,
++            move |stream, access| managed_files::run_target(stream, access, root, worker, events),
++            || disk.end(FileResult::Cancelled),
++        );
++        let report = async {
++            let mut failures = 0;
++            while let Some(event) = queued.recv().await {
++                if receipts.report(&desktop.authority, &event).await.is_err() {
++                    failures += 1;
++                }
++            }
++            failures
++        };
++        let (reason, failures) = tokio::join!(session, report);
++        reason?;
++        if failures != 0 {
++            bail!("managed file receipts failed to reach the center");
++        }
++        return Ok(());
++    }
+     if lease.permits(ManagedAction::Clipboard) {
+         stream.set_max_packet_length(crate::server::managed_clipboard::MAX_WIRE_BYTES);
+     }
++    let capture = capture.ok_or_else(|| anyhow!("managed display slot is missing"))?;
+     let view = crate::server::managed_view::Capture::new(capture, lease.allowed_mask);
+     let worker = view.clone();
+     desktop
+@@ -457,20 +533,8 @@ pub(crate) async fn authorize_target(
+         .run_target(
+             stream,
+             lease,
+-            || {
+-                credentials
+-                    .borrow()
+-                    .as_ref()
+-                    .filter(|credential| !credential.expires_within(Duration::ZERO))
+-                    .map(|credential| credential.bearer().to_owned())
+-            },
+-            || {
+-                #[cfg(windows)]
+-                if crate::platform::deskrealm_unlocked_console() != Some(console) {
+-                    return true;
+-                }
+-                stopped() || crate::privacy_mode::is_in_privacy_mode()
+-            },
++            device_bearer,
++            unavailable,
+             move |stream, access| worker.run(stream, access),
+             || view.stop(),
+         )
+diff --git a/src/server.rs b/src/server.rs
+index 9be1389..cd3597f 100644
+--- a/src/server.rs
++++ b/src/server.rs
+@@ -79,6 +79,8 @@ pub(crate) mod managed_input;
+ pub(crate) mod managed_audio;
+ #[cfg(not(any(target_os = "android", target_os = "ios")))]
+ pub(crate) mod managed_clipboard;
++#[cfg(not(any(target_os = "android", target_os = "ios")))]
++pub(crate) mod managed_files;
+ mod login_failure_check;
+ pub(crate) mod port_forward_mux;
+ pub mod display_service;
+diff --git a/src/server/managed_files.rs b/src/server/managed_files.rs
+new file mode 100644
+index 0000000..a86230c
+--- /dev/null
++++ b/src/server/managed_files.rs
+@@ -0,0 +1,963 @@
++//! The managed file window exposes a flat exchange directory and one active job.
++
++use base::{
++    deskrealm_endpoint::{
++        FileDirection, FileEvent, FileResult, ManagedAction, SessionAccess, StopReason,
++    },
++    message_proto::{desk_realm_file::Union, *},
++};
++use hbb_common::{
++    anyhow::anyhow,
++    bail,
++    protobuf::Message as _,
++    tokio::{
++        self,
++        sync::mpsc,
++        time::{interval, sleep, timeout, MissedTickBehavior},
++    },
++    uuid::Uuid,
++    ResultType, Stream,
++};
++use std::{
++    fs::{self, File, Metadata, OpenOptions},
++    io::{Read, Write},
++    path::{Path, PathBuf},
++    sync::{Arc, Mutex},
++    time::Duration,
++};
++use tempfile::NamedTempFile;
++
++const BLOCK: usize = 64 * 1024;
++const MAX_ENTRIES: usize = 1024;
++const TEMP_PREFIX: &str = ".deskrealm-part-";
++pub(crate) const MAX_WIRE: usize = 512 * 1024;
++pub(crate) const PUMP: Duration = Duration::from_millis(4);
++pub(crate) type Permit = Arc<dyn Fn() -> bool + Send + Sync>;
++type Scope = Arc<dyn Fn() -> Option<(u64, u64)> + Send + Sync>;
++
++pub(crate) fn message(id: i32, body: Union) -> Message {
++    let mut message = Message::new();
++    message.set_deskrealm_file(DeskRealmFile {
++        id,
++        union: Some(body),
++        ..Default::default()
++    });
++    message
++}
++
++pub(crate) fn result(id: i32, value: DeskRealmFileResult) -> Message {
++    message(id, Union::Result(value.into()))
++}
++
++pub(crate) fn virtual_root(windows: bool) -> &'static str {
++    if windows {
++        "C:\\DeskRealm"
++    } else {
++        "/DeskRealm"
++    }
++}
++
++pub(crate) fn valid_directory(directory: &FileDirectory, windows: bool) -> bool {
++    directory.id == 0
++        && directory.path == virtual_root(windows)
++        && directory.entries.len() <= MAX_ENTRIES
++        && directory.entries.iter().all(|entry| {
++            entry.entry_type.enum_value() == Ok(FileType::File) && check_name(&entry.name).is_ok()
++        })
++        && base::fs::download::validate_listing(&directory.entries, windows).is_ok()
++}
++
++pub(crate) fn virtual_name(path: &str, windows: bool) -> ResultType<String> {
++    let path = if windows {
++        path.replace('/', "\\")
++    } else {
++        path.to_owned()
++    };
++    let (parent, name) = path
++        .rsplit_once(if windows { '\\' } else { '/' })
++        .ok_or_else(|| anyhow!("Select a file in the DeskRealm exchange directory"))?;
++    let root = virtual_root(windows);
++    let in_root = if windows {
++        parent.eq_ignore_ascii_case(root)
++    } else {
++        parent == root
++    };
++    if !in_root {
++        bail!("Select a file in the DeskRealm exchange directory");
++    }
++    check_name(name)?;
++    Ok(name.to_owned())
++}
++
++fn check_name(name: &str) -> ResultType<()> {
++    let stem = name
++        .split('.')
++        .next()
++        .unwrap_or_default()
++        .trim()
++        .to_ascii_uppercase();
++    let reserved_port = ["COM", "LPT"].iter().any(|prefix| {
++        stem.strip_prefix(prefix).is_some_and(|value| {
++            value.len() == 1 && value.as_bytes()[0].is_ascii_digit()
++                || matches!(value, "¹" | "²" | "³")
++        })
++    });
++    if name.is_empty()
++        || name.len() > 255
++        || name == "."
++        || name == ".."
++        || name.ends_with(['.', ' '])
++        || name.to_ascii_lowercase().starts_with(TEMP_PREFIX)
++        || name.contains(['/', '\\', ':', '<', '>', '"', '|', '?', '*'])
++        || name.chars().any(char::is_control)
++        || matches!(
++            stem.as_str(),
++            "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
++        )
++        || reserved_port
++    {
++        bail!("Invalid file name for a managed transfer");
++    }
++    Ok(())
++}
++
++fn is_link(meta: &Metadata) -> bool {
++    #[cfg(windows)]
++    {
++        use std::os::windows::fs::MetadataExt;
++        meta.file_attributes() & winapi::um::winnt::FILE_ATTRIBUTE_REPARSE_POINT != 0
++    }
++    #[cfg(not(windows))]
++    {
++        meta.file_type().is_symlink()
++    }
++}
++
++fn safe_dir(path: &Path) -> ResultType<PathBuf> {
++    let meta = fs::symlink_metadata(path)?;
++    if !meta.is_dir() || is_link(&meta) {
++        bail!("Managed transfer directory is unavailable");
++    }
++    Ok(path.canonicalize()?)
++}
++
++fn ordinary_file(meta: &Metadata) -> bool {
++    meta.is_file() && !is_link(meta)
++}
++
++fn open_source(path: &Path) -> ResultType<(File, u64)> {
++    if !ordinary_file(&fs::symlink_metadata(path)?) {
++        bail!("Managed transfers require a regular file");
++    }
++    let mut options = OpenOptions::new();
++    options.read(true);
++    #[cfg(unix)]
++    {
++        use hbb_common::libc::{O_NOFOLLOW, O_NONBLOCK};
++        use std::os::unix::fs::OpenOptionsExt;
++        options.custom_flags(O_NOFOLLOW | O_NONBLOCK);
++    }
++    #[cfg(windows)]
++    {
++        use std::os::windows::fs::OpenOptionsExt;
++        use winapi::um::winbase::FILE_FLAG_OPEN_REPARSE_POINT;
++        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
++    }
++    let file = options.open(path)?;
++    let metadata = file.metadata()?;
++    if !ordinary_file(&metadata) || metadata.len() > i64::MAX as u64 {
++        bail!("Managed transfer source is unavailable");
++    }
++    Ok((file, metadata.len()))
++}
++
++#[cfg(unix)]
++fn single_link(file: &File) -> ResultType<bool> {
++    use std::os::unix::fs::MetadataExt;
++    Ok(file.metadata()?.nlink() == 1)
++}
++
++#[cfg(windows)]
++fn single_link(file: &File) -> ResultType<bool> {
++    use std::{mem::MaybeUninit, os::windows::io::AsRawHandle};
++    use winapi::{
++        shared::minwindef::FALSE,
++        um::fileapi::{GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION},
++    };
++    let mut information = MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::uninit();
++    if unsafe { GetFileInformationByHandle(file.as_raw_handle() as _, information.as_mut_ptr()) }
++        == FALSE
++    {
++        return Err(std::io::Error::last_os_error().into());
++    }
++    Ok(unsafe { information.assume_init() }.nNumberOfLinks == 1)
++}
++
++struct Destination {
++    path: PathBuf,
++    part: Option<NamedTempFile>,
++}
++
++impl Destination {
++    fn create(path: &Path) -> ResultType<Self> {
++        let parent = path
++            .parent()
++            .ok_or_else(|| anyhow!("No destination directory"))?;
++        let parent = safe_dir(parent)?;
++        let name = path
++            .file_name()
++            .and_then(|s| s.to_str())
++            .ok_or_else(|| anyhow!("Invalid destination file name"))?;
++        check_name(name)?;
++        let path = parent.join(name);
++        match fs::symlink_metadata(&path) {
++            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
++            Err(error) => return Err(error.into()),
++            Ok(_) => bail!("The destination file already exists"),
++        }
++        let part = tempfile::Builder::new()
++            .prefix(TEMP_PREFIX)
++            .tempfile_in(parent)?;
++        Ok(Self {
++            path,
++            part: Some(part),
++        })
++    }
++
++    fn commit(&mut self, permit: &Permit) -> ResultType<()> {
++        let part = self
++            .part
++            .as_mut()
++            .ok_or_else(|| anyhow!("No pending file"))?;
++        part.as_file_mut().sync_all()?;
++        if !permit() {
++            bail!("File authorization ended before publication");
++        }
++        let part = self.part.take().unwrap();
++        if let Err(error) = part.persist_noclobber(&self.path) {
++            self.part = Some(error.file);
++            return Err(error.error.into());
++        }
++        Ok(())
++    }
++
++    fn cleanup(&mut self) -> ResultType<()> {
++        if let Some(part) = self.part.take() {
++            part.close()?;
++        }
++        Ok(())
++    }
++}
++
++struct Audit {
++    permit: mpsc::OwnedPermit<FileEvent>,
++    event: FileEvent,
++}
++
++impl Audit {
++    fn new(sender: &mpsc::Sender<FileEvent>, sequence: u64, upload: bool) -> Option<Self> {
++        Some(Self {
++            permit: sender.clone().try_reserve_owned().ok()?,
++            event: FileEvent {
++                id: Uuid::new_v4(),
++                sequence,
++                direction: if upload {
++                    FileDirection::Upload
++                } else {
++                    FileDirection::Download
++                },
++                result: FileResult::Cancelled,
++                bytes: 0,
++            },
++        })
++    }
++}
++
++struct PendingAudit(Option<Audit>);
++
++impl Drop for PendingAudit {
++    fn drop(&mut self) {
++        if let Some(audit) = self.0.take() {
++            audit.permit.send(audit.event);
++        }
++    }
++}
++
++enum FileSide {
++    Source(File),
++    Sink(Destination),
++}
++
++pub(crate) struct Transfer {
++    file: FileSide,
++    pub(crate) size: u64,
++    pub(crate) bytes: u64,
++    audit: PendingAudit,
++}
++
++impl Transfer {
++    pub(crate) fn source(path: &Path) -> ResultType<Self> {
++        let (file, size) = open_source(path)?;
++        Ok(Self {
++            file: FileSide::Source(file),
++            size,
++            bytes: 0,
++            audit: PendingAudit(None),
++        })
++    }
++
++    fn exchange_source(path: &Path) -> ResultType<Self> {
++        let transfer = Self::source(path)?;
++        let FileSide::Source(file) = &transfer.file else {
++            unreachable!()
++        };
++        if !single_link(file)? {
++            bail!("A linked file cannot be read from the exchange directory");
++        }
++        Ok(transfer)
++    }
++
++    pub(crate) fn sink(path: &Path, size: u64) -> ResultType<Self> {
++        if size > i64::MAX as u64 {
++            bail!("Invalid managed file size");
++        }
++        let destination = Destination::create(path)?;
++        Ok(Self {
++            file: FileSide::Sink(destination),
++            size,
++            bytes: 0,
++            audit: PendingAudit(None),
++        })
++    }
++
++    pub(crate) fn next(&mut self) -> ResultType<Union> {
++        let FileSide::Source(source) = &mut self.file else {
++            bail!("Wrong file direction");
++        };
++        let count = (self.size - self.bytes).min(BLOCK as u64) as usize;
++        if count == 0 {
++            return Ok(Union::Finish(true));
++        }
++        let mut data = vec![0; count];
++        source.read_exact(&mut data)?;
++        self.progress(count as u64);
++        Ok(Union::Block(data.into()))
++    }
++
++    pub(crate) fn write(&mut self, bytes: &[u8], permit: &Permit) -> ResultType<u64> {
++        let FileSide::Sink(destination) = &mut self.file else {
++            bail!("Wrong file direction");
++        };
++        if bytes.is_empty() || bytes.len() > BLOCK || bytes.len() as u64 > self.size - self.bytes {
++            bail!("Invalid managed file block");
++        }
++        // Count even short writes before a local disk error.
++        let file = destination
++            .part
++            .as_mut()
++            .ok_or_else(|| anyhow!("No pending file"))?;
++        let mut remaining = bytes;
++        while !remaining.is_empty() {
++            if !permit() {
++                bail!("Managed file authorization ended");
++            }
++            let written = match file.write(remaining) {
++                Ok(0) => bail!("Managed file write made no progress"),
++                Ok(written) => written,
++                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
++                Err(error) => return Err(error.into()),
++            };
++            remaining = &remaining[written..];
++            self.bytes += written as u64;
++            if let Some(audit) = &mut self.audit.0 {
++                audit.event.bytes = self.bytes;
++            }
++        }
++        Ok(self.bytes)
++    }
++
++    fn progress(&mut self, count: u64) {
++        self.bytes += count;
++        if let Some(audit) = &mut self.audit.0 {
++            audit.event.bytes = self.bytes;
++        }
++    }
++
++    pub(crate) fn commit(&mut self, permit: &Permit) -> ResultType<()> {
++        let FileSide::Sink(destination) = &mut self.file else {
++            bail!("Wrong file direction");
++        };
++        if self.bytes != self.size {
++            bail!("Incomplete managed file");
++        }
++        destination.commit(permit)?;
++        // Publication is durable user-visible progress, even if the ACK is interrupted.
++        if let Some(audit) = &mut self.audit.0 {
++            audit.event.result = FileResult::Completed;
++        }
++        Ok(())
++    }
++
++    fn end(mut self, outcome: FileResult) -> ResultType<()> {
++        if let FileSide::Sink(destination) = &mut self.file {
++            destination.cleanup()?;
++        }
++        if let Some(audit) = &mut self.audit.0 {
++            if !matches!(audit.event.result, FileResult::Completed) {
++                audit.event.result = outcome;
++            }
++        }
++        Ok(())
++    }
++}
++
++#[derive(Clone, Default)]
++pub(crate) struct Disk(Arc<Mutex<Option<Transfer>>>);
++
++impl Disk {
++    pub(crate) async fn perform<T: Send + 'static>(
++        &self,
++        permit: &Permit,
++        operation: impl FnOnce(&mut Option<Transfer>, &Permit) -> ResultType<T> + Send + 'static,
++    ) -> ResultType<T> {
++        let disk = self.clone();
++        let permit = permit.clone();
++        tokio::task::spawn_blocking(move || {
++            let mut slot = disk.0.lock().unwrap();
++            if !permit() {
++                bail!("Managed file authorization is inactive");
++            }
++            operation(&mut slot, &permit)
++        })
++        .await?
++    }
++
++    pub(crate) async fn end(&self, outcome: FileResult) -> ResultType<()> {
++        let disk = self.clone();
++        // The mutex serializes cleanup with any operation whose awaiting future was cancelled.
++        // Late blocking tasks must recheck the now-invalid lease before performing any I/O.
++        tokio::task::spawn_blocking(move || {
++            let mut slot = disk.0.lock().unwrap();
++            slot.take().map_or(Ok(()), |job| job.end(outcome))
++        })
++        .await?
++    }
++}
++
++pub(crate) fn current(slot: &mut Option<Transfer>) -> ResultType<&mut Transfer> {
++    slot.as_mut()
++        .ok_or_else(|| anyhow!("No active managed file transfer"))
++}
++
++fn listing(path: &Path, permitted: &Permit) -> ResultType<FileDirectory> {
++    let mut entries = Vec::new();
++    // Keep both the listing and the work on an oversized shared directory bounded.
++    for entry in fs::read_dir(path)?.take(MAX_ENTRIES * 2) {
++        if !permitted() {
++            bail!("Managed file authorization ended");
++        }
++        let entry = entry?;
++        let Some(name) = entry.file_name().into_string().ok() else {
++            continue;
++        };
++        if name.starts_with('.') || check_name(&name).is_err() {
++            continue;
++        }
++        let metadata = fs::symlink_metadata(entry.path())?;
++        if !ordinary_file(&metadata) {
++            continue;
++        }
++        let modified_time = metadata
++            .modified()
++            .ok()
++            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
++            .map_or(0, |elapsed| elapsed.as_secs());
++        entries.push(FileEntry {
++            name,
++            size: metadata.len(),
++            modified_time,
++            entry_type: FileType::File.into(),
++            ..Default::default()
++        });
++        if entries.len() == MAX_ENTRIES {
++            break;
++        }
++    }
++    entries.sort_by(|a, b| a.name.cmp(&b.name));
++    Ok(FileDirectory {
++        path: virtual_root(cfg!(windows)).to_owned(),
++        entries,
++        ..Default::default()
++    })
++}
++
++#[derive(Clone, Copy)]
++struct Active {
++    id: i32,
++    upload: bool,
++    waiting_for_ack: bool,
++}
++
++pub(crate) async fn run_target(
++    mut stream: Stream,
++    access: SessionAccess,
++    root: PathBuf,
++    disk: Disk,
++    audits: mpsc::Sender<FileEvent>,
++) -> StopReason {
++    let scope: Scope = {
++        let access = access.clone();
++        Arc::new(move || access.scope(ManagedAction::FileTransfer))
++    };
++    let status = target_loop(&mut stream, scope, root, disk, audits).await;
++    if !access.permits(ManagedAction::FileTransfer) {
++        drop(stream);
++        // End the file data plane immediately. Let the supervisor report the actual
++        // lease failure, or close locally after a suspended lease has been revalidated.
++        while !access.permits(ManagedAction::FileTransfer) {
++            sleep(Duration::from_millis(25)).await;
++        }
++        return StopReason::LocalEnd;
++    }
++    match status {
++        Ok(reason) => reason,
++        Err(error) => {
++            // The managed audit endpoint receives metadata only.
++            hbb_common::log::debug!("managed file session ended: {error}");
++            StopReason::ConnectionLost
++        }
++    }
++}
++
++async fn target_loop(
++    stream: &mut Stream,
++    scope: Scope,
++    root: PathBuf,
++    disk: Disk,
++    audits: mpsc::Sender<FileEvent>,
++) -> ResultType<StopReason> {
++    let generation = timeout(Duration::from_secs(5), async {
++        loop {
++            if let Some((generation, _)) = scope() {
++                break generation;
++            }
++            sleep(Duration::from_millis(25)).await;
++        }
++    })
++    .await?;
++    let permit: Permit = {
++        let scope = scope.clone();
++        Arc::new(move || scope().is_some_and(|(current, _)| current == generation))
++    };
++    let root = disk.perform(&permit, move |_, _| safe_dir(&root)).await?;
++    let mut login = Message::new();
++    login.mut_login_response().set_peer_info(PeerInfo {
++        username: "DeskRealm".to_owned(),
++        hostname: crate::whoami_hostname(),
++        platform: hbb_common::whoami::platform().to_string(),
++        version: crate::VERSION.to_owned(),
++        ..Default::default()
++    });
++    send(stream, &permit, &login).await?;
++
++    let mut active: Option<Active> = None;
++    let mut tick = interval(PUMP);
++    tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
++    let mut check = interval(Duration::from_millis(25));
++    let mut keepalive = interval(Duration::from_secs(5));
++    loop {
++        tokio::select! {
++            _ = check.tick() => {
++                if !permit() {
++                    return Ok(StopReason::LocalEnd);
++                }
++            }
++            _ = keepalive.tick() => {
++                let mut ping = Message::new();
++                ping.set_test_delay(TestDelay::new());
++                send(stream, &permit, &ping).await?;
++            }
++            packet = stream.next() => {
++                let Some(Ok(packet)) = packet else { return Ok(StopReason::ConnectionLost) };
++                let message = Message::parse_from_bytes(&packet)?;
++                if message.misc().has_close_reason() {
++                    return Ok(StopReason::LocalEnd);
++                }
++                let Some(message::Union::DeskrealmFile(frame)) = message.union else { continue };
++                if let Some(reply) = target_request(&disk, &permit, &scope, &root, &audits, &mut active, frame).await? {
++                    send(stream, &permit, &reply).await?;
++                }
++            }
++            _ = tick.tick(), if active.is_some_and(|job| !job.upload && !job.waiting_for_ack) => {
++                let job = active.as_mut().unwrap();
++                let id = job.id;
++                match disk.perform(&permit, |slot, _| current(slot)?.next()).await {
++                    Ok(body) => {
++                        job.waiting_for_ack = matches!(body, Union::Finish(true));
++                        send(stream, &permit, &message(id, body)).await?;
++                    }
++                    Err(_) => {
++                        if !permit() {
++                            return Ok(StopReason::LocalEnd);
++                        }
++                        disk.end(FileResult::Failed).await?;
++                        active = None;
++                        send(stream, &permit, &result(id, DeskRealmFileResult::Failed)).await?;
++                    }
++                }
++            }
++        }
++    }
++}
++
++async fn target_request(
++    disk: &Disk,
++    permit: &Permit,
++    scope: &Scope,
++    root: &Path,
++    audits: &mpsc::Sender<FileEvent>,
++    active: &mut Option<Active>,
++    frame: DeskRealmFile,
++) -> ResultType<Option<Message>> {
++    let id = frame.id;
++    let reply = match frame.union {
++        Some(Union::List(true)) if id == 0 => {
++            let root = root.to_owned();
++            match disk
++                .perform(permit, move |_, permit| listing(&root, permit))
++                .await
++            {
++                Ok(directory) => message(0, Union::Directory(directory)),
++                Err(_) => result(0, DeskRealmFileResult::Failed),
++            }
++        }
++        Some(Union::Open(open)) if id > 0 && active.is_none() => {
++            let Some((_, sequence)) = scope() else {
++                return Ok(None);
++            };
++            let Some(audit) = Audit::new(audits, sequence, open.upload) else {
++                return Ok(Some(result(id, DeskRealmFileResult::Failed)));
++            };
++            let audit = PendingAudit(Some(audit));
++            let upload = open.upload;
++            let root = root.to_owned();
++            match disk
++                .perform(permit, move |slot, _| {
++                    let mut audit = audit;
++                    let opened = (|| {
++                        check_name(&open.name)?;
++                        let path = root.join(open.name);
++                        if upload {
++                            Transfer::sink(&path, open.size)
++                        } else {
++                            Transfer::exchange_source(&path)
++                        }
++                    })();
++                    match opened {
++                        Ok(mut transfer) => {
++                            let size = transfer.size;
++                            transfer.audit = audit;
++                            *slot = Some(transfer);
++                            Ok(size)
++                        }
++                        Err(error) => {
++                            audit.0.as_mut().unwrap().event.result = FileResult::Failed;
++                            Err(error)
++                        }
++                    }
++                })
++                .await
++            {
++                Ok(size) => {
++                    *active = Some(Active {
++                        id,
++                        upload,
++                        waiting_for_ack: false,
++                    });
++                    message(id, Union::AcceptedSize(size))
++                }
++                Err(_) => result(id, DeskRealmFileResult::Failed),
++            }
++        }
++        Some(Union::Open(_)) if id > 0 && !active.is_some_and(|job| job.id == id) => {
++            result(id, DeskRealmFileResult::Failed)
++        }
++        Some(Union::Block(bytes)) if active.is_some_and(|job| job.id == id && job.upload) => {
++            if disk
++                .perform(permit, move |slot, permit| {
++                    current(slot)?.write(&bytes, permit)
++                })
++                .await
++                .is_ok()
++            {
++                return Ok(None);
++            }
++            if !permit() {
++                bail!("Managed file authorization ended");
++            }
++            disk.end(FileResult::Failed).await?;
++            *active = None;
++            result(id, DeskRealmFileResult::Failed)
++        }
++        Some(Union::Finish(true)) if active.is_some_and(|job| job.id == id && job.upload) => {
++            let committed = disk
++                .perform(permit, |slot, permit| current(slot)?.commit(permit))
++                .await
++                .is_ok();
++            if !committed && !permit() {
++                bail!("Managed file authorization ended");
++            }
++            *active = None;
++            let (outcome, wire) = if committed {
++                (FileResult::Completed, DeskRealmFileResult::Completed)
++            } else {
++                (FileResult::Failed, DeskRealmFileResult::Failed)
++            };
++            disk.end(outcome).await?;
++            result(id, wire)
++        }
++        Some(Union::Result(report)) if active.is_some_and(|job| job.id == id) => {
++            let outcome = match report.enum_value() {
++                Ok(DeskRealmFileResult::Completed)
++                    if active.is_some_and(|job| !job.upload && job.waiting_for_ack) =>
++                {
++                    FileResult::Completed
++                }
++                Ok(DeskRealmFileResult::Failed) => FileResult::Failed,
++                Ok(DeskRealmFileResult::Cancelled) => FileResult::Cancelled,
++                _ => return Ok(None),
++            };
++            disk.end(outcome).await?;
++            *active = None;
++            return Ok(None);
++        }
++        Some(Union::Cancel(true)) if active.is_some_and(|job| job.id == id) => {
++            disk.end(FileResult::Cancelled).await?;
++            *active = None;
++            result(id, DeskRealmFileResult::Cancelled)
++        }
++        _ => return Ok(None),
++    };
++    Ok(Some(reply))
++}
++
++pub(crate) async fn send(
++    stream: &mut Stream,
++    permit: &Permit,
++    message: &Message,
++) -> ResultType<()> {
++    if !permit() {
++        bail!("Managed file authorization is inactive");
++    }
++    super::managed_view::send_authorized(stream, message, || permit()).await
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use hbb_common::tokio::net::{TcpListener, TcpStream};
++    use std::sync::atomic::{AtomicBool, Ordering};
++
++    #[tokio::test]
++    async fn managed_file_paths_and_publication_fail_closed() -> ResultType<()> {
++        let root = tempfile::tempdir()?;
++        let final_path = root.path().join("result.txt");
++        let mut job = Transfer::sink(&final_path, 4)?;
++        let permitted = Arc::new(AtomicBool::new(true));
++        let check = permitted.clone();
++        let gate: Permit = Arc::new(move || check.load(Ordering::Acquire));
++
++        assert!(virtual_name("C:\\DeskRealm\\nested\\escape.txt", true).is_err());
++        assert!(virtual_name("/DeskRealm/../escape.txt", false).is_err());
++        for name in [
++            "..",
++            "CON.txt",
++            "COM¹.log",
++            "file:stream",
++            "name. ",
++            ".deskrealm-part-f",
++        ] {
++            assert!(check_name(name).is_err());
++        }
++        assert!(job.write(b"excess", &gate).is_err());
++        assert_eq!(job.write(b"rust", &gate)?, 4);
++        assert!(!final_path.exists());
++        permitted.store(false, Ordering::Release);
++        assert!(job.commit(&gate).is_err());
++        assert!(job.write(b"x", &gate).is_err());
++        assert!(!final_path.exists());
++        permitted.store(true, Ordering::Release);
++        fs::write(&final_path, b"existing")?;
++        assert!(job.commit(&gate).is_err());
++        job.end(FileResult::Failed)?;
++        assert_eq!(fs::read(&final_path)?, b"existing");
++        assert_eq!(fs::read_dir(root.path())?.count(), 1);
++        let linked = root.path().join("hardlink.txt");
++        fs::hard_link(&final_path, &linked)?;
++        assert!(Transfer::exchange_source(&linked).is_err());
++        #[cfg(unix)]
++        {
++            let alias = root.path().join("symlink.txt");
++            std::os::unix::fs::symlink(&final_path, &alias)?;
++            assert!(Transfer::exchange_source(&alias).is_err());
++        }
++        let disk = Disk::default();
++        permitted.store(false, Ordering::Release);
++        assert!(disk
++            .perform::<()>(&gate, |_, _| panic!("unauthorized disk access"))
++            .await
++            .is_err());
++        Ok(())
++    }
++
++    async fn packet(peer: &mut Stream) -> ResultType<DeskRealmFile> {
++        loop {
++            let frame = peer
++                .next()
++                .await
++                .ok_or_else(|| anyhow!("unexpected file stream EOF"))??;
++            let mut message = Message::parse_from_bytes(&frame)?;
++            if message.has_deskrealm_file() {
++                return Ok(message.take_deskrealm_file());
++            }
++        }
++    }
++
++    fn open(id: i32, name: &str, upload: bool, size: u64) -> Message {
++        message(
++            id,
++            Union::Open(DeskRealmFileOpen {
++                upload,
++                name: name.to_owned(),
++                size,
++                ..Default::default()
++            }),
++        )
++    }
++
++    #[tokio::test]
++    async fn managed_file_driver_moves_bytes_and_audits_cancel_and_failure() -> ResultType<()> {
++        let root = tempfile::tempdir()?;
++        let source = vec![0xa5; BLOCK + 17];
++        fs::write(root.path().join("source.bin"), &source)?;
++        let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
++        let address = listener.local_addr()?;
++        let (client, target) = tokio::try_join!(TcpStream::connect(address), listener.accept())?;
++        let mut client = Stream::from(client, address);
++        let mut target = Stream::from(target.0, address);
++        client.set_max_packet_length(MAX_WIRE);
++        target.set_max_packet_length(MAX_WIRE);
++        let enabled = Arc::new(AtomicBool::new(true));
++        let scope: Scope = {
++            let enabled = enabled.clone();
++            Arc::new(move || enabled.load(Ordering::Acquire).then_some((4, 7)))
++        };
++        let disk = Disk::default();
++        let (audits, mut events) = mpsc::channel(8);
++        let worker_root = root.path().to_owned();
++        let worker = async {
++            let result = target_loop(&mut target, scope, worker_root, disk.clone(), audits).await;
++            disk.end(FileResult::Cancelled).await?;
++            result
++        };
++        let controller = async {
++            let login = client
++                .next()
++                .await
++                .ok_or_else(|| anyhow!("missing file login"))??;
++            assert_eq!(
++                Message::parse_from_bytes(&login)?
++                    .login_response()
++                    .peer_info()
++                    .username,
++                "DeskRealm"
++            );
++            client.send(&message(0, Union::List(true))).await?;
++            let directory = packet(&mut client).await?;
++            assert_eq!(directory.directory().entries[0].name, "source.bin");
++            assert!(valid_directory(directory.directory(), cfg!(windows)));
++
++            client.send(&open(1, "source.bin", false, 0)).await?;
++            assert_eq!(
++                packet(&mut client).await?.accepted_size(),
++                source.len() as u64
++            );
++            let mut downloaded = Vec::new();
++            loop {
++                match packet(&mut client).await?.union {
++                    Some(Union::Block(bytes)) => downloaded.extend_from_slice(&bytes),
++                    Some(Union::Finish(true)) => break,
++                    _ => bail!("unexpected download message"),
++                }
++            }
++            assert_eq!(downloaded, source);
++            client
++                .send(&result(1, DeskRealmFileResult::Completed))
++                .await?;
++
++            client.send(&open(2, "received.txt", true, 5)).await?;
++            assert_eq!(packet(&mut client).await?.accepted_size(), 5);
++            client
++                .send(&message(2, Union::Block(b"hello".to_vec().into())))
++                .await?;
++            client.send(&message(2, Union::Finish(true))).await?;
++            assert_eq!(
++                packet(&mut client).await?.result(),
++                DeskRealmFileResult::Completed
++            );
++            assert_eq!(fs::read(root.path().join("received.txt"))?, b"hello");
++
++            client.send(&open(3, "received.txt", true, 5)).await?;
++            assert_eq!(
++                packet(&mut client).await?.result(),
++                DeskRealmFileResult::Failed
++            );
++            client.send(&open(4, "cancelled.txt", true, 8)).await?;
++            assert_eq!(packet(&mut client).await?.accepted_size(), 8);
++            client.send(&message(4, Union::Cancel(true))).await?;
++            assert_eq!(
++                packet(&mut client).await?.result(),
++                DeskRealmFileResult::Cancelled
++            );
++            assert!(!root.path().join("cancelled.txt").exists());
++
++            client.send(&open(5, "revoked.txt", true, 8)).await?;
++            assert_eq!(packet(&mut client).await?.accepted_size(), 8);
++            client
++                .send(&message(5, Union::Block(b"half".to_vec().into())))
++                .await?;
++            // The next reply is ordered after the block had an opportunity to reach the disk.
++            client.send(&message(0, Union::List(true))).await?;
++            let directory = packet(&mut client).await?;
++            assert_eq!(directory.directory().entries.len(), 2);
++            assert_eq!(fs::read_dir(root.path())?.count(), 3);
++            enabled.store(false, Ordering::Release);
++            Ok::<_, hbb_common::anyhow::Error>(())
++        };
++        let (reason, controller) = timeout(Duration::from_secs(10), async {
++            tokio::join!(worker, controller)
++        })
++        .await?;
++        controller?;
++        assert_eq!(reason?, StopReason::LocalEnd);
++        assert_eq!(fs::read_dir(root.path())?.count(), 2);
++        assert!(!root.path().join("revoked.txt").exists());
++        let mut reported = Vec::new();
++        while let Some(event) = events.recv().await {
++            reported.push(event);
++        }
++        assert_eq!(reported.len(), 5);
++        assert!(reported.iter().all(|event| event.sequence == 7));
++        assert!(matches!(reported[0].direction, FileDirection::Download));
++        assert!(matches!(reported[0].result, FileResult::Completed));
++        assert_eq!(reported[0].bytes, source.len() as u64);
++        assert!(matches!(reported[1].direction, FileDirection::Upload));
++        assert!(matches!(reported[1].result, FileResult::Completed));
++        assert_eq!(reported[1].bytes, 5);
++        assert!(matches!(reported[2].result, FileResult::Failed));
++        assert!(matches!(reported[3].result, FileResult::Cancelled));
++        assert!(matches!(reported[4].result, FileResult::Cancelled));
++        assert_eq!(reported[4].bytes, 4);
++        Ok(())
++    }
++}
+diff --git a/src/server/managed_view.rs b/src/server/managed_view.rs
+index 0adfd4b..e846fd7 100644
+--- a/src/server/managed_view.rs
++++ b/src/server/managed_view.rs
+@@ -419,6 +419,11 @@ mod tests {
+             request(&message, true, screen),
+             ViewRequest::Ignore
+         ));
++        message.set_deskrealm_file(Default::default());
++        assert!(matches!(
++            request(&message, true, screen),
++            ViewRequest::Ignore
++        ));
+         message.set_login_request(Default::default());
+         assert!(matches!(
+             request(&message, true, screen),

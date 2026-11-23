@@ -27,6 +27,8 @@ def decoded(raw):
 
 
 def confirmed_mask(purpose):
+    if purpose.endswith("-file"):
+        return 16, ["file_transfer"]
     if purpose.endswith("-clipboard"):
         return 9, ["view", "clipboard"]
     if purpose.endswith("-audio"):
@@ -40,6 +42,8 @@ class SessionFixture(Fixture):
     def __init__(self, path):
         super().__init__(path)
         self.redemptions = {}
+        self.file_events = {}
+        self.file_retries = {}
         self.renewals = {}
         self.supervised_renew_attempts = {}
         self.supervised_receipts = {}
@@ -194,6 +198,24 @@ class SessionFixture(Fixture):
             return 200, {"session_id": str(route.session), "connection_id": str(route.connection),
                          "lease_sequence": 2, "lease_until_ms": self.renewals[route.session],
                          "allowed_actions": ["view"]}
+        if path.startswith("/v1/sessions/") and path.endswith("/file-events"):
+            route = self.routes.get(path.split("/")[3])
+            expected_keys = {"connection_id", "lease_sequence", "event_id", "direction", "result", "size_bytes"}
+            if (route is None or not route.purpose.endswith("-file") or route.session not in self.stopped
+                    or authorization != "Bearer " + bearer("drc_", 13)
+                    or set(body) != expected_keys or body["connection_id"] != str(route.connection)
+                    or body["lease_sequence"] != 1):
+                return 403, {}
+            event = uuid.UUID(body["event_id"])
+            records = self.file_events.setdefault(route.session, {})
+            if event in records:
+                if records[event] != body:
+                    return 409, {}
+                self.file_retries[route.session] = self.file_retries.get(route.session, 0) + 1
+                return 204, {}
+            records[event] = body
+            # Persist the first event but lose the response, then require an exact retry.
+            return (503 if len(records) == 1 else 204), {}
         if path.startswith("/v1/sessions/") and path.endswith("/stopped"):
             route = self.routes.get(path.split("/")[3])
             if (route is None or route.session not in self.redemptions
@@ -220,7 +242,7 @@ class SessionFixture(Fixture):
             if body["target_rustdesk_id"] != TARGET or body["confirmation_mode"] != "attended":
                 return 403, {}
             purpose = body["purpose"]
-            allowed, actions = confirmed_mask(purpose) if purpose.endswith(("-audio", "-clipboard")) else (3, ["view", "input"])
+            allowed, actions = confirmed_mask(purpose) if purpose.endswith(("-audio", "-clipboard", "-file")) else (3, ["view", "input"])
             if body["requested_actions"] != actions:
                 return 403, {}
             route = Route(self, "relay" if purpose.startswith("relay-") or purpose == "deny-redeem" else "direct",
@@ -304,10 +326,21 @@ def main():
                                            ("direct-forbidden", True), ("direct-input", True),
                                            ("relay-input", True), ("direct-audio", True),
                                            ("relay-audio", True), ("direct-clipboard", True),
-                                           ("relay-clipboard", True), ("direct-supervised", True),
+                                           ("relay-clipboard", True), ("direct-file", True),
+                                           ("relay-file", True), ("direct-supervised", True),
                                            ("relay-supervised", True)]
-                assert len(fixture.redemptions) == 12 and len(fixture.renewals) == 3
+                assert len(fixture.redemptions) == 14 and len(fixture.renewals) == 3
                 assert fixture.stopped == fixture.redemptions.keys()
+                file_sessions = {route.session for route in fixture.routes.values() if route.purpose.endswith("-file")}
+                assert fixture.file_events.keys() == file_sessions
+                assert fixture.file_retries == dict.fromkeys(file_sessions, 1)
+                for records in fixture.file_events.values():
+                    assert len(records) == 3
+                    assert {(event["direction"], event["result"], event["size_bytes"])
+                            for event in records.values()} == {
+                                ("upload", "completed", 14), ("download", "failed", 0),
+                                ("download", "cancelled", 4),
+                            }
                 assert fixture.revoked_renewals == {
                     route.session for route in fixture.routes.values() if route.purpose == "relay-admit"
                 }

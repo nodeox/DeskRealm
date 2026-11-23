@@ -194,6 +194,7 @@ TCP 的绑定摘要使用 HMAC-SHA256，密钥为 RustDesk 方向密钥协商中
 | `DESKREALM_MANAGED_INPUT` | 设置为 `1` 时附加键鼠请求。默认为 `0`。 |
 | `DESKREALM_MANAGED_AUDIO` | 设置为 `1` 时附加受控端系统音频请求。默认为 `0`。 |
 | `DESKREALM_MANAGED_CLIPBOARD` | 设置为 `1` 时附加双向纯文本剪贴板请求。默认为 `0`。 |
+| `DESKREALM_MANAGED_FILE_ROOT` | 受控端可选。上传和下载使用的现有交换目录绝对路径，由本机管理员配置并保护。留空时关闭此端点的受管文件入口。 |
 
 受控端用设备签名完成中心挑战并定期发送心跳，按组织、设备和密钥版本核对中心策略。策略校验通过后才应用版本及动作集合，并签发应用回执。遇到支持上报的策略字段错误时签发失败回执，暂停新准入。主控从桌面入口发起有人值守的查看请求，可独立附加键鼠、音频及剪贴板。有效权限以中心策略、本地确认和核销结果为准。界面的强制中继选项决定申请的连接路径。
 
@@ -203,9 +204,15 @@ Windows 本地确认发送到当前解锁的物理控制台，显示此次授权
 
 音频要求独立的 `audio` 授权。受控端在已解锁的 Windows 物理控制台使用 WASAPI 回环采集默认系统输出，单向发送到主控。主控依据核销权限和受控端的音频许可接收并播放。受控端丢弃暂停前及排队达 150 毫秒的音频包。撤销、到期、控制台锁定或连接关闭后，受控端停止采集，清理输入及采集线程后提交停止回执。
 
-剪贴板要求独立的 `clipboard` 授权。受控端在租约生效时通过受管桌面报文 `deskrealm_clipboard`（字段 41）公布非零权限代次，暂停时公布零。两端只发送和应用与当前代次匹配的新复制文本，格式为 UTF-8，每条上限 64 KiB。启动及恢复时的现有剪贴板只作为变化检测的基线。两端忽略旧代次队列和本地排队已满一秒的内容。受控端停止并等待剪贴板线程退出后才提交停止回执。文件传输待接入。
+剪贴板要求独立的 `clipboard` 授权。受控端在租约生效时通过受管桌面报文 `deskrealm_clipboard`（字段 41）公布非零权限代次，暂停时公布零。两端只发送和应用与当前代次匹配的新复制文本，格式为 UTF-8，每条上限 64 KiB。启动及恢复时的现有剪贴板只作为变化检测的基线。两端忽略旧代次队列和本地排队已满一秒的内容。受控端停止并等待剪贴板线程退出后才提交停止回执。
 
-`bash scripts/deskrealm-m2-test managed-interop` 运行隔离传输用例和签名向量，并检查启用受管入口的 Linux RustDesk Rust 库编译。`bash scripts/deskrealm-m2-test managed-view` 和 `bash scripts/deskrealm-m2-test managed-input` 用 Xvfb 分别验证原生采集启停和本地键鼠执行、释放及队列失效。`bash scripts/deskrealm-m2-test managed-audio` 验证音频消息权限、有效格式、Opus 编解码和过期队列丢弃。`bash scripts/deskrealm-m2-test managed-clipboard` 用 Xvfb 验证文本剪贴板的读写、回传抑制及旧队列失效。Windows 原生制品、真实显示、键鼠、WASAPI 采集、播放、剪贴板及实际本地确认仍需 Windows 环境验证。
+### 受管文件传输
+
+主控从终端的「文件传输」入口单独申请 `file_transfer`。中心策略、本地确认及在线核销通过后，受控端才打开交换目录。文件窗口使用虚拟路径 `C:\DeskRealm`（Windows）或 `/DeskRealm`（Linux 开发验证）。每个会话依次传输所选普通文件。受控端只列出和访问交换目录中的单层文件，上传时使用独立临时文件，收齐数据且权限仍有效时以原子操作发布。相同文件名已存在时传输失败。远程目录操作、路径跳转和续传不可用。
+
+双方使用加密的 `deskrealm_file` 报文（字段 42），单块最多 64 KiB。受控端在文件操作和发送前检查许可。权限丢失、连接关闭或取消时，结束传输并删除未发布的暂存文件。受控端在停止回执前等待本地文件操作与清理完成。每次结束由受控端提交独立事件 ID、租约序号、主控方向、结果及受控端处理字节数。下载完成依赖主控确认接收。回执使用原事件 ID 在进程内最多尝试三次。中心保存审计元数据。
+
+`bash scripts/deskrealm-m2-test managed-interop` 运行隔离传输用例和签名向量，并检查启用受管入口的 Linux RustDesk Rust 库编译。`bash scripts/deskrealm-m2-test managed-view` 和 `bash scripts/deskrealm-m2-test managed-input` 用 Xvfb 分别验证原生采集启停和本地键鼠执行、释放及队列失效。`bash scripts/deskrealm-m2-test managed-audio` 验证音频消息权限、有效格式、Opus 编解码和过期队列丢弃。`bash scripts/deskrealm-m2-test managed-clipboard` 用 Xvfb 验证文本剪贴板的读写、回传抑制及旧队列失效。`bash scripts/deskrealm-m2-test managed-files` 验证目录范围、双向文件数据、原子发布、撤销清理和审计事件。Windows 原生制品和实际操作仍需 Windows 环境验证。
 
 ## 原生构建入口与证据
 
