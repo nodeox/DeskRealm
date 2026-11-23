@@ -104,3 +104,25 @@ Windows 工作流通过 actionlint。证据验证器的 4 项合成工件测试�
 测试使用临时数据库写入心跳、失败回执及授权和核销夹具。停止回执通过真实端点 API 上报，管理操作及审计查询使用真实权限与持久化。实际 RustDesk 端点和两条链路的开发证据见 03-04。M2 聚合门禁及运行手册待 03-05 Task 2。
 
 同一提交的 `bash scripts/deskrealm-m1-test all` 返回 0。Go 模块校验、静态检查和竞态回归、22 项具名 PostgreSQL 用例、Vue 类型检查、生产构建及三组 M1 Chromium 流程通过。
+
+## 03-05 全量开发门禁
+
+2026-11-23 在候选 `302c434f1ae7ab6daad984175cdcc7c6c884c46f` 运行 `bash scripts/deskrealm-m2-test all "$windows_evidence" f488f2bfacbd04f2257909d6c765914e24860c87`，15:16:33–15:22:59 UTC，六项门禁均返回 0。运行环境为 macOS ARM64、Go 1.27.4、Node 26.13.1、libprotoc 36.0、Docker 29.8.2 Linux ARM64／Compose 5.5.0。PostgreSQL 使用固定的 18.7 容器镜像，端点 Cargo 使用已有 Linux 缓存及离线模式。
+
+| 门禁 | 结果 |
+| --- | --- |
+| `m0-m1` | 3 项具名 M0、22 项具名 M1 Go 回归、全仓竞态与静态检查、命令构建、Vue 和三个 Chromium 流程通过。另复核 M0 Linux amd64 和 arm64 交叉编译。 |
+| `managed-db` | 11 项具名 Go 竞态检查通过，覆盖签名配置、设备及主控身份、连接规则、设备策略、签发、核销、续租和会话失效。 |
+| `sources` | 空目录检出、源码约束、补丁重放、Go 和 Rust 互操作向量通过。客户端基线为 1.5.3，服务端基线为 1.1.16。 |
+| `endpoint` | 两个具名原生 TCP 和策略用例、4 项租约、1 项恢复复核、11 项 Linux 桌面用例通过。真实 `hbbs` 与 `hbbr` 运行在回环隔离容器中，中心由 TLS 夹具提供。14 个核销会话均收到了端点停止回执。 |
+| `managed-browser` | Chromium 在同源 Go API 与临时 PostgreSQL 上运行；四个 Playwright 报告各有 1 项通过、0 项跳过。 |
+| `windows-builds` | 核验 `f488f2b` 原生 x64、ARM64 工件以及每架构 13 项具名测试；Windows 原生输入逐项与候选一致。省略构建提交时拒绝旧工件，指定含不同验证器输入的祖先提交时拒绝复用。 |
+
+| 原生监督场景 | 实际会话 ID | 实际连接 ID | 停止证据 |
+| --- | --- | --- | --- |
+| 直连 | `c518443e-616c-4a74-9148-3d53b07e565e` | `0469b8c2-5c47-46ce-a1e3-33b4f6a5e4ea` | 续租被挂起时处理撤销，停止回执到达。 |
+| 强制中继 `fixture-relay` | `ca72b9de-d352-4da7-a04d-2920942852be` | `3ab88190-4637-494b-878c-6f7d2d5eed28` | 一次续租后模拟链路失联，租约到期停控，恢复回执上报。 |
+
+完整日志、浏览器 JSON、Windows 清单、执行环境与各项状态保存在本地 Git 目录下的 `deskrealm-evidence/m2/302c434f1ae7ab6daad984175cdcc7c6c884c46f/`。其中 `results.tsv` 的 SHA-256 为 `8fc8d07bfc1c6c4a4f2c32a71708cb6a080828bb7050811ab259c8ee78771d04`，`endpoint.log` 的 SHA-256 为 `4d2bac95810fa0cf9039f6529c16198e8be4a8f163e85676f65f031b7dfd412b`。复跑步骤及 Phase 5 顺序见 [M2 开发运行手册](../../../docs/DeskRealm-M2-Runbook.md)。
+
+Windows 原生主控从通讯录条目发起会话、发起经批准的无人值守会话，以及受控端逐项缩减操作尚缺界面入口。中心与原生库已有相关授权基础及相应开发用例。阶段核对保留这些功能缺口。实际 Linux 与双 Windows 拓扑、5 秒撤销和 35 秒停控仍待 Phase 5。

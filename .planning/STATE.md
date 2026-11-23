@@ -3,15 +3,15 @@ gsd_state_version: "1.0"
 current_phase: 3
 current_phase_name: M2 受管连接与策略
 status: executing
-last_updated: "2026-11-23T14:14:26Z"
+last_updated: "2026-11-23T17:20:47Z"
 last_activity: 2026-11-23
-last_activity_desc: 03-05 Task 1 中文策略与会话工作台开发及浏览器验证通过
-state_head: 24c0586648b51aeee7c89264414015fbafa01321
+last_activity_desc: 03-05 全量开发门禁通过，阶段核对发现原生入口缺口
+state_head: 302c434f1ae7ab6daad984175cdcc7c6c884c46f
 progress:
   total_phases: 5
   completed_phases: 2
   total_plans: 10
-  completed_plans: 9
+  completed_plans: 10
   percent: 40
 ---
 
@@ -27,9 +27,9 @@ See: .planning/PROJECT.md (updated 2026-11-22)
 ## Current Position
 
 Phase: 3 — M2 受管连接与策略
-Plan: 03-05 of 5，Task 1 已完成。接续 Task 2 的 M2 全量门禁和运行手册。
-Status: In progress
-Last activity: 2026-11-23 — `managed-browser` 在 `24c0586` 通过，覆盖中文工作台、四类角色、会话路径和回执、撤销及按会话导出。
+Plan: 03-05 of 5 已完成。下一步按 [03-VERIFICATION.md](phases/03-m2/03-VERIFICATION.md) 补齐 Windows 原生入口。
+Status: In progress，原生通讯录、无人值守发起及有人值守的权限缩减待补。
+Last activity: 2026-11-23 — `302c434` 的 M2 六项聚合门禁通过。双架构工件构建提交为 `f488f2b`，Windows 原生输入经核对一致。
 
 ## Accumulated Context
 
