@@ -5,6 +5,7 @@
   "scripts": {
     "typecheck": "vue-tsc --noEmit",
     "build": "vite build",
+    "test:install": "playwright test tests/install.spec.ts",
     "test:bootstrap": "playwright test tests/bootstrap.spec.ts",
     "test:resources": "playwright test tests/resources.spec.ts",
     "test:roles": "playwright test tests/roles.spec.ts",

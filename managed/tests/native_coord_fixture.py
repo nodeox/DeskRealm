@@ -169,11 +169,11 @@ class Route:
         }
 
 
-def tls_context(directory):
+def tls_context(directory, subject_alt_name="IP:127.0.0.1"):
     ca, ca_key = directory / "ca.pem", directory / "ca.key"
     tls_cert, tls_key, csr = [directory / name for name in ("server.pem", "server.key", "server.csr")]
     ext = directory / "server.ext"
-    ext.write_text("subjectAltName=IP:127.0.0.1\nextendedKeyUsage=serverAuth\n")
+    ext.write_text(f"subjectAltName={subject_alt_name}\nextendedKeyUsage=serverAuth\n")
     commands = [
         ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-subj", "/CN=DeskRealm fixture CA", "-days", "2",
          "-keyout", ca_key, "-out", ca, "-addext", "basicConstraints=critical,CA:TRUE"],

@@ -53,7 +53,7 @@ docker compose --env-file /dev/null -f /var/lib/deskrealm/compose.json \
   config --no-env-resolution
 ```
 
-自动启动、中心健康检查、镜像准备和首管票据流程接续 [04-01](../.planning/phases/04-m3/04-01-PLAN.md)。
+安装器的自动启动、状态核对和中断恢复接续 [04-01](../.planning/phases/04-m3/04-01-PLAN.md)。
 
 ## 开发验证
 
@@ -63,3 +63,13 @@ bash scripts/deskrealm-m3-test install-prepare
 ```
 
 覆盖配置规范化、镜像引用、TLS 证书、Docker 上下文、端口冲突、已有状态与并发准备。
+
+使用兼容 Docker、Go、Node.js、Python 3 与 OpenSSL 的开发机运行隔离首装检查。
+
+```sh
+npm --prefix web ci --ignore-scripts
+npm --prefix web exec -- playwright install chromium
+bash scripts/deskrealm-m3-test install-bootstrap
+```
+
+检查构建本机 Docker 架构的 Go 中心、生产 Vue 静态文件和锁定受管源码的会合服务。两个临时镜像经回环 Registry 取得摘要后写入测试配置。Compose 启动 PostgreSQL、迁移、中心和会合服务。检查使用测试 CA 校验 HTTPS、发送实际 RustDesk 会合探测，并在 Chromium 使用主机侧初始化链接完成首管登录。数据库、测试 CA、镜像及 Compose 项目均为临时资源。

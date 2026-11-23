@@ -3,6 +3,9 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 case "${1:-}" in
+  install-bootstrap)
+    exec python3 -B managed/tests/center_install.py "${@:2}"
+    ;;
   install-preflight)
     required=(
       TestInstallConfigDefaultsAndCanonicalOrigins
@@ -21,7 +24,7 @@ case "${1:-}" in
     )
     ;;
   *)
-    echo "usage: $0 install-preflight|install-prepare" >&2
+    echo "usage: $0 install-preflight|install-prepare|install-bootstrap" >&2
     exit 2
     ;;
 esac
