@@ -3,10 +3,10 @@ gsd_state_version: "1.0"
 current_phase: 3
 current_phase_name: M2 受管连接与策略
 status: executing
-last_updated: "2026-11-23T09:40:45Z"
+last_updated: "2026-11-23T10:00:47Z"
 last_activity: 2026-11-23
-last_activity_desc: 03-04 Task 2 双向文件传输、撤销清理和审计回执
-state_head: d1c9bf7eaaa30ad770666cd46d44d77ba43c6f4f
+last_activity_desc: 03-04 Task 2 端点门禁通过，Windows 构建工作流和证据检查已接入
+state_head: 10fe2fabc0473d4dd8f22783911b554f2b8d2286
 progress:
   total_phases: 5
   completed_phases: 2
@@ -27,9 +27,9 @@ See: .planning/PROJECT.md (updated 2026-11-22)
 ## Current Position
 
 Phase: 3 — M2 受管连接与策略
-Plan: 03-04 of 5，Task 2 进行中。五项受管能力均已接入。接续 Windows x64、ARM64 原生构建及端点门禁。
+Plan: 03-04 of 5，Task 2 进行中。端点门禁通过，待 Windows x64 与 ARM64 原生运行器构建并生成证据。
 Status: In progress
-Last activity: 2026-11-23 — Linux 原生文件用例验证双向传输、取消、撤销后的临时文件清理及失败回执。两路文件准入和 PostgreSQL 租约回归通过。
+Last activity: 2026-11-23 — `endpoint` 通过。Windows 构建工作流已通过静态校验，证据门禁正确拒绝缺失的两个架构工件。当前工作区无 Git 远端，现有 ARM64 Windows 虚拟机缺少原生构建工具链。
 
 ## Accumulated Context
 

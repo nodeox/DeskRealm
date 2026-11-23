@@ -83,3 +83,7 @@ Windows 启动时钟函数单独通过 x64 和 ARM64 MSVC 类型检查。持续�
 03-04 Task 2 的文件传输检查点在提交 `d1c9bf7eaaa30ad770666cd46d44d77ba43c6f4f` 从锁定源码重放补丁，在 Linux ARM64 用 `cargo test --locked --offline` 和 Xvfb 通过 11 项桌面回归。两项文件用例使用实际磁盘文件和 TCP，验证普通文件双向内容、越界路径及链接拒绝、同名文件保护、主动取消和传输中失去租约权限时的暂存清理。受控端产生完成、失败和取消事件，记录方向、字节数和开始操作时的租约序号。
 
 使用固定版本的 `hbbs` 和 `hbbr`，隔离回环夹具在直连和强制中继上验证仅授权文件传输的签名确认、核销、加密样本报文及中心文件事件提交。夹具保存第一份回执后模拟响应丢失，要求端点以原 ID 和相同载荷重试。配置真实 PostgreSQL 的 `bash scripts/deskrealm-m2-test leases` 通过租约、权限失效和回执去重回归。Windows x64、ARM64 完整构建及真机文件窗口、磁盘操作和停止时序仍待验证。
+
+提交 `10fe2fabc0473d4dd8f22783911b554f2b8d2286` 增加 `endpoint` 综合门禁和 Windows 双架构工作流。以锁定源码、复用依赖缓存及断网 Cargo 容器运行 `endpoint`，退出码 0。原生回环夹具、4 项租约测试、1 项恢复复核测试、11 项桌面测试和两项 PostgreSQL 回归通过。
+
+Windows 工作流通过 actionlint。证据验证器的 4 项合成工件测试覆盖两架构齐全、缺失架构、PE 架构错误、构建工件摘要变化、缺失具名测试及 bridge 提交不符。实际调用 `windows-builds` 时，两架构的清单缺失，门禁返回非零。现有 Windows 11 ARM64 虚拟机缺少 MSVC、Rust 和 Flutter，本仓库没有配置 Git 远端。本次没有 Windows 原生构建或运行证据，03-04 保持进行中。
