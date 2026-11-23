@@ -145,6 +145,13 @@ class WindowsEvidenceTests(unittest.TestCase):
         self.rehash(target, "desktop-tests.log")
         self.verify(1, "missing passing test")
 
+    def test_rejects_wrong_rust_library_inside_verified_bundle(self):
+        target = self.targets[1]
+        path = self.path(target)
+        self.pack(path / "client.zip", build.TARGETS[target]["machine"])
+        self.rehash(target, "client.zip")
+        self.verify(1, "packaged Rust library differs")
+
     def test_rejects_bridge_from_different_candidate(self):
         target = self.targets[0]
         bridge = self.path(target) / "bridge.json"
