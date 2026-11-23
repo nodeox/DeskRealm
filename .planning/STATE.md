@@ -3,10 +3,10 @@ gsd_state_version: "1.0"
 current_phase: 3
 current_phase_name: M2 受管连接与策略
 status: executing
-last_updated: "2026-11-23T01:47:13Z"
+last_updated: "2026-11-23T02:13:45Z"
 last_activity: 2026-11-22
-last_activity_desc: 03-04 Task 1 原生端点两路通道证明和在线核销已验证
-state_head: 13cea78951ecc645a0027f6d52a399c5337a1e75
+last_activity_desc: 03-04 Task 1 桌面受管准入和设备签名策略接入完成
+state_head: 402660772f8fe84024a1ed0c1374fbf786e61685
 progress:
   total_phases: 5
   completed_phases: 2
@@ -27,9 +27,9 @@ See: .planning/PROJECT.md (updated 2026-11-22)
 ## Current Position
 
 Phase: 3 — M2 受管连接与策略
-Plan: 03-04 of 5，Task 1 进行中。接续 RustDesk 桌面进程入口、策略应用与本地确认界面。
+Plan: 03-04 of 5，Task 1 完成开发验证。接续 Task 2，接入受控端操作权限、持续租约及实际停止。
 Status: In progress
-Last activity: 2026-11-22 — 原生端点库通过直连和中继 TCP 的通道证明与中心在线核销验证。
+Last activity: 2026-11-22 — 接入 RustDesk 桌面主控与受控入口、设备持钥认证、策略签名回执和 Windows 本地确认。Windows 完整构建与实际弹窗仍待原生验证。
 
 ## Accumulated Context
 

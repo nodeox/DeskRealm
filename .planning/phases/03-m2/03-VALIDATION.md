@@ -51,3 +51,7 @@ M0–M3 开发完成后执行用户指定顺序。Linux 中心和一台中继先
 03-04 Task 1 的会合及中继检查点在提交 `79088b1` 通过 `native-coordination`、`vectors`、`sessions` 和 `leases`。从锁定源码在 Linux ARM64 容器构建和运行 `hbbs`、`hbbr`，签名端点通过真实 TCP/UDP 会合入口取得直连候选和中继协调回应。TLS 中心夹具校验独立服务凭据及会话路径，返回 204 前中继两端保持静默，确认后完成双向字节转发。过期授权、旧挑战签名重放、错端密钥、错误登记公钥、重复角色、中心拒绝、原版 TCP/UDP 信令和 WebSocket 请求均有拒绝证据。PostgreSQL 中心的会话与租约回归独立通过。实际 RustDesk 客户端和受控端在线核销留待 Task 1 后续，Windows 原生制品及目标拓扑验收仍按原计划。
 
 03-04 Task 1 的端点准入检查点在提交 `13cea78` 通过 `native-admission`、`vectors`、`sessions` 和 `leases`。RustDesk 客户端 `base` 原生端点与真实 `hbbs`、`hbbr` 在 Linux ARM64 回环容器内建立 TCP 直连和中继会话。实际交换方向密钥并在加密通道签名。TLS 中心夹具独立核对连接与路径、双方证明、受控设备本地确认签名和中继配对，返回租约后主控才收到准入。两个正向场景从查看与输入收紧为仅查看，拒绝覆盖过期、冲突路径、策略版本不符、本地拒绝和中心拒绝。真实 PostgreSQL 中心的会话与租约门禁独立通过。桌面进程入口、真实本地批准与签名策略应用待接入，Windows 及目标环境仍待原计划取证。
+
+03-04 Task 1 在提交 `402660772f8fe84024a1ed0c1374fbf786e61685` 执行 `bash scripts/deskrealm-m2-test managed-interop`，退出状态为 0。全新检出固定客户端、服务端及子模块并重放补丁，重新构建 `hbbs`、`hbbr`。Linux ARM64 回环夹具验证设备挑战签名、心跳、策略生效和失败回执、跨组织拒绝、无策略与拒绝全部动作，以及两条 TCP 路径的在线核销和已关闭连接的认证回执。两路测试使用夹具确认。Go/Rust 签名向量和通道证明通过。Linux ARM64 的 RustDesk Rust 库通过 `cargo check --locked --lib --no-default-features --features deskrealm-managed,linux-pkg-config,use_dasp`，镜像 ID 为 `sha256:3a5d4ea042d6ccb631093fdcf76294707a0ac796a82a150ba48eee440da250cd`。中心的 `identity`、`policies`、`leases` 和 `sessions` PostgreSQL 竞态回归也分别通过。
+
+Windows 本地确认函数单独通过 x64 和 ARM64 MSVC 的 Win32 API 类型检查。完整 Windows 制品、真实弹窗和远程操作执行留待 Task 2。当前构建在核销后关闭 TCP 流并报告实际关闭。使用真实 Linux 中心、中继和双 Windows 终端的拓扑证据留待 Phase 5。
