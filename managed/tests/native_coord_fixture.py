@@ -218,12 +218,16 @@ class Fixture:
             def reply_json(self, result):
                 status, body = result
                 payload = b"" if status == 204 else json.dumps(body).encode()
-                self.send_response(status)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(payload)))
-                self.end_headers()
-                if payload:
-                    self.wfile.write(payload)
+                try:
+                    self.send_response(status)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(payload)))
+                    self.end_headers()
+                    if payload:
+                        self.wfile.write(payload)
+                except (BrokenPipeError, ConnectionResetError, ssl.SSLEOFError):
+                    # A supervisor can cancel an in-flight fixture request.
+                    pass
 
             def do_GET(self):
                 result = fixture.policy_request(self.path, self.headers.get("Authorization"))

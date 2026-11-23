@@ -131,6 +131,9 @@ def main():
                 cargo(source / "client", scratch / "client-cache", CLIENT_IMAGE, "test", "--locked",
                       "-p", "base", "--lib", "deskrealm_endpoint::lease::tests::managed_lease_",
                       required="test result: ok. 4 passed")
+                cargo(source / "client", scratch / "client-cache", CLIENT_IMAGE, "test", "--locked",
+                      "-p", "base", "--lib", "resume_requires_revalidation_before_any_access",
+                      required="resume_requires_revalidation_before_any_access ... ok")
             cargo(source / "server", scratch / "server-cache", SERVER_IMAGE, "build", "--locked",
                   "--bin", "hbbs", "--bin", "hbbr")
             run_fixture(source / "server", source / "client", admission)

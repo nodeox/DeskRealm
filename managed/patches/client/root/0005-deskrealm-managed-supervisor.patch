@@ -1,0 +1,769 @@
+diff --git a/libs/base/src/deskrealm_endpoint.rs b/libs/base/src/deskrealm_endpoint.rs
+index dcb26ea..16554b2 100644
+--- a/libs/base/src/deskrealm_endpoint.rs
++++ b/libs/base/src/deskrealm_endpoint.rs
+@@ -40,7 +40,7 @@ const MAX_HANDSHAKE_FRAME: usize = 1024;
+ mod lease;
+ mod runtime;
+ use lease::{LeaseClock, LeaseWindow};
+-pub use lease::{ManagedAction, SessionStatus, StopReason};
++pub use lease::{send_controller_end, ManagedAction, SessionAccess, SessionStatus, StopReason};
+ pub use runtime::{DeviceCredential, InstalledPolicy};
+ 
+ const ACTIONS: [&str; 5] = ["view", "input", "audio", "clipboard", "file_transfer"];
+diff --git a/libs/base/src/deskrealm_endpoint/lease.rs b/libs/base/src/deskrealm_endpoint/lease.rs
+index f436245..70763d1 100644
+--- a/libs/base/src/deskrealm_endpoint/lease.rs
++++ b/libs/base/src/deskrealm_endpoint/lease.rs
+@@ -7,6 +7,9 @@ use serde_derive::Deserialize;
+ use std::{convert::TryFrom, time::Duration};
+ use tokio::time::Instant;
+ 
++mod supervisor;
++pub use supervisor::{send_controller_end, SessionAccess};
++
+ // Windows' boot clock advances while suspended and has a resolution typically
+ // between 10 and 16 ms. Leave a margin on both clocks for the coarse reading.
+ const CLOCK_MARGIN: Duration = Duration::from_millis(50);
+@@ -64,6 +67,7 @@ fn boot_time() -> ResultType<Duration> {
+     bail!("managed lease boot clock is unavailable")
+ }
+ 
++#[derive(Clone, Copy)]
+ pub(super) struct LeaseWindow {
+     running_until: Instant,
+     boot_until: Duration,
+@@ -203,38 +207,65 @@ impl Lease {
+ 
+ impl Authority {
+     pub async fn renew(&self, lease: &mut Lease, device_bearer: &str) -> ResultType<()> {
++        let (started, request) = self.renewal_request(lease, device_bearer)?;
++        let result = Self::read_renewal(request).await?;
++        lease.apply_renewal(result, started, LeaseClock::now()?)
++    }
++
++    fn renewal_request(
++        &self,
++        lease: &mut Lease,
++        device_bearer: &str,
++    ) -> ResultType<(LeaseClock, reqwest::RequestBuilder)> {
+         check_credential(device_bearer, "drd_")?;
+         let started = lease.start_renewal(LeaseClock::now()?)?;
+-        let data = self
+-            .post(
+-                &format!("/v1/sessions/{}/renew", lease.session_id),
+-                device_bearer,
+-                serde_json::json!({
+-                    "connection_id": lease.connection_id.to_string(),
+-                    "session_credential": lease.credential(),
+-                    "lease_sequence": lease.sequence,
+-                }),
+-                &[200],
+-            )
+-            .await?;
+-        let result =
+-            serde_json::from_slice(&data).map_err(|_| anyhow!("invalid managed renewal"))?;
+-        lease.apply_renewal(result, started, LeaseClock::now()?)
++        let endpoint = format!("/v1/sessions/{}/renew", lease.session_id);
++        let request = self
++            .client
++            .post(self.center.join(&endpoint)?)
++            .bearer_auth(device_bearer)
++            .json(&serde_json::json!({
++                "connection_id": lease.connection_id.to_string(),
++                "session_credential": lease.credential(),
++                "lease_sequence": lease.sequence,
++            }));
++        Ok((started, request))
++    }
++
++    async fn read_renewal(request: reqwest::RequestBuilder) -> ResultType<Renewal> {
++        let data = Self::read_response(request, &[200]).await?;
++        serde_json::from_slice(&data).map_err(|_| anyhow!("invalid managed renewal"))
+     }
+ 
+     /// A status response has no authority to extend the local deadline.
+     pub async fn session_status(&self, lease: &Lease) -> ResultType<SessionStatus> {
++        Self::read_status(
++            self.status_request(lease)?,
++            lease.connection_id,
++            lease.sequence,
++        )
++        .await
++    }
++
++    fn status_request(&self, lease: &Lease) -> ResultType<reqwest::RequestBuilder> {
+         let endpoint = format!("/v1/sessions/{}/status", lease.session_id);
+-        let request = self
++        Ok(self
+             .client
+             .get(self.center.join(&endpoint)?)
+             .query(&[("connection_id", lease.connection_id.to_string())])
+-            .bearer_auth(lease.credential());
++            .bearer_auth(lease.credential()))
++    }
++
++    async fn read_status(
++        request: reqwest::RequestBuilder,
++        connection: hbb_common::uuid::Uuid,
++        minimum_sequence: u64,
++    ) -> ResultType<SessionStatus> {
+         let data = Self::read_response(request, &[200]).await?;
+         let reply: StatusResponse =
+             serde_json::from_slice(&data).map_err(|_| anyhow!("invalid managed session status"))?;
+-        if uuid_bytes(&reply.connection_id)? != lease.connection_id
+-            || reply.lease_sequence < lease.sequence
++        if uuid_bytes(&reply.connection_id)? != connection
++            || reply.lease_sequence < minimum_sequence
+         {
+             bail!("managed session status does not match the connection");
+         }
+diff --git a/libs/base/src/deskrealm_endpoint/lease/supervisor.rs b/libs/base/src/deskrealm_endpoint/lease/supervisor.rs
+new file mode 100644
+index 0000000..ba1817e
+--- /dev/null
++++ b/libs/base/src/deskrealm_endpoint/lease/supervisor.rs
+@@ -0,0 +1,346 @@
++//! Drives the target's policy window independently of peer traffic.
++
++use super::{
++    Authority, Lease, LeaseClock, LeaseWindow, ManagedAction, Renewal, SessionStatus, StopReason,
++};
++use crate::message_proto::{message, misc, Message};
++use hbb_common::{anyhow::anyhow, ResultType, Stream};
++use protobuf::Message as _;
++use std::{
++    future::Future,
++    pin::Pin,
++    sync::{Arc, RwLock},
++    time::Duration,
++};
++use tokio::time::{interval, sleep, timeout, MissedTickBehavior};
++
++const CHECK_INTERVAL: Duration = Duration::from_millis(250);
++const STATUS_INTERVAL: Duration = Duration::from_secs(1);
++const STATUS_TIMEOUT: Duration = Duration::from_secs(2);
++const RENEW_INTERVAL: Duration = Duration::from_secs(10);
++const RETRY_INTERVAL: Duration = Duration::from_secs(1);
++const RESUME_GAP: Duration = Duration::from_secs(2);
++
++type Pending<T> = Pin<Box<dyn Future<Output = ResultType<T>> + Send>>;
++
++struct Snapshot {
++    allowed: u8,
++    window: LeaseWindow,
++    last_check: Duration,
++    ready: bool,
++}
++
++/// A target resource checks this immediately before dispatching a managed operation.
++/// The snapshot excludes session credentials and can be shared with resource workers.
++#[derive(Clone)]
++pub struct SessionAccess(Arc<RwLock<Option<Snapshot>>>);
++
++impl SessionAccess {
++    fn new() -> Self {
++        Self(Arc::new(RwLock::new(None)))
++    }
++
++    pub fn permits(&self, action: ManagedAction) -> bool {
++        LeaseClock::now().is_ok_and(|now| self.permits_at(action, now))
++    }
++
++    fn permits_at(&self, action: ManagedAction, now: LeaseClock) -> bool {
++        self.0.read().is_ok_and(|snapshot| {
++            snapshot.as_ref().is_some_and(|state| {
++                state.ready
++                    && state.allowed & action as u8 != 0
++                    && state.window.active_at(now)
++                    && !missed_check(state.last_check, now.boot)
++            })
++        })
++    }
++
++    fn publish(&self, lease: &Lease, now: LeaseClock, ready: bool) {
++        if let Ok(mut snapshot) = self.0.write() {
++            *snapshot = Some(Snapshot {
++                allowed: lease.allowed_mask,
++                window: lease.window,
++                last_check: now.boot,
++                ready,
++            });
++        }
++    }
++
++    fn stop(&self) {
++        if let Ok(mut snapshot) = self.0.write() {
++            *snapshot = None;
++        }
++    }
++}
++
++struct AccessGuard(SessionAccess);
++
++impl Drop for AccessGuard {
++    fn drop(&mut self) {
++        self.0.stop();
++    }
++}
++
++fn missed_check(previous: Duration, now: Duration) -> bool {
++    now.checked_sub(previous)
++        .map_or(true, |elapsed| elapsed >= RESUME_GAP)
++}
++
++#[derive(Clone, Copy, Debug, Eq, PartialEq)]
++enum End {
++    Stopped(StopReason),
++    AlreadyReported,
++}
++
++impl From<StopReason> for End {
++    fn from(reason: StopReason) -> Self {
++        Self::Stopped(reason)
++    }
++}
++
++impl Authority {
++    /// Holds the authenticated transport up to the application handoff, serving
++    /// only liveness probes and peer close. The stream is dropped before reporting.
++    pub async fn hold_target(
++        &self,
++        stream: Stream,
++        lease: Lease,
++        device_bearer: impl Fn() -> Option<String>,
++        stopped: impl Fn() -> bool,
++    ) -> ResultType<StopReason> {
++        self.run_target(
++            stream,
++            lease,
++            device_bearer,
++            stopped,
++            |mut stream, _| async move { wait_for_peer_close(&mut stream).await },
++        )
++        .await
++    }
++
++    /// Runs a target data-plane future for an already redeemed lease. The driver
++    /// owns its stream and uses the access handle at each execution boundary.
++    /// On cancellation its owned resources must be released before returning.
++    pub async fn run_target<F>(
++        &self,
++        stream: Stream,
++        mut lease: Lease,
++        device_bearer: impl Fn() -> Option<String>,
++        stopped: impl Fn() -> bool,
++        driver: impl FnOnce(Stream, SessionAccess) -> F,
++    ) -> ResultType<StopReason>
++    where
++        F: Future<Output = StopReason>,
++    {
++        let end = {
++            let access = SessionAccess::new();
++            let execution = driver(stream, access.clone());
++            tokio::pin!(execution);
++            let _stop_on_cancel = AccessGuard(access.clone());
++            let end = tokio::select! {
++                biased;
++                end = self.supervise(&mut lease, &access, device_bearer, stopped) => end,
++                reason = &mut execution => End::from(reason),
++            };
++            access.stop();
++            end
++        };
++
++        let End::Stopped(reason) = end else {
++            return Ok(StopReason::LocalEnd);
++        };
++        // A request can be applied even if its response was lost. Retries keep the
++        // same reason and last applied sequence and the center deduplicates them.
++        for delay in [Duration::ZERO, RETRY_INTERVAL, RETRY_INTERVAL * 2] {
++            sleep(delay).await;
++            if self.report_stop(&lease, reason).await.is_ok() {
++                return Ok(reason);
++            }
++        }
++        Err(anyhow!(
++            "managed session closed before its stop receipt reached the center"
++        ))
++    }
++
++    async fn supervise(
++        &self,
++        lease: &mut Lease,
++        access: &SessionAccess,
++        device_bearer: impl Fn() -> Option<String>,
++        stopped: impl Fn() -> bool,
++    ) -> End {
++        let Ok(initial) = LeaseClock::now() else {
++            return StopReason::LeaseExpired.into();
++        };
++        let mut last_check = initial.boot;
++        let mut require_status = true;
++        let mut ticks = interval(CHECK_INTERVAL);
++        ticks.set_missed_tick_behavior(MissedTickBehavior::Skip);
++        let mut status_at = initial.running;
++        let mut renew_at = initial.running + RENEW_INTERVAL;
++        let mut status: Option<Pending<SessionStatus>> = None;
++        let mut renewal: Option<Pending<(LeaseClock, Renewal)>> = None;
++
++        loop {
++            tokio::select! {
++                biased;
++                _ = ticks.tick() => {
++                    let Ok(now) = LeaseClock::now() else {
++                        return StopReason::LeaseExpired.into();
++                    };
++                    if !lease.window.active_at(now) {
++                        return StopReason::LeaseExpired.into();
++                    }
++                    if stopped() {
++                        return StopReason::LocalEnd.into();
++                    }
++                    if missed_check(last_check, now.boot) {
++                        require_status = true;
++                        status = None;
++                        renewal = None;
++                        status_at = now.running;
++                    }
++                    last_check = now.boot;
++                    access.publish(lease, now, !require_status);
++
++                    if status.is_none() && now.running >= status_at {
++                        status_at = now.running + STATUS_INTERVAL;
++                        if let Ok(request) = self.status_request(lease) {
++                            let (connection, sequence) = (lease.connection_id, lease.sequence);
++                            status = Some(Box::pin(Self::read_status(
++                                request.timeout(STATUS_TIMEOUT), connection, sequence,
++                            )));
++                        }
++                    }
++                    if !require_status && renewal.is_none() && now.running >= renew_at {
++                        renew_at = now.running + RETRY_INTERVAL;
++                        if let Some(bearer) = device_bearer() {
++                            if let Ok((started, request)) = self.renewal_request(lease, &bearer) {
++                                renewal = Some(Box::pin(async move {
++                                    Ok((started, Self::read_renewal(request).await?))
++                                }));
++                            }
++                        }
++                    }
++                }
++                result = async { status.as_mut().unwrap().await }, if status.is_some() => {
++                    status = None;
++                    match result {
++                        Ok(SessionStatus::RevocationRequested | SessionStatus::Revoked) => {
++                            return StopReason::Revoked.into();
++                        }
++                        Ok(SessionStatus::LeaseExpired) => return StopReason::LeaseExpired.into(),
++                        Ok(SessionStatus::Stopped) => return End::AlreadyReported,
++                        Ok(SessionStatus::Active) => {
++                            // Only the next tick republishes access after confirming the
++                            // current boot clock and the still-effective local deadline.
++                            require_status = false;
++                        }
++                        Err(_) => {}
++                    }
++                }
++                result = async { renewal.as_mut().unwrap().await }, if renewal.is_some() => {
++                    renewal = None;
++                    if let (Ok((started, reply)), Ok(now)) = (result, LeaseClock::now()) {
++                        if !missed_check(last_check, now.boot)
++                            && !require_status && lease.apply_renewal(reply, started, now).is_ok()
++                        {
++                            renew_at = started.running + RENEW_INTERVAL;
++                            access.publish(lease, now, true);
++                        }
++                    }
++                }
++            }
++        }
++    }
++}
++
++async fn wait_for_peer_close(stream: &mut Stream) -> StopReason {
++    loop {
++        let Some(Ok(frame)) = stream.next().await else {
++            return StopReason::ConnectionLost;
++        };
++        let Ok(message) = Message::parse_from_bytes(&frame) else {
++            return StopReason::ConnectionLost;
++        };
++        match &message.union {
++            Some(message::Union::TestDelay(probe))
++                if probe.from_client
++                    && probe.time > 0
++                    && probe.last_delay == 0
++                    && probe.target_bitrate == 0 =>
++            {
++                // A relay can otherwise time out an idle admitted TCP flow before
++                // a renewed lease expires. This probe has no application payload.
++                if !matches!(
++                    timeout(STATUS_TIMEOUT, stream.send(&message)).await,
++                    Ok(Ok(()))
++                ) {
++                    return StopReason::ConnectionLost;
++                }
++                tokio::task::yield_now().await;
++            }
++            Some(message::Union::Misc(control))
++                if matches!(control.union, Some(misc::Union::CloseReason(_))) =>
++            {
++                return StopReason::LocalEnd;
++            }
++            _ => return StopReason::ConnectionLost,
++        }
++    }
++}
++
++/// Lets the desktop controller finish admission while the application dispatcher
++/// is unavailable. A bounded write avoids holding an admitted session on a stalled link.
++pub async fn send_controller_end(stream: &mut Stream) {
++    let mut control = crate::message_proto::Misc::new();
++    control.set_close_reason(String::new());
++    let mut message = Message::new();
++    message.set_misc(control);
++    let _ = timeout(STATUS_TIMEOUT, stream.send(&message)).await;
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use hbb_common::{deskrealm_protocol::Path, uuid::Uuid};
++    use tokio::time::Instant;
++
++    #[test]
++    fn resume_requires_revalidation_before_any_access() {
++        let now = Instant::now();
++        let clock = |running, boot| LeaseClock {
++            running: now + Duration::from_millis(running),
++            boot: Duration::from_millis(boot),
++            wall_ms: 1_000 + boot,
++        };
++        let start = clock(0, 0);
++        let lease = Lease {
++            session_id: Uuid::new_v4(),
++            connection_id: Uuid::new_v4(),
++            path: Path::Direct,
++            allowed_mask: ManagedAction::View as u8,
++            sequence: 1,
++            until_ms: 31_000,
++            window: LeaseWindow::new(start, 31_000, start).unwrap(),
++            renewal_started: None,
++            credential: String::new(),
++        };
++        let access = SessionAccess::new();
++        access.publish(&lease, start, true);
++        assert!(access.permits_at(ManagedAction::View, clock(500, 500)));
++        assert!(!access.permits_at(ManagedAction::Input, clock(500, 500)));
++
++        let resumed = clock(500, 5_000);
++        assert!(!access.permits_at(ManagedAction::View, resumed));
++        access.publish(&lease, resumed, false);
++        assert!(!access.permits_at(ManagedAction::View, resumed));
++        access.publish(&lease, resumed, true);
++        assert!(access.permits_at(ManagedAction::View, resumed));
++        assert!(!access.permits_at(ManagedAction::View, clock(500, 30_000)));
++
++        let worker = access.clone();
++        drop(AccessGuard(access));
++        assert!(!worker.permits_at(ManagedAction::View, resumed));
++    }
++}
+diff --git a/libs/base/tests/deskrealm_interop.rs b/libs/base/tests/deskrealm_interop.rs
+index f7226d7..1d8ec32 100644
+--- a/libs/base/tests/deskrealm_interop.rs
++++ b/libs/base/tests/deskrealm_interop.rs
+@@ -14,7 +14,10 @@ use hbb_common::{
+ };
+ use protobuf::Message as _;
+ use std::{env, net::SocketAddr, time::Duration};
+-use tokio::{net::UdpSocket, time::timeout};
++use tokio::{
++    net::UdpSocket,
++    time::{timeout, Instant},
++};
+ 
+ const DEVICE_RUSTDESK_ID: &str = "10700002";
+ const WAIT: Duration = Duration::from_secs(30);
+@@ -84,6 +87,10 @@ async fn managed_endpoint_admission_on_direct_and_relay() -> ResultType<()> {
+         (Path::Direct, "path-mismatch", Some(1), false),
+         (Path::Direct, "policy-mismatch", Some(1), false),
+         (Path::Relay, "deny-redeem", Some(1), false),
++        (Path::Direct, "direct-clean", Some(1), true),
++        (Path::Direct, "direct-forbidden", Some(1), true),
++        (Path::Direct, "direct-supervised", Some(1), true),
++        (Path::Relay, "relay-supervised", Some(1), true),
+     ] {
+         let controller_run = async {
+             let route = authority
+@@ -168,6 +175,100 @@ async fn managed_endpoint_admission_on_direct_and_relay() -> ResultType<()> {
+             assert_eq!(client.lease_until_ms, host.until_ms);
+             assert_eq!(host.credential(), bearer("drc_", 13));
+             use base::deskrealm_endpoint::{ManagedAction, SessionStatus, StopReason};
++            if matches!(purpose, "direct-clean" | "direct-forbidden") {
++                let supervise = authority.hold_target(
++                    target_stream,
++                    host,
++                    || Some(bearer("drd_", 12)),
++                    || false,
++                );
++                let close = async {
++                    if purpose == "direct-clean" {
++                        base::deskrealm_endpoint::send_controller_end(&mut controller_stream).await;
++                    } else {
++                        let mut message = Message::new();
++                        message.set_mouse_event(Default::default());
++                        controller_stream.send(&message).await?;
++                    }
++                    let closed = controller_stream.next().await;
++                    assert!(closed.is_none() || closed.is_some_and(|frame| frame.is_err()));
++                    Ok::<_, hbb_common::anyhow::Error>(())
++                };
++                let (reason, close) =
++                    timeout(WAIT, async { tokio::join!(supervise, close) }).await?;
++                close?;
++                let expected = if purpose == "direct-clean" {
++                    StopReason::LocalEnd
++                } else {
++                    StopReason::ConnectionLost
++                };
++                assert_eq!(reason?, expected);
++                continue;
++            }
++            if purpose.ends_with("-supervised") {
++                let started = Instant::now();
++                let supervise = authority.hold_target(
++                    target_stream,
++                    host,
++                    || Some(bearer("drd_", 12)),
++                    || false,
++                );
++                let receive_close = async {
++                    let mut tick = tokio::time::interval_at(
++                        started + Duration::from_secs(1),
++                        Duration::from_secs(6),
++                    );
++                    let mut sent = 0;
++                    let mut received = 0;
++                    loop {
++                        tokio::select! {
++                            _ = tick.tick() => {
++                                sent += 1;
++                                let mut probe = Message::new();
++                                probe.set_test_delay(TestDelay {
++                                    time: sent,
++                                    from_client: true,
++                                    ..Default::default()
++                                });
++                                if controller_stream.send(&probe).await.is_err() {
++                                    break;
++                                }
++                            }
++                            frame = controller_stream.next() => {
++                                let Some(Ok(bytes)) = frame else { break };
++                                let reply = Message::parse_from_bytes(&bytes)?;
++                                assert!(reply.has_test_delay());
++                                received += 1;
++                                assert_eq!(reply.test_delay().time, received);
++                            }
++                        }
++                    }
++                    assert!(
++                        received > 0,
++                        "the connection must answer at least one probe"
++                    );
++                    Ok::<_, hbb_common::anyhow::Error>(started.elapsed())
++                };
++                let (reason, elapsed) = timeout(Duration::from_secs(52), async {
++                    tokio::join!(supervise, receive_close)
++                })
++                .await?;
++                let elapsed = elapsed?;
++                if path == Path::Direct {
++                    assert_eq!(reason?, StopReason::Revoked);
++                    assert!(
++                        (Duration::from_secs(9)..Duration::from_secs(14)).contains(&elapsed),
++                        "revocation must interrupt the stalled renewal, elapsed {elapsed:?}",
++                    );
++                } else {
++                    assert_eq!(reason?, StopReason::LeaseExpired);
++                    assert!(
++                        (Duration::from_secs(38)..Duration::from_secs(44)).contains(&elapsed),
++                        "outage must let the renewed lease expire, elapsed {elapsed:?}",
++                    );
++                }
++                continue;
++            }
+             assert!(host.permits(ManagedAction::View));
+             for action in [
+                 ManagedAction::Input,
+@@ -177,14 +278,20 @@ async fn managed_endpoint_admission_on_direct_and_relay() -> ResultType<()> {
+             ] {
+                 assert!(!host.permits(action));
+             }
+-            assert_eq!(authority.session_status(&host).await?, SessionStatus::Active);
++            assert_eq!(
++                authority.session_status(&host).await?,
++                SessionStatus::Active
++            );
+             let initial_deadline = host.deadline();
+             tokio::time::sleep(Duration::from_millis(100)).await;
+             let credential = bearer("drd_", 12);
+             assert!(authority.renew(&mut host, &credential).await.is_err());
+             assert_eq!(host.sequence, 1);
+             assert_eq!(host.deadline(), initial_deadline);
+-            assert_eq!(authority.session_status(&host).await?, SessionStatus::Active);
++            assert_eq!(
++                authority.session_status(&host).await?,
++                SessionStatus::Active
++            );
+             authority.renew(&mut host, &credential).await?;
+             assert_eq!(host.sequence, 2);
+             assert!(host.deadline() > initial_deadline);
+@@ -195,8 +302,9 @@ async fn managed_endpoint_admission_on_direct_and_relay() -> ResultType<()> {
+                 ..Default::default()
+             });
+             controller_stream.send(&probe).await?;
+-            let incoming = timeout(WAIT, target_stream.next()).await?
+-                .ok_or_else(|| hbb_common::anyhow::anyhow!("managed stream closed during renewal"))??;
++            let incoming = timeout(WAIT, target_stream.next()).await?.ok_or_else(|| {
++                hbb_common::anyhow::anyhow!("managed stream closed during renewal")
++            })??;
+             assert_eq!(Message::parse_from_bytes(&incoming)?.test_delay().time, 42);
+ 
+             let reason = if path == Path::Relay {
+@@ -213,7 +321,10 @@ async fn managed_endpoint_admission_on_direct_and_relay() -> ResultType<()> {
+             let closed = timeout(WAIT, controller_stream.next()).await?;
+             assert!(closed.is_none() || closed.is_some_and(|frame| frame.is_err()));
+             authority.report_stop(&host, reason).await?;
+-            assert_eq!(authority.session_status(&host).await?, SessionStatus::Stopped);
++            assert_eq!(
++                authority.session_status(&host).await?,
++                SessionStatus::Stopped
++            );
+         } else {
+             assert!(client.is_err(), "client opened a denied session");
+             assert!(host.is_err(), "host opened a denied session");
+diff --git a/src/deskrealm_desktop.rs b/src/deskrealm_desktop.rs
+index cb3c426..d2f52dc 100644
+--- a/src/deskrealm_desktop.rs
++++ b/src/deskrealm_desktop.rs
+@@ -2,8 +2,8 @@
+ 
+ use base::{
+     deskrealm_endpoint::{
+-        AppliedPolicy, Authority, DeviceCredential, DeviceIdentity, InstalledPolicy, LocalConsent,
+-        TargetSession,
++        send_controller_end, AppliedPolicy, Authority, DeviceCredential, DeviceIdentity,
++        InstalledPolicy, LocalConsent, TargetSession,
+     },
+     deskrealm_transport::{Network, RelayNode},
+ };
+@@ -19,7 +19,7 @@ use hbb_common::{
+     tokio::{
+         self,
+         net::{lookup_host, UdpSocket},
+-        sync::Semaphore,
++        sync::{watch, Semaphore},
+         time::{interval, timeout, MissedTickBehavior},
+     },
+     uuid::Uuid,
+@@ -243,11 +243,13 @@ pub(crate) async fn connect(peer: &str, force_relay: bool) -> ResultType<()> {
+         .authority
+         .connect_controller(&mut stream, &route, &desktop.device, path)
+         .await?;
+-    // Managed admission intentionally does not return a stream to the legacy
+-    // session dispatcher. Operation and lease enforcement will own this handoff.
++    // Close explicitly while the desktop operation dispatcher is unavailable.
++    send_controller_end(&mut stream).await;
+     Ok(())
+ }
+ 
++pub(crate) type CurrentCredential = watch::Receiver<Option<Arc<DeviceCredential>>>;
++
+ pub(crate) struct Runtime {
+     credential: Arc<DeviceCredential>,
+     policy: Option<InstalledPolicy>,
+@@ -277,6 +279,7 @@ pub(crate) async fn serve() -> ResultType<()> {
+     let pending = Arc::new(Semaphore::new(8));
+     let prompts = Arc::new(Semaphore::new(1));
+     let mut runtime = None;
++    let (current_credential, credential_reader) = watch::channel(None);
+     let mut bytes = [0u8; 4096];
+     loop {
+         tokio::select! {
+@@ -290,7 +293,10 @@ pub(crate) async fn serve() -> ResultType<()> {
+                     None
+                 } else {
+                     match desktop.refresh(runtime.take()).await {
+-                        Ok(state) => Some(Arc::new(state)),
++                        Ok(state) => {
++                            current_credential.send_replace(Some(state.credential.clone()));
++                            Some(Arc::new(state))
++                        },
+                         Err(_) => {
+                             hbb_common::log::warn!("managed device or policy refresh failed");
+                             None
+@@ -308,9 +314,10 @@ pub(crate) async fn serve() -> ResultType<()> {
+                 let desktop = desktop.clone();
+                 let state = state.clone();
+                 let prompts = prompts.clone();
++                let credentials = credential_reader.clone();
+                 tokio::spawn(async move {
+                     let _permit = permit;
+-                    if let Err(error) = crate::server::create_managed_tcp_connection(desktop, state, signal, prompts).await {
++                    if let Err(error) = crate::server::create_managed_tcp_connection(desktop, state, signal, prompts, credentials).await {
+                         hbb_common::log::debug!("managed connection closed: {}", error);
+                     }
+                 });
+@@ -329,6 +336,7 @@ pub(crate) async fn authorize_target(
+     state: &Runtime,
+     signal: DeskRealmSignal,
+     prompts: Arc<Semaphore>,
++    credentials: CurrentCredential,
+ ) -> ResultType<()> {
+     let route = signal
+         .route
+@@ -394,10 +402,22 @@ pub(crate) async fn authorize_target(
+             |request| async move { ask_local_user(request, prompts).await },
+         )
+         .await?;
+-    // Keep the data channel out of the legacy input and media dispatcher until
+-    // managed operations and the local lease deadline are enforced there.
+-    drop(stream);
+-    desktop.authority.report_local_end(&lease).await
++    desktop
++        .authority
++        .hold_target(
++            stream,
++            lease,
++            || {
++                credentials
++                    .borrow()
++                    .as_ref()
++                    .filter(|credential| !credential.expires_within(Duration::ZERO))
++                    .map(|credential| credential.bearer().to_owned())
++            },
++            stopped,
++        )
++        .await?;
++    Ok(())
+ }
+ 
+ async fn ask_local_user(request: LocalConsent, prompts: Arc<Semaphore>) -> Option<u8> {
+diff --git a/src/server.rs b/src/server.rs
+index 14efc72..356700f 100644
+--- a/src/server.rs
++++ b/src/server.rs
+@@ -216,8 +216,9 @@ pub(crate) async fn create_managed_tcp_connection(
+     state: Arc<crate::deskrealm_desktop::Runtime>,
+     offer: DeskRealmSignal,
+     prompts: Arc<tokio::sync::Semaphore>,
++    credentials: crate::deskrealm_desktop::CurrentCredential,
+ ) -> ResultType<()> {
+-    crate::deskrealm_desktop::authorize_target(&desktop, &state, offer, prompts).await
++    crate::deskrealm_desktop::authorize_target(&desktop, &state, offer, prompts, credentials).await
+ }
+ 
+ pub async fn create_tcp_connection(

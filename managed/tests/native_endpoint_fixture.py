@@ -31,6 +31,8 @@ class SessionFixture(Fixture):
         super().__init__(path)
         self.redemptions = {}
         self.renewals = {}
+        self.supervised_renew_attempts = {}
+        self.supervised_receipts = {}
         self.revoked_renewals = set()
         self.status_reads = {}
         self.results = []
@@ -53,7 +55,11 @@ class SessionFixture(Fixture):
             self.status_reads[route.session] = reads
             if route.session in self.stopped:
                 state = "stopped"
-            elif route.path == "relay" and reads >= 3:
+            elif route.purpose == "relay-supervised" and route.session in self.renewals:
+                return 503, {}
+            elif route.purpose == "direct-supervised" and route.session in self.supervised_renew_attempts:
+                state = "revocation_requested"
+            elif route.purpose == "relay-admit" and reads >= 3:
                 state = "revocation_requested"
             else:
                 state = "active"
@@ -150,6 +156,22 @@ class SessionFixture(Fixture):
                     or body.get("session_credential") != bearer("drc_", 13)):
                 return 403, {}
             previous = body.get("lease_sequence")
+            if route.purpose.endswith("-supervised"):
+                self.supervised_renew_attempts[route.session] = (
+                    self.supervised_renew_attempts.get(route.session, 0) + 1
+                )
+                if route.purpose == "direct-supervised":
+                    # The status endpoint remains responsive while renewal is stalled.
+                    time.sleep(5)
+                    return 403, {}
+                if route.session in self.renewals:
+                    return 503, {}
+                if previous != 1:
+                    return 409, {}
+                self.renewals[route.session] = time.time_ns() // 1_000_000 + 30_000
+                return 200, {"session_id": str(route.session), "connection_id": str(route.connection),
+                             "lease_sequence": 2, "lease_until_ms": self.renewals[route.session],
+                             "allowed_actions": ["view"]}
             if route.path == "relay" and self.status_reads.get(route.session, 0) >= 3 and previous == 2:
                 self.revoked_renewals.add(route.session)
                 return 403, {}
@@ -164,12 +186,23 @@ class SessionFixture(Fixture):
                          "allowed_actions": ["view"]}
         if path.startswith("/v1/sessions/") and path.endswith("/stopped"):
             route = self.routes.get(path.split("/")[3])
-            if (route is None or route.session not in self.renewals
-                    or authorization != "Bearer " + bearer("drc_", 13)
-                    or body != {"connection_id": str(route.connection), "lease_sequence": 2,
-                                "reason": "revoked" if route.path == "relay" else "local_end"}):
+            if (route is None or route.session not in self.redemptions
+                    or authorization != "Bearer " + bearer("drc_", 13)):
+                return 403, {}
+            reasons = {"direct-supervised": "revoked", "relay-supervised": "lease_expired",
+                       "direct-forbidden": "connection_lost", "relay-admit": "revoked"}
+            expected = {"connection_id": str(route.connection),
+                        "lease_sequence": 2 if route.session in self.renewals else 1,
+                        "reason": reasons.get(route.purpose, "local_end")}
+            if body != expected:
                 return 403, {}
             self.stopped.add(route.session)
+            if route.purpose.endswith("-supervised"):
+                submissions = self.supervised_receipts.setdefault(route.session, [])
+                submissions.append(body)
+                if len(submissions) == 1:
+                    # Persist the receipt, then lose the first response.
+                    return 503, {}
             return 204, {}
         if path == "/v1/sessions":
             if authorization != "Bearer " + bearer("dru_", 11):
@@ -179,7 +212,7 @@ class SessionFixture(Fixture):
             if body["requested_actions"] != ["view", "input"]:
                 return 403, {}
             purpose = body["purpose"]
-            route = Route(self, "relay" if purpose in ("relay-admit", "deny-redeem") else "direct",
+            route = Route(self, "relay" if purpose.startswith("relay-") or purpose == "deny-redeem" else "direct",
                           allowed=3, purpose=purpose, expired=purpose == "expired")
             # The controller chooses its connection UUID on grant receipt.
             route.connection = None
@@ -253,17 +286,28 @@ def main():
                     subprocess.run([endpoint, "--exact", test, "--nocapture"], check=True, timeout=180, env=env)
                 assert fixture.heartbeats == 1
                 assert fixture.policy_receipts == [(1, "applied"), (2, "failed"), (5, "applied")]
-                assert fixture.results == [("direct-admit", True), ("relay-admit", True), ("deny-redeem", True)]
-                assert len(fixture.redemptions) == 2 and len(fixture.renewals) == 2
+                assert fixture.results == [("direct-admit", True), ("relay-admit", True),
+                                           ("deny-redeem", True), ("direct-clean", True),
+                                           ("direct-forbidden", True), ("direct-supervised", True),
+                                           ("relay-supervised", True)]
+                assert len(fixture.redemptions) == 6 and len(fixture.renewals) == 3
                 assert fixture.stopped == fixture.redemptions.keys()
                 assert fixture.revoked_renewals == {
                     route.session for route in fixture.routes.values() if route.purpose == "relay-admit"
                 }
+                supervised = {route.purpose: route.session for route in fixture.routes.values()
+                              if route.purpose.endswith("-supervised")}
+                direct, relay = supervised["direct-supervised"], supervised["relay-supervised"]
+                assert fixture.supervised_renew_attempts[direct] == 1
+                assert fixture.supervised_renew_attempts[relay] >= 2
+                assert set(fixture.supervised_receipts) == {direct, relay}
+                assert all(len(submissions) == 2 and submissions[0] == submissions[1]
+                           for submissions in fixture.supervised_receipts.values())
         except Exception:
             for file in sorted(fixture.directory.glob("*/output.log")):
                 print(f"{file.parent.name}:\n{file.read_text()}", file=sys.stderr)
             raise
-    print("Native managed endpoints checked admission, renewal and receipts on direct and relayed RustDesk TCP.", flush=True)
+    print("Native managed endpoints checked admission, supervised shutdown and receipts on direct and relayed RustDesk TCP.", flush=True)
 
 
 if __name__ == "__main__":
