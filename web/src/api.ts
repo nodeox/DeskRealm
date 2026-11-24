@@ -9,6 +9,7 @@ const messages: Record<string, string> = {
   windows_delivery_unavailable: '中心尚未配置 Windows 开发包验证。',
   windows_candidate_missing: '中心暂存区找不到该清单。请核对 SHA-256。',
   windows_candidate_invalid: '清单已变更、格式无效或中心身份不符。',
+  windows_release_not_found: '该 Windows 发布已被撤回或超出访问范围。',
   managed_session_not_found: '会话不存在或超出访问范围。',
   managed_session_conflict: '会话状态已变更，请刷新详情。',
   already_initialized: '中心已完成初始化，请登录。',

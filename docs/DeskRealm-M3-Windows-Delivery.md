@@ -39,7 +39,7 @@ python3 -B managed/windows_package.py sign approval.json release.json developer-
 python3 -B managed/windows_package.py verify approval.json candidate release.sig developer-public.pem
 ```
 
-同一批准输入和构建证据会产生相同的包与清单。打包失败时保留原候选目录，签名服务恢复后可用同一清单重试。签名范围记录为 `development`，使用组织信任的开发公钥验证。当前交付物是带分离签名的开发 ZIP。Windows Authenticode 安装器、分组发布和客户端读取配置在后续开发中接入。
+同一批准输入和构建证据会产生相同的包与清单。打包失败时保留原候选目录，签名服务恢复后可用同一清单重试。签名范围记录为 `development`，使用组织信任的开发公钥验证。当前交付物是带分离签名的开发 ZIP。Windows Authenticode 安装器和客户端读取配置在后续开发中接入。
 
 ## 中心任务验证
 
@@ -66,9 +66,18 @@ CANDIDATE_DIR/<manifest-sha256>/
 
 平台管理员复核清单及目标设备组后，在任务中心选择「验证 Windows 开发包」，输入清单摘要。同一摘要的重复提交返回同一任务。工作台显示品牌修订、源码、目标组、两架构原生证据和 ZIP 摘要，成功后记录验签时间和公钥指纹。中心对两个架构完成验证后才登记验证结果。预期文件缺失、签名不符或归档损坏时，修正暂存文件后可在原任务重试。中心核对同一品牌修订与已验证资料一致。任务中断后由现有租约领取机制恢复。
 
-成功验证记录保留该次审计证据。后续发布需要再次验证实际交付字节，并应用组范围与分发授权。
+成功验证记录保留该次审计证据。
+
+## 分组发布与撤回
+
+设置 `DESKREALM_WINDOWS_RELEASE_DIR` 启用开发包发布。这是中心可写、独立于暂存区的绝对路径。容器部署将其挂载到独立持久目录。平台管理员在验证任务详情选择「发布已验证开发包」，中心重新验签并校验两个架构，复制通过验证的字节至持久目录，再提交发布记录和签名所绑定的设备组范围。重复发布同一清单会返回原发布 ID。
+
+持有目标设备组读取委派的成员可在「Windows 发布」下载 x64 或 ARM64 ZIP。每次请求会核对当前会话、组权限、撤回状态和归档摘要。删除委派或撤回后，后续下载请求会被拒绝。工作台公开各架构的 SHA-256，下载支持 HTTP Range。平台管理员可以查看已撤回条目，审计保留发布、授权下载和撤回记录。
+
+分组下载目前使用控制台登录会话。部署工具凭据、Windows 安装器和设备免填登记继续开发。
 
 ```bash
 bash scripts/deskrealm-m3-test signed-build
 bash scripts/deskrealm-m3-test delivery-tasks
+bash scripts/deskrealm-m3-test managed-release
 ```

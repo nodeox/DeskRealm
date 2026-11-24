@@ -286,14 +286,33 @@ func TestDeliveryTaskBrowserPostgres(t *testing.T) {
 	store.Delivery = &diskDelivery{directory: t.TempDir()}
 	spool, center, verifier, private := windowsFixtureVerifier(t)
 	store.WindowsDelivery = verifier
+	var err error
+	store.WindowsReleases, err = verifier.ConfigureReleases(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	h, admin, csrf, _ := adminSession(t, ctx, store)
 	groupResponse := request(h, "POST", "/v1/admin/device-groups", testOrigin, map[string]string{"name": "Windows 工作台"}, admin, csrf)
 	checkCode(t, groupResponse, 201, "")
 	group := responseValue[struct{ ID string }](t, groupResponse.Body.Bytes()).ID
-	manifest := windowsFixtureStage(t, spool, windowsdelivery.Approval{
+	approval := windowsdelivery.Approval{
 		Schema: 1, Version: "0.1.0-dev.3", Brand: windowsdelivery.Brand{ID: "deskrealm", Name: "端域测试", Revision: 3},
 		Groups: []string{group}, Source: "1234567890abcdef1234567890abcdef12345678", Center: center,
-	}, private)
+	}
+	manifest := windowsFixtureStage(t, spool, approval, private)
+	approval.Version = "0.1.0-dev.4"
+	releaseCandidate := windowsFixtureStage(t, spool, approval, private)
+	queuedWindows := request(h, "POST", tasksPath+"/windows-delivery", testOrigin,
+		map[string]string{"request_key": "browser-release", "manifest_sha256": releaseCandidate}, admin, csrf)
+	checkCode(t, queuedWindows, 202, "")
+	releaseTask := responseValue[struct{ ID string }](t, queuedWindows.Body.Bytes()).ID
+	verified, _, err := store.claimTaskTarget(ctx, time.Minute)
+	if err != nil || verified.Task != releaseTask {
+		t.Fatalf("missing browser Windows fixture claim: %+v %v", verified, err)
+	}
+	if err := store.runWindowsDelivery(ctx, verified); err != nil {
+		t.Fatal(err)
+	}
 	first := createDeliveryFixture(h, admin, csrf, "browser-retry", "retry-target")
 	checkCode(t, first, 202, "")
 	task := responseValue[struct{ ID string }](t, first.Body.Bytes()).ID
@@ -322,7 +341,7 @@ func TestDeliveryTaskBrowserPostgres(t *testing.T) {
 	command.Dir = root
 	command.Env = append(os.Environ(), "DESKREALM_BROWSER_BASE="+server.URL, "DESKREALM_BROWSER_OUTPUT="+scratch,
 		"DESKREALM_BROWSER_REPORT="+report, "DESKREALM_BROWSER_DELIVERY_TASK="+task, "DESKREALM_BROWSER_CANCEL_TASK="+cancelTask,
-		"DESKREALM_BROWSER_WINDOWS_MANIFEST="+manifest)
+		"DESKREALM_BROWSER_WINDOWS_MANIFEST="+manifest, "DESKREALM_BROWSER_WINDOWS_RELEASE_TASK="+releaseTask)
 	output, err := command.CombinedOutput()
 	if err != nil {
 		t.Fatalf("Chromium delivery task regression: %v\n%s", err, output)
@@ -341,5 +360,10 @@ func TestDeliveryTaskBrowserPostgres(t *testing.T) {
 	if err := store.DB.QueryRow(ctx, `SELECT count(*) FROM windows_delivery_requests w JOIN task_targets t ON t.task_id=w.task_id
 		WHERE w.manifest_sha256=$1 AND t.state='queued'`, manifest).Scan(&queued); err != nil || queued != 1 {
 		t.Fatalf("browser did not queue the reviewed manifest: %d, %v", queued, err)
+	}
+	var revoked int
+	if err := store.DB.QueryRow(ctx, `SELECT count(*) FROM windows_releases WHERE task_id=$1 AND revoked_at IS NOT NULL`,
+		releaseTask).Scan(&revoked); err != nil || revoked != 1 {
+		t.Fatalf("browser release and withdrawal did not persist: %d, %v", revoked, err)
 	}
 }

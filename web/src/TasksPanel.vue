@@ -41,7 +41,7 @@ type Task = TaskSummary & {
   windows_delivery?: WindowsDelivery
 }
 
-const props = defineProps<{ csrf: string; admin: boolean }>()
+const props = defineProps<{ csrf: string; admin: boolean; windowsReleaseEnabled: boolean }>()
 const emit = defineEmits<{ expired: [] }>()
 const results: Record<string, string> = {
   pending: '账号待激活', exists: '账号已存在', import_failed: '账号写入失败', pending_approval: '等待设备审批',
@@ -83,6 +83,9 @@ const canVerifyWindows = ref(false)
 const windowsDialog = ref<HTMLDialogElement>()
 const windowsDigest = ref('')
 const windowsError = ref('')
+const releaseDialog = ref<HTMLDialogElement>()
+const releaseError = ref('')
+const published = ref('')
 
 function message(cause: unknown) {
   if (cause instanceof RequestError && cause.status === 401) emit('expired')
@@ -134,7 +137,23 @@ async function readDetail(id: string, revision = '') {
   const query = revision ? '?' + new URLSearchParams({ revision }) : ''
   task.value = await api<Task>(base + '/' + encodeURIComponent(id) + query)
   viewedRevision.value = revision
+  published.value = ''
   selected.value = []
+}
+
+async function publishWindows() {
+  if (!task.value?.windows_delivery?.verified_at || busy.value) return
+  busy.value = true
+  releaseError.value = ''
+  try {
+    const release = await api<{ id: string }>(base + '/' + task.value.id + '/windows-release', json({}, props.csrf))
+    published.value = release.id
+    releaseDialog.value?.close()
+  } catch (cause) {
+    releaseError.value = message(cause)
+  } finally {
+    busy.value = false
+  }
 }
 
 async function refresh(after = '') {
@@ -243,6 +262,9 @@ onMounted(async () => {
     </dl>
     <section v-if="task.windows_delivery" class="windows-evidence" aria-labelledby="windows-evidence-heading">
       <h3 id="windows-evidence-heading">构建与签名证据</h3>
+      <p v-if="published" class="inline-success" role="status">开发包已发布。<a href="/windows-releases">查看 Windows 发布</a></p>
+      <button v-else-if="admin && windowsReleaseEnabled && task.windows_delivery.verified_at" type="button" class="primary"
+        :disabled="busy" @click="releaseError = ''; releaseDialog?.showModal()">发布已验证开发包</button>
       <dl>
         <div><dt>版本</dt><dd>{{ task.windows_delivery.manifest.approval.version }}</dd></div>
         <div><dt>品牌模板</dt><dd>{{ task.windows_delivery.manifest.approval.brand.name }}（{{ task.windows_delivery.manifest.approval.brand.id }} · 修订 {{ task.windows_delivery.manifest.approval.brand.revision }}）</dd></div>
@@ -308,6 +330,17 @@ onMounted(async () => {
       </table>
     </div>
   </section>
+  <dialog ref="releaseDialog" aria-labelledby="release-dialog-heading" @cancel.prevent="!busy && releaseDialog?.close()">
+    <form @submit.prevent="publishWindows">
+      <h2 id="release-dialog-heading">确认发布开发包</h2>
+      <p>已批准的目标设备组可下载此版本的 x64 和 ARM64 开发 ZIP。</p>
+      <p v-if="releaseError" class="error" role="alert">{{ releaseError }}</p>
+      <div class="dialog-actions">
+        <button type="button" class="secondary" :disabled="busy" @click="releaseDialog?.close()">取消</button>
+        <button type="submit" class="primary" :disabled="busy">确认发布</button>
+      </div>
+    </form>
+  </dialog>
   <dialog ref="windowsDialog" aria-labelledby="windows-dialog-heading" @cancel.prevent="!busy && windowsDialog?.close()">
     <form @submit.prevent="submitWindowsDelivery">
       <h2 id="windows-dialog-heading">验证 Windows 开发包</h2>

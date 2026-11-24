@@ -25,15 +25,16 @@ type overviewEvent struct {
 }
 
 type overviewSnapshot struct {
-	Organization   string          `json:"organization"`
-	CanManage      bool            `json:"can_manage"`
-	CanReadUsers   bool            `json:"can_read_users"`
-	CanReadDevices bool            `json:"can_read_devices"`
-	CanReadAudit   bool            `json:"can_read_audit"`
-	CanReadTasks   bool            `json:"can_read_tasks"`
-	Metrics        overviewMetrics `json:"metrics"`
-	RecentTasks    []taskSummary   `json:"recent_tasks"`
-	RecentAudit    []overviewEvent `json:"recent_audit"`
+	Organization           string          `json:"organization"`
+	CanManage              bool            `json:"can_manage"`
+	CanReadUsers           bool            `json:"can_read_users"`
+	CanReadDevices         bool            `json:"can_read_devices"`
+	CanReadAudit           bool            `json:"can_read_audit"`
+	CanReadTasks           bool            `json:"can_read_tasks"`
+	CanReadWindowsReleases bool            `json:"can_read_windows_releases,omitempty"`
+	Metrics                overviewMetrics `json:"metrics"`
+	RecentTasks            []taskSummary   `json:"recent_tasks"`
+	RecentAudit            []overviewEvent `json:"recent_audit"`
 }
 
 func (a *API) overview(w http.ResponseWriter, r *http.Request) {
@@ -60,6 +61,7 @@ func (a *API) overview(w http.ResponseWriter, r *http.Request) {
 		}
 		result.Metrics.ActiveSessions = counts.Active
 		result.CanReadTasks = result.CanReadDevices || ownsImport
+		result.CanReadWindowsReleases = a.store.WindowsReleases != nil && result.CanReadDevices
 		result.CanReadUsers = who.PlatformAdmin
 		if !result.CanReadUsers {
 			result.CanReadUsers, err = canReadUsers(ctx, tx, who.ID)

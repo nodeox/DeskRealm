@@ -48,5 +48,19 @@ func TestPythonDevelopmentEvidence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Logf("Verified original Python signature and both native bundles for %s (%s)", verified.Approval.Version, verified.Approval.Source)
+	releases, err := verifier.ConfigureReleases(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := releases.Preserve(context.Background(), verifier, id); err != nil {
+		t.Fatal(err)
+	}
+	for arch, pkg := range verified.Packages {
+		file, err := releases.Open(context.Background(), id, arch, pkg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		file.Close()
+	}
+	t.Logf("Verified and preserved both native bundles for %s (%s)", verified.Approval.Version, verified.Approval.Source)
 }

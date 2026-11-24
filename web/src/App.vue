@@ -13,12 +13,13 @@ import PoliciesPanel from './PoliciesPanel.vue'
 import SessionsPanel from './SessionsPanel.vue'
 import OverviewPanel from './OverviewPanel.vue'
 import RelaysPanel from './RelaysPanel.vue'
+import WindowsReleasesPanel from './WindowsReleasesPanel.vue'
 import type { Overview } from './overview'
 
-type WorkspacePage = 'overview' | 'users' | 'groups' | 'devices' | 'policies' | 'sessions' | 'address-books' | 'audit' | 'tasks' | 'relays' | 'api-tokens' | 'security'
+type WorkspacePage = 'overview' | 'users' | 'groups' | 'devices' | 'policies' | 'sessions' | 'address-books' | 'audit' | 'tasks' | 'relays' | 'windows-releases' | 'api-tokens' | 'security'
 type Screen = WorkspacePage | 'loading' | 'initialize' | 'login' | 'accept-invitation' | 'recover' | 'unavailable'
 type Session = { username: string; csrf_token: string }
-type Capability = 'can_manage' | 'can_read_users' | 'can_read_devices' | 'can_read_audit' | 'can_read_tasks'
+type Capability = 'can_manage' | 'can_read_users' | 'can_read_devices' | 'can_read_audit' | 'can_read_tasks' | 'can_read_windows_releases'
 
 const navigation: { page: WorkspacePage; title: string; capability?: Capability }[] = [
   { page: 'overview', title: '概览' },
@@ -29,6 +30,7 @@ const navigation: { page: WorkspacePage; title: string; capability?: Capability 
   { page: 'relays', title: '区域中继', capability: 'can_manage' },
   { page: 'audit', title: '审计事件', capability: 'can_read_audit' },
   { page: 'tasks', title: '任务中心', capability: 'can_read_tasks' },
+  { page: 'windows-releases', title: 'Windows 发布', capability: 'can_read_windows_releases' },
   { page: 'users', title: '用户与权限', capability: 'can_read_users' },
   { page: 'groups', title: '用户组与委派', capability: 'can_manage' },
   { page: 'api-tokens', title: 'API 令牌', capability: 'can_manage' },
@@ -224,7 +226,9 @@ onMounted(load)
       <PoliciesPanel v-else-if="screen === 'policies'" :csrf="session.csrf_token" @expired="load" />
       <SessionsPanel v-else-if="screen === 'sessions'" :csrf="session.csrf_token" :can-audit="overview.can_read_audit" :can-read-devices="overview.can_read_devices" @expired="load" />
       <AuditPanel v-else-if="screen === 'audit'" :csrf="session.csrf_token" :admin="overview.can_manage" @expired="load" />
-      <TasksPanel v-else-if="screen === 'tasks'" :csrf="session.csrf_token" :admin="overview.can_manage" @expired="load" />
+      <TasksPanel v-else-if="screen === 'tasks'" :csrf="session.csrf_token" :admin="overview.can_manage"
+        :windows-release-enabled="!!overview.can_read_windows_releases" @expired="load" />
+      <WindowsReleasesPanel v-else-if="screen === 'windows-releases'" :csrf="session.csrf_token" :admin="overview.can_manage" @expired="load" />
       <RelaysPanel v-else-if="screen === 'relays'" :csrf="session.csrf_token" @expired="load" />
       <GroupsPanel v-else-if="screen === 'groups'" :csrf="session.csrf_token" @expired="load" />
       <TokensPanel v-else-if="screen === 'api-tokens'" :csrf="session.csrf_token" @expired="load" />

@@ -30,6 +30,7 @@ export type Overview = {
   can_read_devices: boolean
   can_read_audit: boolean
   can_read_tasks: boolean
+  can_read_windows_releases?: boolean
   metrics: {
     active_sessions: number
     users?: number

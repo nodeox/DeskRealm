@@ -124,6 +124,10 @@ func run(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	store.WindowsReleases, err = store.WindowsDelivery.ConfigureReleases(os.Getenv("DESKREALM_WINDOWS_RELEASE_DIR"))
+	if err != nil {
+		return err
+	}
 	transport, err := m1.ConfigureManagedTransport(os.Getenv("DESKREALM_MANAGED_RENDEZVOUS_TOKEN"),
 		os.Getenv("DESKREALM_MANAGED_RELAY_ID"), os.Getenv("DESKREALM_MANAGED_RELAY_TOKEN"))
 	if err != nil {

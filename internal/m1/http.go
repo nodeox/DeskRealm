@@ -202,6 +202,10 @@ func NewHandler(store Store, origin *url.URL, web fs.FS, config ...AuthConfig) h
 	mux.HandleFunc("GET /v1/admin/tasks/{id}", api.getTask)
 	mux.HandleFunc("POST /v1/admin/tasks/delivery", api.createDeliveryTask)
 	mux.HandleFunc("POST /v1/admin/tasks/windows-delivery", api.createWindowsDelivery)
+	mux.HandleFunc("POST /v1/admin/tasks/{id}/windows-release", api.publishWindowsRelease)
+	mux.HandleFunc("POST /v1/admin/windows-releases/{id}/revoke", api.revokeWindowsRelease)
+	mux.HandleFunc("GET /v1/windows-releases", api.listWindowsReleases)
+	mux.HandleFunc("GET /v1/windows-releases/{id}/{arch}", api.downloadWindowsRelease)
 	mux.HandleFunc("POST /v1/admin/tasks/{id}/retry", api.retryTask)
 	mux.HandleFunc("POST /v1/admin/tasks/{id}/cancel", api.cancelTask)
 	apiNotFound := func(w http.ResponseWriter, _ *http.Request) {
@@ -255,7 +259,7 @@ func (a *API) frontend(w http.ResponseWriter, r *http.Request) {
 	}
 	p := strings.TrimPrefix(r.URL.Path, "/")
 	switch p {
-	case "", "initialize", "login", "overview", "users", "groups", "devices", "policies", "sessions", "address-books", "audit", "tasks", "relays", "api-tokens", "security", "accept-invitation", "recover":
+	case "", "initialize", "login", "overview", "users", "groups", "devices", "policies", "sessions", "address-books", "audit", "tasks", "relays", "windows-releases", "api-tokens", "security", "accept-invitation", "recover":
 		w.Header().Set("Cache-Control", "no-store")
 		http.ServeFileFS(w, r, a.web, "index.html")
 	default:
@@ -334,7 +338,8 @@ func failure(w http.ResponseWriter, operation string, err error) {
 		errors.Is(err, errRelayConflict), errors.Is(err, errRelayEndpointConflict):
 		writeError(w, http.StatusConflict, err.Error())
 	case errors.Is(err, errDeviceMissing), errors.Is(err, errDeviceGroupMissing), errors.Is(err, errAuditMissing),
-		errors.Is(err, errTaskMissing), errors.Is(err, errRelayMissing), errors.Is(err, errWindowsCandidateMissing):
+		errors.Is(err, errTaskMissing), errors.Is(err, errRelayMissing), errors.Is(err, errWindowsCandidateMissing),
+		errors.Is(err, errWindowsReleaseMissing):
 		writeError(w, http.StatusNotFound, err.Error())
 	case errors.Is(err, errBookMissing), errors.Is(err, errEntryMissing), errors.Is(err, errGrantMissing):
 		writeError(w, http.StatusNotFound, err.Error())

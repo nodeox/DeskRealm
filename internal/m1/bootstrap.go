@@ -46,6 +46,7 @@ type Store struct {
 	DB              *pgxpool.Pool
 	Delivery        DeliveryExecutor
 	WindowsDelivery *windowsdelivery.Verifier
+	WindowsReleases *windowsdelivery.Releases
 }
 
 func Migrate(ctx context.Context, dsn string) error {
