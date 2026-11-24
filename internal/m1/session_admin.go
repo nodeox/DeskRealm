@@ -21,20 +21,21 @@ const sessionAdminSelect = `SELECT g.id,g.user_id,g.controller_device_id,g.targe
 	COALESCE(r.allowed_mask,g.allowed_mask),` + sessionCanRevoke + `,` + sessionActivitySelect + scopedSessionFrom + scopedSessionWhere
 
 type sessionAdminRow struct {
-	ID           string     `json:"id"`
-	User         string     `json:"user_id"`
-	Controller   string     `json:"controller_device_id"`
-	Target       string     `json:"target_device_id"`
-	Purpose      string     `json:"purpose"`
-	Mode         string     `json:"confirmation_mode"`
-	Policy       int64      `json:"policy_version"`
-	Issued       time.Time  `json:"issued_at"`
-	GrantExpires time.Time  `json:"grant_expires_at"`
-	Redeemed     *time.Time `json:"redeemed_at,omitempty"`
-	Path         string     `json:"path,omitempty"`
-	Relay        string     `json:"relay_id,omitempty"`
-	Actions      []string   `json:"allowed_actions"`
-	CanRevoke    bool       `json:"can_revoke"`
+	ID           string               `json:"id"`
+	User         string               `json:"user_id"`
+	Controller   string               `json:"controller_device_id"`
+	Target       string               `json:"target_device_id"`
+	Purpose      string               `json:"purpose"`
+	Mode         string               `json:"confirmation_mode"`
+	Policy       int64                `json:"policy_version"`
+	Issued       time.Time            `json:"issued_at"`
+	GrantExpires time.Time            `json:"grant_expires_at"`
+	Redeemed     *time.Time           `json:"redeemed_at,omitempty"`
+	Path         string               `json:"path,omitempty"`
+	Relay        string               `json:"relay_id,omitempty"`
+	Actions      []string             `json:"allowed_actions"`
+	CanRevoke    bool                 `json:"can_revoke"`
+	RelayHistory *sessionRelayHistory `json:"relay_history,omitempty"`
 	sessionActivity
 }
 
@@ -84,6 +85,10 @@ func (a *API) getSessions(w http.ResponseWriter, r *http.Request) {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return errSessionMissing
 			}
+			if err != nil {
+				return err
+			}
+			detail.RelayHistory, err = readSessionRelayHistory(ctx, tx, detail.ID)
 			return err
 		}
 		m := &page.Metrics

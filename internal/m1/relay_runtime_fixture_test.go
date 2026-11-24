@@ -25,6 +25,7 @@ import (
 
 	"deskrealm/internal/managedproto"
 	"deskrealm/internal/relayprotocol"
+	"github.com/jackc/pgx/v5"
 )
 
 func relayFixtureListener(t *testing.T) net.Listener {
@@ -158,11 +159,11 @@ func TestRegionalRelayRuntimePostgres(t *testing.T) {
 		listener                   net.Listener
 	}
 	var gate relayFixturePairGate
-	create := func(name string) node {
+	create := func(name, region string) node {
 		t.Helper()
 		endpoint, published := relayFixturePublish(t, &gate)
 		record := request(h, "POST", "/v1/admin/relays", testOrigin,
-			relayRequest{name, "site-" + name, "north", endpoint, "1.1.16", 2}, admin, csrf)
+			relayRequest{name, "site-" + name, region, endpoint, "1.1.16", 2}, admin, csrf)
 		checkCode(t, record, 201, relayEnrollmentPrefix)
 		cred := responseValue[relayCredential](t, record.Body.Bytes())
 		state, credential := filepath.Join(scratch, name), filepath.Join(scratch, name+".credential")
@@ -246,12 +247,12 @@ func TestRegionalRelayRuntimePostgres(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	a, b := create("alpha"), create("beta")
+	a, b := create("alpha", "north"), create("beta", "south")
 	if a.public == b.public {
 		t.Fatal("regional relays share an identity")
 	}
 	checkStates("awaiting_health", "awaiting_health")
-	stopA, _ := start(a), start(b)
+	stopA, stopB := start(a), start(b)
 	waitHealth(a, 0)
 	waitHealth(b, 0)
 	checkStates("awaiting_probe", "awaiting_probe")
@@ -264,12 +265,13 @@ func TestRegionalRelayRuntimePostgres(t *testing.T) {
 	checkStates("available", "available")
 	sampleRegionalRelays(t, f, a.NodeID, b.NodeID)
 	if runner := os.Getenv("DESKREALM_TEST_RUST_RELAY_RUNNER"); runner != "" {
-		sampleRegionalRelaysFromRust(t, f, center.URL, ca, scratch, runner, "", "managed_native_endpoints_report_both_regional_relays")
+		sampleRegionalRelaysFromRust(t, f, center.URL, ca, scratch, runner, nativeRelayScenario{})
 		if hbbs := os.Getenv("DESKREALM_TEST_HBBS_RUNNER"); hbbs != "" {
 			address := nativeRegionalRendezvous(t, f, center.URL, ca, scratch, hbbs)
+			scenario := nativeRelayScenario{rendezvous: address, candidates: 2}
 			for _, failover := range []bool{false, true} {
 				gate.enabled.Store(failover)
-				sampleRegionalRelaysFromRust(t, f, center.URL, ca, scratch, runner, address, "managed_native_endpoints_forward_on_selected_regional_relay")
+				sampleRegionalRelaysFromRust(t, f, center.URL, ca, scratch, runner, scenario)
 				f.count(t, 1, `SELECT count(*) FROM managed_session_redemptions d JOIN session_relay_rounds r
 				ON r.session_id=d.session_id AND r.connection_id=d.connection_id JOIN session_relay_selections s ON s.round_id=r.id
 				WHERE d.path='relay' AND d.relay_id=s.relay_id::text AND s.failed_at IS NULL AND d.lease_sequence=2
@@ -286,6 +288,68 @@ func TestRegionalRelayRuntimePostgres(t *testing.T) {
 				}
 			}
 			gate.enabled.Store(false)
+			sweep()
+			baseline := waitNativeRegionalSession(t, f, "")
+			var interrupted nativeRegionalSession
+			var stopped node
+			scenario.disconnect = func() {
+				interrupted = waitNativeRegionalSession(t, f, baseline.session)
+				switch interrupted.relay {
+				case a.NodeID:
+					stopped = a
+					stopA()
+				case b.NodeID:
+					stopped = b
+					stopB()
+				default:
+					t.Fatal("unexpected paired relay", interrupted.relay)
+				}
+			}
+			sampleRegionalRelaysFromRust(t, f, center.URL, ca, scratch, runner, scenario)
+			f.count(t, 1, `SELECT count(*) FROM managed_session_stops WHERE session_id=$1 AND reason='connection_lost' AND lease_sequence=2`, interrupted.session)
+			controller, _ := f.roundPeers()
+			oldGrant := f.readGrant(t, interrupted.session)
+			checkCode(t, controller.join(t, h, oldGrant, testSessionUUID(593)), 403, errSessionDenied.Error())
+			for range 3 {
+				sweep()
+			}
+			f.count(t, 1, `SELECT count(*) FROM relay_nodes WHERE id=$1 AND probe_failures=3`, stopped.NodeID)
+			scenario.disconnect, scenario.candidates = nil, 1
+			sampleRegionalRelaysFromRust(t, f, center.URL, ca, scratch, runner, scenario)
+			reconnected := waitNativeRegionalSession(t, f, interrupted.session)
+			if reconnected.session == interrupted.session || reconnected.grant == interrupted.grant ||
+				reconnected.connection == interrupted.connection || reconnected.round == interrupted.round || reconnected.relay == interrupted.relay {
+				t.Fatalf("reconnect did not use a fresh grant, round and healthy relay: %+v then %+v", interrupted, reconnected)
+			}
+			for _, expected := range []struct {
+				session nativeRegionalSession
+				state   string
+			}{{interrupted, "stopped"}, {reconnected, "active"}} {
+				detail := request(h, "GET", "/v1/admin/sessions/"+expected.session.session, "", nil, admin, "")
+				checkCode(t, detail, 200, expected.session.relay)
+				view := responseValue[sessionAdminRow](t, detail.Body.Bytes())
+				if view.State != expected.state || view.Connection != expected.session.connection || view.Path != "relay" ||
+					view.RelayHistory == nil || len(view.RelayHistory.Rounds) != 1 {
+					t.Fatalf("unexpected regional session detail: %+v", view)
+				}
+				candidates := view.RelayHistory.Rounds[0].Candidates
+				if len(candidates) == 0 || !candidates[0].Redeemed || candidates[0].Relay != expected.session.relay ||
+					candidates[0].Controller.Median == nil || candidates[0].Target.Median == nil {
+					t.Fatalf("session detail lacks actual relay and both measured medians: %+v", candidates)
+				}
+			}
+			var sequence int64
+			if err := store.DB.QueryRow(ctx, "SELECT health_sequence FROM relay_nodes WHERE id=$1", stopped.NodeID).Scan(&sequence); err != nil {
+				t.Fatal(err)
+			}
+			if stopped.NodeID == a.NodeID {
+				stopA = start(a)
+			} else {
+				start(b)
+			}
+			waitHealth(stopped, sequence)
+			sweep()
+			checkStates("available", "available")
 		}
 	}
 	for _, n := range []node{a, b} {
@@ -440,9 +504,20 @@ func sampleRegionalRelays(t *testing.T, f sessionFixture, alpha, beta string) {
 	if _, err := probe(f.ctx, left, *unusedExpired, controller, 0); !errors.Is(err, relayprotocol.ErrProbeProtocol) {
 		t.Fatalf("native hbbr accepted an expired permit: %v", err)
 	}
-	response = controller.get(f.h, grant, conn)
-	checkCode(t, response, 200, "complete")
-	for _, candidate := range responseValue[relayRound](t, response.Body.Bytes()).Candidates {
+	var closed relayRound
+	for until := time.Now().Add(time.Second); time.Now().Before(until); {
+		response = controller.get(f.h, grant, conn)
+		checkCode(t, response, 200, round.ID)
+		closed = responseValue[relayRound](t, response.Body.Bytes())
+		if closed.State == "complete" {
+			break
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+	if closed.State != "complete" {
+		t.Fatal("center probe window did not close")
+	}
+	for _, candidate := range closed.Candidates {
 		if candidate.ProbePermit != nil {
 			t.Fatal("center issued a permit after the round closed")
 		}
@@ -611,8 +686,44 @@ func nativeRegionalRendezvous(t *testing.T, f sessionFixture, center, ca, scratc
 	return ""
 }
 
-func sampleRegionalRelaysFromRust(t *testing.T, f sessionFixture, center, ca, scratch, runner, rendezvous, testName string) {
+type nativeRegionalSession struct{ session, grant, connection, round, relay string }
+
+func waitNativeRegionalSession(t *testing.T, f sessionFixture, after string) nativeRegionalSession {
 	t.Helper()
+	var out nativeRegionalSession
+	for until := time.Now().Add(10 * time.Second); time.Now().Before(until); {
+		err := f.store.DB.QueryRow(f.ctx, `SELECT g.id,g.grant_id,d.connection_id,r.id,d.relay_id
+			FROM managed_sessions g JOIN managed_session_redemptions d ON d.session_id=g.id
+			JOIN session_relay_rounds r ON r.session_id=g.id AND r.connection_id=d.connection_id
+			WHERE d.lease_sequence=2 AND ($1='' OR g.issued_at>(SELECT issued_at FROM managed_sessions WHERE id=NULLIF($1,'')::uuid))
+			ORDER BY g.issued_at DESC LIMIT 1`, after).Scan(&out.session, &out.grant, &out.connection, &out.round, &out.relay)
+		if err == nil {
+			return out
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			t.Fatal(err)
+		}
+		time.Sleep(40 * time.Millisecond)
+	}
+	t.Fatal("no renewed regional session")
+	return out
+}
+
+type nativeRelayScenario struct {
+	rendezvous string
+	candidates int
+	disconnect func()
+}
+
+func sampleRegionalRelaysFromRust(t *testing.T, f sessionFixture, center, ca, scratch, runner string, scenario nativeRelayScenario) {
+	t.Helper()
+	testName := "managed_native_endpoints_report_both_regional_relays"
+	if scenario.rendezvous != "" {
+		testName = "managed_native_endpoints_forward_on_selected_regional_relay"
+	}
+	if scenario.candidates == 0 {
+		scenario.candidates = 2
+	}
 	encode := base64.RawURLEncoding.EncodeToString
 	peer := func(id, credential string, key ed25519.PrivateKey) map[string]string {
 		return map[string]string{"device": id, "credential": credential, "seed": encode(key.Seed())}
@@ -625,7 +736,7 @@ func sampleRegionalRelaysFromRust(t *testing.T, f sessionFixture, center, ca, sc
 		"center": center, "kid": f.signing.id, "center_key": encode(f.signing.key.Public().(ed25519.PublicKey)),
 		"controller": peer(f.controller, f.userToken, f.controllerKey),
 		"target":     peer(f.target, f.targetToken, f.targetKey),
-		"rendezvous": rendezvous, "policy_version": policy,
+		"rendezvous": scenario.rendezvous, "policy_version": policy, "expect_disconnect": scenario.disconnect != nil,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -643,13 +754,24 @@ func sampleRegionalRelaysFromRust(t *testing.T, f sessionFixture, center, ca, sc
 		t.Fatal(err)
 	}
 	defer os.Remove(path)
-	command := exec.CommandContext(f.ctx, runner, path, ca, testName)
-	// Check the native harness actually ran its named test.
-	output, err := command.CombinedOutput()
-	if err != nil || !bytes.Contains(output, []byte(testName+" ... ok")) {
-		t.Fatalf("native relay endpoint %s failed: %v\n%s", testName, err, output)
+	ctx, cancel := context.WithCancel(f.ctx)
+	defer cancel()
+	command := exec.CommandContext(ctx, runner, path, ca, testName)
+	var output bytes.Buffer
+	command.Stdout, command.Stderr = &output, &output
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
 	}
-	f.count(t, 12, `SELECT count(*) FROM session_relay_reports reports
+	done := make(chan error, 1)
+	go func() { done <- command.Wait() }()
+	if scenario.disconnect != nil {
+		scenario.disconnect()
+	}
+	// Check the native harness actually ran its named test.
+	if err := <-done; err != nil || !strings.Contains(output.String(), testName+" ... ok") {
+		t.Fatalf("native relay endpoint %s failed: %v\n%s", testName, err, &output)
+	}
+	f.count(t, 6*scenario.candidates, `SELECT count(*) FROM session_relay_reports reports
 		JOIN session_relay_rounds r ON r.id=reports.round_id
 		CROSS JOIN LATERAL jsonb_array_elements(reports.samples) s
 		WHERE r.session_id=(SELECT id FROM managed_sessions ORDER BY issued_at DESC LIMIT 1)

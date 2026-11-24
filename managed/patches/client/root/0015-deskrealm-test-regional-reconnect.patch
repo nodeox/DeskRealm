@@ -1,0 +1,116 @@
+diff --git a/libs/base/tests/deskrealm_relay_probes.rs b/libs/base/tests/deskrealm_relay_probes.rs
+index 12ab3f7..e6ca049 100644
+--- a/libs/base/tests/deskrealm_relay_probes.rs
++++ b/libs/base/tests/deskrealm_relay_probes.rs
+@@ -1,5 +1,7 @@
+ use base::{
+-    deskrealm_endpoint::{AppliedPolicy, Authority, DeviceIdentity, SessionTarget, TargetSession},
++    deskrealm_endpoint::{
++        AppliedPolicy, Authority, DeviceIdentity, SessionTarget, StopReason, TargetSession,
++    },
+     deskrealm_transport::Network,
+ };
+ use hbb_common::{
+@@ -7,7 +9,9 @@ use hbb_common::{
+     base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _},
+     bytes::Bytes,
+     deskrealm_protocol::{Path, PeerRole},
+-    rendezvous_proto::{register_pk_response, rendezvous_message, RegisterPeer, RegisterPk, RendezvousMessage},
++    rendezvous_proto::{
++        register_pk_response, rendezvous_message, RegisterPeer, RegisterPk, RendezvousMessage,
++    },
+     sodiumoxide::crypto::sign,
+     uuid::Uuid,
+     ResultType,
+@@ -44,6 +48,7 @@ struct Fixture {
+     target: Peer,
+     rendezvous: String,
+     policy_version: u64,
++    expect_disconnect: bool,
+ }
+ 
+ fn environment() -> ResultType<(Fixture, Authority)> {
+@@ -104,29 +109,32 @@ async fn managed_native_endpoints_forward_on_selected_regional_relay() -> Result
+     let socket = UdpSocket::bind("127.0.0.1:0").await?;
+     socket.connect(network.rendezvous).await?;
+     let mut registration = RendezvousMessage::new();
+-    registration.set_register_pk(RegisterPk {
++    registration.set_register_peer(RegisterPeer {
+         id: TARGET.to_owned(),
+-        uuid: Bytes::copy_from_slice(target.id.as_bytes()),
+-        pk: Bytes::copy_from_slice(target.public_key.as_ref()),
+         ..Default::default()
+     });
+     socket.send(&registration.write_to_bytes()?).await?;
+     let mut packet = [0; 4096];
+     let size = timeout(WAIT, socket.recv(&mut packet)).await??;
+     let reply = RendezvousMessage::parse_from_bytes(&packet[..size])?;
+-    ensure!(
+-        reply.has_register_pk_response()
+-            && reply.register_pk_response().result.enum_value()
+-                == Ok(register_pk_response::Result::OK),
+-        "target did not register with native hbbs"
+-    );
+-
+-    // RegisterPk acknowledges an unchanged key without refreshing the UDP endpoint.
+-    registration.set_register_peer(RegisterPeer { id: TARGET.to_owned(), ..Default::default() });
+-    socket.send(&registration.write_to_bytes()?).await?;
+-    let size = timeout(WAIT, socket.recv(&mut packet)).await??;
+-    let reply = RendezvousMessage::parse_from_bytes(&packet[..size])?;
+-    ensure!(reply.has_register_peer_response() && !reply.register_peer_response().request_pk);
++    ensure!(reply.has_register_peer_response());
++    if reply.register_peer_response().request_pk {
++        registration.set_register_pk(RegisterPk {
++            id: TARGET.to_owned(),
++            uuid: Bytes::copy_from_slice(target.id.as_bytes()),
++            pk: Bytes::copy_from_slice(target.public_key.as_ref()),
++            ..Default::default()
++        });
++        socket.send(&registration.write_to_bytes()?).await?;
++        let size = timeout(WAIT, socket.recv(&mut packet)).await??;
++        let reply = RendezvousMessage::parse_from_bytes(&packet[..size])?;
++        ensure!(
++            reply.has_register_pk_response()
++                && reply.register_pk_response().result.enum_value()
++                    == Ok(register_pk_response::Result::OK),
++            "target did not register with native hbbs"
++        );
++    }
+ 
+     let route = authority
+         .issue(
+@@ -155,6 +163,10 @@ async fn managed_native_endpoints_forward_on_selected_regional_relay() -> Result
+                     .connect_controller(&mut stream, &route, &controller, Path::Relay)
+                     .await?;
+                 ensure!(admitted.allowed_mask == 1 && admitted.lease_sequence == 1);
++                if input.expect_disconnect {
++                    let closed = timeout(WAIT, stream.next()).await?;
++                    ensure!(closed.is_none() || closed.is_some_and(|frame| frame.is_err()));
++                }
+                 Ok::<_, hbb_common::anyhow::Error>(stream)
+             },
+             async {
+@@ -198,6 +210,13 @@ async fn managed_native_endpoints_forward_on_selected_regional_relay() -> Result
+                     .renew(&mut lease, &input.target.credential)
+                     .await?;
+                 ensure!(lease.sequence == 2);
++                if input.expect_disconnect {
++                    let closed = timeout(WAIT, stream.next()).await?;
++                    ensure!(closed.is_none() || closed.is_some_and(|frame| frame.is_err()));
++                    authority
++                        .report_stop(&lease, StopReason::ConnectionLost)
++                        .await?;
++                }
+                 Ok::<_, hbb_common::anyhow::Error>(stream)
+             },
+         )
+@@ -208,6 +227,9 @@ async fn managed_native_endpoints_forward_on_selected_regional_relay() -> Result
+     }
+     let mut left = left?;
+     let mut right = right?;
++    if input.expect_disconnect {
++        return Ok(());
++    }
+     let payload = Bytes::from_static(b"controller to target");
+     left.send_raw(payload.to_vec()).await?;
+     let forwarded = timeout(WAIT, right.next())

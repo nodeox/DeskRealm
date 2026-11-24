@@ -14,6 +14,28 @@ type Activity = {
   stop_received_at?: string
   stop_reason?: string
 }
+type RelaySample = { result: string; rtt_us?: number }
+type RelayProbe = { state: string; median_us?: number; samples?: RelaySample[] }
+type RelayCandidate = {
+  relay_id: string
+  name: string
+  site: string
+  region: string
+  controller: RelayProbe
+  target: RelayProbe
+  attempt?: number
+  reason?: string
+  combined_rtt_us?: number
+  failed_at?: string
+  redeemed?: boolean
+}
+type RelayRound = {
+  connection_id: string
+  version: number
+  opened_at?: string
+  superseded_at?: string
+  candidates: RelayCandidate[]
+}
 type Session = Activity & {
   id: string
   user_id: string
@@ -29,6 +51,7 @@ type Session = Activity & {
   relay_id?: string
   allowed_actions: string[]
   can_revoke: boolean
+  relay_history?: { rounds: RelayRound[]; older_rounds?: boolean }
 }
 type Page = { sessions: Session[]; next?: string; metrics: Record<'total' | 'active' | 'direct' | 'relayed', number> }
 
@@ -58,6 +81,21 @@ const stateLabels: Record<string, string> = {
 }
 const stopLabels: Record<string, string> = {
   local_end: '端点主动结束', revoked: '撤销', lease_expired: '租约到期', connection_lost: '连接中断',
+}
+const relayReasons: Record<string, string> = {
+  dual_rtt: '双端 RTT 之和最小', site: '站点回退', geoip: 'GeoIP 区域回退', default_region: '默认区域回退', available: '按可用节点与负载回退',
+}
+const probeStates: Record<string, string> = { pending: '等待样本', missing: '缺少报告', insufficient: '成功样本不足' }
+const sampleResults: Record<string, string> = { timeout: '超时', unreachable: '不可达', protocol_mismatch: '协议不匹配', missing: '缺样' }
+const milliseconds = new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 3 })
+function rtt(value: number) {
+  return milliseconds.format(value / 1000) + ' ms'
+}
+function probeText(probe: RelayProbe) {
+  return probe.median_us === undefined ? (probeStates[probe.state] ?? probe.state) : rtt(probe.median_us)
+}
+function sampleText(sample: RelaySample) {
+  return sample.result === 'ok' && sample.rtt_us !== undefined ? rtt(sample.rtt_us) : (sampleResults[sample.result] ?? sample.result)
 }
 const timeline = computed(() => {
   const row = detail.value
@@ -199,7 +237,7 @@ onMounted(async () => {
     <button v-if="after" class="secondary load-more" type="button" :disabled="busy" @click="run(() => load(after))">加载更多</button>
   </section>
 
-  <dialog ref="detailDialog" aria-labelledby="session-detail-title" @close="detailTrigger?.focus()">
+  <dialog ref="detailDialog" class="session-detail" aria-labelledby="session-detail-title" @close="detailTrigger?.focus()">
     <h2 id="session-detail-title">会话详情</h2>
     <p v-if="detailError && !revoking" class="error" role="alert">{{ detailError }}</p>
     <template v-if="detail">
@@ -214,6 +252,7 @@ onMounted(async () => {
         <dt>主控设备</dt><dd>{{ detail.controller_device_id }}</dd>
         <dt>用途</dt><dd>{{ detail.purpose }}</dd>
         <dt>实际路径</dt><dd>{{ pathOf(detail) }}</dd>
+        <template v-if="detail.connection_id"><dt>连接 ID</dt><dd class="device-identifier">{{ detail.connection_id }}</dd></template>
         <dt>确认方式</dt><dd>{{ detail.confirmation_mode === 'attended' ? '有人值守' : '无人值守' }}</dd>
         <dt>允许的操作</dt><dd>{{ actionsText(detail.allowed_actions) }}</dd>
         <dt>策略版本</dt><dd>{{ detail.policy_version }}</dd>
@@ -225,6 +264,35 @@ onMounted(async () => {
         <template v-if="detail.revocation_reason"><dt>撤销原因</dt><dd>{{ detail.revocation_reason }}</dd></template>
         <template v-if="detail.stop_reason"><dt>停止原因</dt><dd>{{ stopLabels[detail.stop_reason] ?? detail.stop_reason }}</dd></template>
       </dl>
+      <section v-if="detail.relay_history" aria-labelledby="session-relay-title">
+        <h3 id="session-relay-title">区域中继记录</h3>
+        <details v-for="(round, roundIndex) in detail.relay_history.rounds" :key="round.connection_id" class="relay-round" :open="roundIndex === 0">
+          <summary>第 {{ round.version }} 轮 · {{ round.superseded_at ? '已替换' : (round.opened_at ? localTime(round.opened_at) : '等待受控端') }}</summary>
+          <p class="muted device-identifier">连接 {{ round.connection_id }}</p>
+          <p v-if="!round.candidates.length">本轮暂无候选中继。</p>
+          <div v-else class="table-wrap">
+            <table :aria-label="'第 ' + round.version + ' 轮中继样本'">
+              <thead><tr><th scope="col">中继</th><th scope="col">主控 RTT</th><th scope="col">受控 RTT</th><th scope="col">选点结果</th></tr></thead>
+              <tbody>
+                <tr v-for="node in round.candidates" :key="node.relay_id">
+                  <th scope="row">{{ node.name || node.relay_id }}<small>{{ node.site }} · {{ node.region }}</small></th>
+                  <td v-for="(probe, index) in [node.controller, node.target]" :key="index">
+                    {{ probeText(probe) }}
+                    <small v-if="probe.samples?.length">{{ probe.samples.map(sampleText).join(' / ') }}</small>
+                  </td>
+                  <td v-if="node.attempt">
+                    {{ node.redeemed ? '实际核销' : (node.failed_at ? '连接失败，已排除' : '已确认选点') }}
+                    <small>尝试 {{ node.attempt }} · {{ relayReasons[node.reason ?? ''] ?? node.reason }}</small>
+                    <small v-if="node.combined_rtt_us !== undefined">双端合计 {{ rtt(node.combined_rtt_us) }}</small>
+                  </td>
+                  <td v-else>未选中</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </details>
+        <p v-if="detail.relay_history.older_rounds" class="muted">此处显示实际核销轮次及最近的轮次。</p>
+      </section>
       <h3>会话时间线</h3>
       <ol class="session-timeline"><li v-for="event in timeline" :key="event.label">{{ event.label }} · {{ localTime(event.at) }}</li></ol>
       <div class="user-tools device-detail-actions">
@@ -250,3 +318,12 @@ onMounted(async () => {
     </form>
   </dialog>
 </template>
+
+<style scoped>
+.session-detail:has(.relay-round) { width: min(54rem, calc(100% - 2rem)); max-width: none; }
+.relay-round { margin-block: .75rem; }
+.relay-round summary { cursor: pointer; }
+.relay-round small { display: block; margin-block-start: .25rem; color: var(--muted); }
+.relay-round .table-wrap { max-width: 100%; overflow-x: auto; }
+.relay-round .device-identifier { overflow-wrap: anywhere; }
+</style>

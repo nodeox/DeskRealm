@@ -20,12 +20,12 @@ function uuid(value: string) {
   return "'" + value + "'::uuid"
 }
 
-function seedSession(controller: string, target: string, user: string, rule: string, path: 'direct' | 'relay', redeemed: boolean) {
+function seedSession(controller: string, target: string, user: string, rule: string, path: 'direct' | 'relay', redeemed: boolean, node?: string) {
   const id = randomUUID()
   const connection = randomUUID()
   const receipt = 'drc_' + randomBytes(32).toString('base64url')
   const digest = createHash('sha256').update(receipt).digest('hex')
-  const relay = path === 'relay' ? "'qa-relay'" : 'NULL'
+  const relay = path === 'relay' ? (node ? uuid(node) + '::text' : "'qa-relay'") : 'NULL'
   fixtureSQL(`BEGIN;
     INSERT INTO managed_sessions (
       id,grant_id,organization_id,user_id,controller_device_id,target_device_id,controller_digest,request_id,request_hash,
@@ -45,6 +45,36 @@ function seedSession(controller: string, target: string, user: string, rule: str
       statement_timestamp(),statement_timestamp()+interval '30 seconds',decode('${digest}','hex'));` : ''}
     COMMIT;`)
   return { id, connection, receipt }
+}
+
+function seedRegionalHistory(session: ReturnType<typeof seedSession>, user: string, first: string, second: string) {
+  const round = randomUUID()
+  fixtureSQL(`BEGIN;
+    WITH submitted AS (
+      INSERT INTO tasks(id,organization_id,kind,owner_id)
+      SELECT gen_random_uuid(),organization_id,'relay_enrollment',id FROM users WHERE id=${uuid(user)}
+      RETURNING id,organization_id
+    ) INSERT INTO relay_nodes(id,organization_id,task_id,name,site,region,endpoint,build,capacity)
+      SELECT ${uuid(first)},organization_id,id,'华东中继','上海','east','relay-a.invalid:21117','1.1.16',4 FROM submitted;
+    WITH submitted AS (
+      INSERT INTO tasks(id,organization_id,kind,owner_id)
+      SELECT gen_random_uuid(),organization_id,'relay_enrollment',id FROM users WHERE id=${uuid(user)}
+      RETURNING id,organization_id
+    ) INSERT INTO relay_nodes(id,organization_id,task_id,name,site,region,endpoint,build,capacity)
+      SELECT ${uuid(second)},organization_id,id,'华南中继','深圳','south','relay-b.invalid:21117','1.1.16',4 FROM submitted;
+    INSERT INTO session_relay_rounds(id,session_id,connection_id,version,controller_address,target_address,opened_at,deadline)
+      VALUES(${uuid(round)},${uuid(session.id)},${uuid(session.connection)},1,'192.0.2.10','198.51.100.20',
+        statement_timestamp()-interval '3 seconds',statement_timestamp()-interval '1 second');
+    INSERT INTO session_relay_candidates(round_id,relay_id,site,region,endpoint,build,identity_key,config_version,node_revision)
+      SELECT ${uuid(round)},id,site,region,endpoint,build,decode(repeat('00',32),'hex'),1,1 FROM relay_nodes
+      WHERE id IN (${uuid(first)},${uuid(second)});
+    INSERT INTO session_relay_reports(round_id,relay_id,role,samples,received_at) VALUES
+      (${uuid(round)},${uuid(first)},1,'[{"result":"ok","rtt_us":10000},{"result":"ok","rtt_us":14000},{"result":"timeout"}]',statement_timestamp()),
+      (${uuid(round)},${uuid(first)},2,'[{"result":"ok","rtt_us":20000},{"result":"ok","rtt_us":26000},{"result":"timeout"}]',statement_timestamp());
+    INSERT INTO session_relay_selections(round_id,relay_id,attempt,reason,combined_rtt_us,selected_at,failed_at) VALUES
+      (${uuid(round)},${uuid(first)},1,'dual_rtt',35000,statement_timestamp(),statement_timestamp()),
+      (${uuid(round)},${uuid(second)},2,'geoip',NULL,statement_timestamp(),NULL);
+    COMMIT;`)
 }
 
 async function confirm(page: Page, name: string, button: string) {
@@ -204,6 +234,27 @@ test('策略、设备回执和会话按实际授权与状态运行', async ({ pa
     await manager.goto('/sessions?session=' + relayed.id)
     await expect(manager.getByRole('alert')).toBeVisible()
     await expect(manager.getByRole('dialog', { name: '会话详情' })).toHaveCount(0)
+
+    const firstRelay = randomUUID()
+    const actualRelay = randomUUID()
+    const regional = seedSession(controller, target, initiator, rule, 'relay', true, actualRelay)
+    seedRegionalHistory(regional, initiator, firstRelay, actualRelay)
+    await manager.goto('/sessions?session=' + regional.id)
+    const regionalDetail = manager.getByRole('dialog', { name: '会话详情' })
+    await expect(regionalDetail.getByText('中继 · ' + actualRelay, { exact: true })).toBeVisible()
+    const history = regionalDetail.getByRole('table', { name: '第 1 轮中继样本' })
+    const firstAttempt = history.getByRole('row').filter({ hasText: '华东中继' })
+    await expect(firstAttempt).toContainText('12 ms')
+    await expect(firstAttempt).toContainText('23 ms')
+    await expect(firstAttempt).toContainText('超时')
+    await expect(firstAttempt).toContainText('连接失败，已排除')
+    await expect(firstAttempt).toContainText('双端合计 35 ms')
+    const actualAttempt = history.getByRole('row').filter({ hasText: '华南中继' })
+    await expect(actualAttempt).toContainText('缺少报告')
+    await expect(actualAttempt).toContainText('实际核销')
+    await expect(actualAttempt).toContainText('GeoIP 区域回退')
+    expect(await manager.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(375)
+    expect((await auditor.request.get(sessions + '/' + regional.id)).status()).toBe(404)
 
     fixtureSQL(`UPDATE managed_session_redemptions SET redeemed_at=statement_timestamp()-interval '31 seconds',
       lease_until=statement_timestamp()-interval '1 second' WHERE session_id=${uuid(direct.id)};`)
