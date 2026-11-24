@@ -345,3 +345,21 @@ Task 2 接续已建立会话断线后的新授权重选、会话页明细和跨�
 本地 Git 证据目录 `deskrealm-evidence/m3/789a51eb463842ad833deabf29d03ec17d37ffa7/`。日志 SHA-256 为 `managed-release.log` 的 `638f63b5408cb69170442ec73d699fd4d949b502e6e082fc12fb1b996661d565`、`delivery-browser.log` 的 `f421b972b7ea446aecb380174df659526dec3465d233cf76739c495351d7144e`、`signed-build.log` 的 `44039f6b69d7dc9ddb6a4e648723c2818de6662044efd0459d7b04def1f4ea6d`、`historical-native-bundles.log` 的 `51c41d3382d386fac1e577022c0b984129f715e0c2b3127b0dea4242768bad1e` 和 `m1-all.log` 的 `87de1b3304a352e1dfd65c5cc628b00ce8a72db2d451dfac9b3aa356c34bb222`。
 
 本次验证的授权下载使用控制台会话，签名范围为开发 ZIP。原生 CI 工件核验、Windows Authenticode 安装器、部署工具限时凭据及免填登记继续开发。Linux 部署和双 Windows 真机验收仍安排在开发完成后。[Windows 原生构建](https://github.com/nodeox/DeskRealm/actions/runs/45368970255)
+
+## 04-05 限时部署凭据
+
+2026-11-24，候选 `3311e12a7ca9729c966f5e27fa43b4d8eba9314c` 接通中心发放、撤销、部署查询与现有设备登记。部署凭据关联已发布版本、批准组、架构、RustDesk ID 和目标设备公钥。持久化摘要用于中心验证。保留原中心受管签名种子即可在原发放人重新提交相同部署时恢复有效凭据。开发包签名继续使用独立材料。
+
+| 检查 | 结果 |
+| --- | --- |
+| 发放权限与重试 | 拒绝只读成员、未发布组及普通组审批人申请自动审批。重建 API 处理器并重新加载同一受管种子后，原发放人可恢复相同凭据及到期时间。替换设备公钥的同一请求被拒绝。 |
+| 登记与撤销 | 错误设备公钥、RustDesk ID、架构、组及签名均被拒绝。凭据过期、撤销单台凭据、撤回发布或撤销发放人审批权均阻止完成登记，已发出的挑战也受此约束。 |
+| 审批与策略 | x64 测试对象进入待审批，目标组审批人可批准。ARM64 测试对象按管理员授权自动审批。重复完成返回原始登记回执。测试客户端经设备运行时认证获取组策略并签名上报，中心部署状态查询显示所应用版本。 |
+
+首次浏览器回归有一次现有凭据表单超时。设备组加载过程中，界面允许点击，但处理函数会忽略点击。候选 `28ea2739ad9d8aebb504673661b14a8f9b6d1bff` 将对应按钮在请求期间设为禁用。该候选通过限时部署凭据专项、M1 Go 回归、Vue 类型检查及三个 Chromium 场景。
+
+本地 Git 证据目录 `deskrealm-evidence/m3/28ea2739ad9d8aebb504673661b14a8f9b6d1bff/`。日志 SHA-256 为 `managed-release.log` 的 `db9773b3a7b6460adccb5d3e61cdd0840e3e76fab17beed304c26f7fa98718b0` 和 `m1-all.log` 的 `52bbf44861a39f7e1b09fa74dab14eb329a572a85894d0cfeb0f2419f059b2be`。
+
+本轮通过 API 和 PostgreSQL 模拟两种 Windows 架构的端点登记。Windows 安装器、终端读取公开配置及免填登记继续开发。实际 Windows 部署和 Linux 中心重建验收留在 Phase 5。
+
+当前原生 CI 提交 `6acfe3f62c3da5bd9d2021865fb3db8ab780da99` 的完整 Windows 构建输入与候选 `3311e12` 一致。x64 原生构建和测试通过，已下载归档并复核 PE 架构、工件摘要及具名测试日志。`manifest.json` SHA-256 为 `f86c691c6e3d8a2c5f6d370005aaffbc4b861ec223b0098d472f603a85bf1a5d`，`client.zip` SHA-256 为 `9a0132cc24695dcf8ea92478e5a4c2560ef4024a2db529be8c91f135dac8a8cb`。核验日志保存在 Git 证据目录 `deskrealm-evidence/windows/6acfe3f62c3da5bd9d2021865fb3db8ab780da99/verify-x64.log`。ARM64 桥接已通过，原生编译仍在运行。[Windows 原生构建](https://github.com/nodeox/DeskRealm/actions/runs/45368970255)
