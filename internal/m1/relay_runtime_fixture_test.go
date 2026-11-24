@@ -111,6 +111,13 @@ func TestRegionalRelayRuntimePostgres(t *testing.T) {
 	}
 	f := newSessionFixture(t)
 	ctx, store, h, admin := f.ctx, f.store, f.h, f.admin
+	testUpgrade := os.Getenv("DESKREALM_TEST_RELAY_UPGRADE") == "1"
+	if testUpgrade {
+		// Each replacement waits for outstanding tickets to expire.
+		upgradeCtx, cancel := context.WithTimeout(t.Context(), 3*time.Minute)
+		t.Cleanup(cancel)
+		ctx = upgradeCtx
+	}
 	csrf := csrfToken(admin.Value)
 	server := httptest.NewUnstartedServer(nil)
 	origin, err := ParseOrigin("https://"+server.Listener.Addr().String(), false)
@@ -190,7 +197,7 @@ func TestRegionalRelayRuntimePostgres(t *testing.T) {
 		var output bytes.Buffer
 		processCtx, cancel := context.WithCancel(ctx)
 		args := []string{"run", "--state", node.state, "--hbbr", hbbr, "--port", node.port, "--ca", ca}
-		if os.Getenv("DESKREALM_TEST_RELAY_UPGRADE") == "1" {
+		if testUpgrade {
 			args = append(args, "--managed-upgrades")
 		}
 		cmd := exec.CommandContext(processCtx, binary, args...)
@@ -400,7 +407,7 @@ func TestRegionalRelayRuntimePostgres(t *testing.T) {
 	if err != nil || registrations != 2 || admissions != 2 {
 		t.Fatalf("expected one registration and admission audit per node: %d %d %v", registrations, admissions, err)
 	}
-	if os.Getenv("DESKREALM_TEST_RELAY_UPGRADE") == "1" {
+	if testUpgrade {
 		status := func() (string, string) {
 			value := responseValue[struct {
 				Active string `json:"active_sha256"`
