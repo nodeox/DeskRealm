@@ -20,6 +20,7 @@ export const auditLabels: Record<string, string> = {
   'user.import_batch': '导入账号', 'task.retry_requested': '提交任务重试', 'task.target_finished': '完成任务执行',
   'task.install_record_imported': '导入中心安装记录',
   'task.delivery_created': '创建交付任务', 'task.target_canceled': '取消任务对象',
+  'task.windows_delivery_created': '提交 Windows 开发包验证',
   'relay.enrollment_issued': '签发中继登记凭据', 'relay.registered': '登记中继',
   'relay.available': '中继入池', 'relay.probe_lost': '中继探测故障', 'relay.probe_recovered': '中继探测恢复',
   'relay.network_policy_updated': '更新中继网络规则',

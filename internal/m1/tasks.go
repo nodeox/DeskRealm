@@ -86,18 +86,21 @@ func (a *API) listTasks(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx := r.Context()
 	result := struct {
-		Tasks      []taskSummary `json:"tasks"`
-		NextCursor string        `json:"next_cursor,omitempty"`
+		Tasks            []taskSummary `json:"tasks"`
+		NextCursor       string        `json:"next_cursor,omitempty"`
+		CanVerifyWindows bool          `json:"can_verify_windows,omitempty"`
 	}{}
 	err := a.withActor(r, false, func(tx pgx.Tx, who actor) error {
 		if retry == "available" && !who.PlatformAdmin {
 			return errForbidden
 		}
+		result.CanVerifyWindows = who.PlatformAdmin && a.store.WindowsDelivery != nil
 		rows, err := tx.Query(ctx, taskSummaries+` AND ($4::timestamptz IS NULL OR (t.created_at,t.id)<($4,NULLIF($5,'')::uuid))`+
-			` AND (NOT $7 OR ((t.kind='user_import' OR ($9 AND t.kind='delivery')) AND EXISTS (
+			` AND (NOT $7 OR ((t.kind='user_import' OR ($9 AND t.kind='delivery') OR ($10 AND t.kind='windows_delivery')) AND EXISTS (
 				SELECT 1 FROM task_targets target WHERE target.task_id=t.id AND target.retryable AND target.attempt_count<$8
 			)))`+taskSummaryGroup+` ORDER BY t.created_at DESC,t.id DESC LIMIT $6`,
-			who.Organization, who.ID, who.PlatformAdmin, before, beforeID, limit+1, retry == "available", maxTaskAttempts, a.store.Delivery != nil)
+			who.Organization, who.ID, who.PlatformAdmin, before, beforeID, limit+1, retry == "available", maxTaskAttempts,
+			a.store.Delivery != nil, a.store.WindowsDelivery != nil)
 		if err != nil {
 			return err
 		}
@@ -134,9 +137,10 @@ func (a *API) getTask(w http.ResponseWriter, r *http.Request) {
 	}
 	result := struct {
 		taskSummary
-		Targets      []taskTarget          `json:"targets"`
-		Attempts     []taskAttempt         `json:"attempts"`
-		Installation *installrecord.Record `json:"installation,omitempty"`
+		Targets         []taskTarget          `json:"targets"`
+		Attempts        []taskAttempt         `json:"attempts"`
+		Installation    *installrecord.Record `json:"installation,omitempty"`
+		WindowsDelivery *windowsTaskDetail    `json:"windows_delivery,omitempty"`
 	}{}
 	err := a.withActor(r, false, func(tx pgx.Tx, who actor) error {
 		rows, err := tx.Query(ctx, taskSummaries+` AND t.id=$4`+taskSummaryGroup, who.Organization, who.ID, who.PlatformAdmin, id)
@@ -163,10 +167,17 @@ func (a *API) getTask(w http.ResponseWriter, r *http.Request) {
 		} else if revision != 0 {
 			return errTaskMissing
 		}
-		canRetry := who.PlatformAdmin && (result.Kind == "user_import" || (result.Kind == "delivery" && a.store.Delivery != nil))
+		if result.Kind == windowsDeliveryKind {
+			result.WindowsDelivery, err = readWindowsTask(ctx, tx, id)
+			if err != nil {
+				return err
+			}
+		}
+		canRetry := who.PlatformAdmin && a.store.taskRetryEnabled(result.Kind)
 		rows, err = tx.Query(ctx, `SELECT id,object_key,state,result_code,($2 AND retryable),version,
 			($3 AND state='queued' AND attempt_count=0),COALESCE(operation_id::text,'')
-			FROM task_targets WHERE task_id=$1 ORDER BY object_key,id`, id, canRetry, who.PlatformAdmin && result.Kind == "delivery")
+			FROM task_targets WHERE task_id=$1 ORDER BY object_key,id`, id, canRetry,
+			who.PlatformAdmin && (result.Kind == "delivery" || result.Kind == windowsDeliveryKind))
 		if err != nil {
 			return err
 		}
@@ -249,7 +260,7 @@ func (a *API) changeTaskTargets(w http.ResponseWriter, r *http.Request, cancel b
 			return errForbidden
 		}
 		if cancel {
-			if kind != "delivery" {
+			if kind != "delivery" && kind != windowsDeliveryKind {
 				return errForbidden
 			}
 			tag, err := tx.Exec(ctx, `UPDATE task_targets tt SET state='canceled',result_code='canceled',version=tt.version+1
@@ -270,7 +281,7 @@ func (a *API) changeTaskTargets(w http.ResponseWriter, r *http.Request, cancel b
 			}
 			return nil
 		}
-		if kind != "user_import" && (kind != "delivery" || a.store.Delivery == nil) {
+		if !a.store.taskRetryEnabled(kind) {
 			return errForbidden
 		}
 		tag, err := tx.Exec(ctx, `UPDATE task_targets tt SET state='queued',retryable=false,version=tt.version+1,requested_by=$2
@@ -296,4 +307,9 @@ func (a *API) changeTaskTargets(w http.ResponseWriter, r *http.Request, cancel b
 		return
 	}
 	writeJSON(w, http.StatusAccepted, map[string]int{"queued": len(ids)})
+}
+
+func (s Store) taskRetryEnabled(kind string) bool {
+	return kind == "user_import" || kind == "delivery" && s.Delivery != nil ||
+		kind == windowsDeliveryKind && s.WindowsDelivery != nil
 }

@@ -117,6 +117,13 @@ func run(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	store.WindowsDelivery, err = m1.ConfigureWindowsDelivery(os.Getenv("DESKREALM_WINDOWS_CANDIDATE_DIR"),
+		os.Getenv("DESKREALM_WINDOWS_DEVELOPMENT_PUBLIC_KEY_FILE"), origin.String(),
+		os.Getenv("DESKREALM_WINDOWS_ID_SERVER"), os.Getenv("DESKREALM_WINDOWS_RENDEZVOUS_PUBLIC_KEY"),
+		os.Getenv("DESKREALM_WINDOWS_DEFAULT_RELAY_ID"), os.Getenv("DESKREALM_WINDOWS_DEFAULT_RELAY_ADDRESS"), managedKey)
+	if err != nil {
+		return err
+	}
 	transport, err := m1.ConfigureManagedTransport(os.Getenv("DESKREALM_MANAGED_RENDEZVOUS_TOKEN"),
 		os.Getenv("DESKREALM_MANAGED_RELAY_ID"), os.Getenv("DESKREALM_MANAGED_RELAY_TOKEN"))
 	if err != nil {

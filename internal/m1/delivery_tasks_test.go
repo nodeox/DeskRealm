@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"deskrealm/internal/windowsdelivery"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -283,7 +284,16 @@ func TestDeliveryTaskBrowserPostgres(t *testing.T) {
 	}
 	ctx, store, _ := postgres(t)
 	store.Delivery = &diskDelivery{directory: t.TempDir()}
+	spool, center, verifier, private := windowsFixtureVerifier(t)
+	store.WindowsDelivery = verifier
 	h, admin, csrf, _ := adminSession(t, ctx, store)
+	groupResponse := request(h, "POST", "/v1/admin/device-groups", testOrigin, map[string]string{"name": "Windows 工作台"}, admin, csrf)
+	checkCode(t, groupResponse, 201, "")
+	group := responseValue[struct{ ID string }](t, groupResponse.Body.Bytes()).ID
+	manifest := windowsFixtureStage(t, spool, windowsdelivery.Approval{
+		Schema: 1, Version: "0.1.0-dev.3", Brand: windowsdelivery.Brand{ID: "deskrealm", Name: "端域测试", Revision: 3},
+		Groups: []string{group}, Source: "1234567890abcdef1234567890abcdef12345678", Center: center,
+	}, private)
 	first := createDeliveryFixture(h, admin, csrf, "browser-retry", "retry-target")
 	checkCode(t, first, 202, "")
 	task := responseValue[struct{ ID string }](t, first.Body.Bytes()).ID
@@ -311,7 +321,8 @@ func TestDeliveryTaskBrowserPostgres(t *testing.T) {
 	command := exec.CommandContext(ctx, "npm", "run", "test:delivery-tasks")
 	command.Dir = root
 	command.Env = append(os.Environ(), "DESKREALM_BROWSER_BASE="+server.URL, "DESKREALM_BROWSER_OUTPUT="+scratch,
-		"DESKREALM_BROWSER_REPORT="+report, "DESKREALM_BROWSER_DELIVERY_TASK="+task, "DESKREALM_BROWSER_CANCEL_TASK="+cancelTask)
+		"DESKREALM_BROWSER_REPORT="+report, "DESKREALM_BROWSER_DELIVERY_TASK="+task, "DESKREALM_BROWSER_CANCEL_TASK="+cancelTask,
+		"DESKREALM_BROWSER_WINDOWS_MANIFEST="+manifest)
 	output, err := command.CombinedOutput()
 	if err != nil {
 		t.Fatalf("Chromium delivery task regression: %v\n%s", err, output)
@@ -325,5 +336,10 @@ func TestDeliveryTaskBrowserPostgres(t *testing.T) {
 	retried, _, _ := taskDetail(t, h, admin, task)
 	if summary.Canceled != 1 || retried.Queued != 1 {
 		t.Fatalf("browser actions did not persist: cancel=%+v retry=%+v", summary, retried)
+	}
+	var queued int
+	if err := store.DB.QueryRow(ctx, `SELECT count(*) FROM windows_delivery_requests w JOIN task_targets t ON t.task_id=w.task_id
+		WHERE w.manifest_sha256=$1 AND t.state='queued'`, manifest).Scan(&queued); err != nil || queued != 1 {
+		t.Fatalf("browser did not queue the reviewed manifest: %d, %v", queued, err)
 	}
 }

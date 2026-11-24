@@ -16,6 +16,7 @@ import (
 	"time"
 	"unicode"
 
+	"deskrealm/internal/windowsdelivery"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -42,8 +43,9 @@ var (
 )
 
 type Store struct {
-	DB       *pgxpool.Pool
-	Delivery DeliveryExecutor
+	DB              *pgxpool.Pool
+	Delivery        DeliveryExecutor
+	WindowsDelivery *windowsdelivery.Verifier
 }
 
 func Migrate(ctx context.Context, dsn string) error {

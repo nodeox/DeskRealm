@@ -39,8 +39,36 @@ python3 -B managed/windows_package.py sign approval.json release.json developer-
 python3 -B managed/windows_package.py verify approval.json candidate release.sig developer-public.pem
 ```
 
-同一批准输入和构建证据会产生相同的包与清单。打包失败时保留原候选目录，签名服务恢复后可用同一清单重试。签名范围记录为 `development`，使用组织信任的开发公钥验证。当前交付物是带分离签名的开发 ZIP，Windows Authenticode 安装器、控制台授权发布和客户端读取配置在后续开发中接入。
+同一批准输入和构建证据会产生相同的包与清单。打包失败时保留原候选目录，签名服务恢复后可用同一清单重试。签名范围记录为 `development`，使用组织信任的开发公钥验证。当前交付物是带分离签名的开发 ZIP。Windows Authenticode 安装器、分组发布和客户端读取配置在后续开发中接入。
+
+## 中心任务验证
+
+中心进程使用独立的开发验签公钥，以及本次部署的公开身份。设置以下环境变量启用工作台入口。
+
+| 环境变量 | 内容 |
+| --- | --- |
+| `DESKREALM_WINDOWS_CANDIDATE_DIR` | 中心可读的暂存目录绝对路径 |
+| `DESKREALM_WINDOWS_DEVELOPMENT_PUBLIC_KEY_FILE` | 独立 Ed25519 开发公钥的 PEM 文件 |
+| `DESKREALM_WINDOWS_ID_SERVER` | 已核对的会合端点，含端口 |
+| `DESKREALM_WINDOWS_RENDEZVOUS_PUBLIC_KEY` | 部署记录中的会合公钥，标准 Base64 |
+| `DESKREALM_WINDOWS_DEFAULT_RELAY_ID` 与 `DESKREALM_WINDOWS_DEFAULT_RELAY_ADDRESS` | 若批准记录包含固定中继，填写同一 ID 与端点 |
+
+中心继续使用运行中的 HTTPS 公开地址和受管签名公钥。Compose 部署可通过服务覆盖配置传入这些变量，并把暂存目录和验签公钥挂载为只读。暂存目录由构建操作员管理，子目录以 `release.json` 原始字节的 SHA-256 命名。
+
+```text
+CANDIDATE_DIR/<manifest-sha256>/
+  release.json
+  release.sig
+  bundle/
+    DeskRealm-x64.zip
+    DeskRealm-arm64.zip
+```
+
+平台管理员复核清单及目标设备组后，在任务中心选择「验证 Windows 开发包」，输入清单摘要。同一摘要的重复提交返回同一任务。工作台显示品牌修订、源码、目标组、两架构原生证据和 ZIP 摘要，成功后记录验签时间和公钥指纹。中心对两个架构完成验证后才登记验证结果。预期文件缺失、签名不符或归档损坏时，修正暂存文件后可在原任务重试。中心核对同一品牌修订与已验证资料一致。任务中断后由现有租约领取机制恢复。
+
+成功验证记录保留该次审计证据。后续发布需要再次验证实际交付字节，并应用组范围与分发授权。
 
 ```bash
 bash scripts/deskrealm-m3-test signed-build
+bash scripts/deskrealm-m3-test delivery-tasks
 ```

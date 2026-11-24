@@ -1,7 +1,7 @@
 export type TaskState = 'waiting' | 'queued' | 'running' | 'succeeded' | 'failed' | 'canceled'
 export type TaskSummary = Record<TaskState, number> & {
   id: string
-  kind: 'user_import' | 'device_enrollment' | 'center_install' | 'delivery' | 'relay_enrollment' | 'relay_lifecycle'
+  kind: 'user_import' | 'device_enrollment' | 'center_install' | 'delivery' | 'relay_enrollment' | 'relay_lifecycle' | 'windows_delivery'
   created_at: string
   device_id?: string
   group?: string
@@ -13,6 +13,7 @@ export const taskStates: Record<TaskState, string> = {
 export const taskKinds = {
   user_import: '账号导入', device_enrollment: '设备入网', center_install: '中心安装',
   delivery: '交付任务', relay_enrollment: '中继登记', relay_lifecycle: '中继操作',
+  windows_delivery: 'Windows 开发包验证',
 }
 
 export function taskProgress(item: TaskSummary) {

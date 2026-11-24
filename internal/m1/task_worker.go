@@ -29,9 +29,9 @@ func (s Store) claimTaskTarget(ctx context.Context, lease time.Duration) (taskCl
 		err := tx.QueryRow(ctx, `SELECT tt.id,t.id,t.organization_id,tt.requested_by,tt.object_key,
 			COALESCE(tt.lease_token::text,''),tt.attempt_count,t.kind,COALESCE(tt.operation_id::text,'')
 			FROM task_targets tt JOIN tasks t ON t.id=tt.task_id
-			WHERE (t.kind='user_import' OR ($1 AND t.kind='delivery'))
+			WHERE (t.kind='user_import' OR ($1 AND t.kind='delivery') OR ($2 AND t.kind='windows_delivery'))
 			AND (tt.state='queued' OR (tt.state='running' AND tt.lease_until<=clock_timestamp()))
-			ORDER BY tt.lease_until NULLS LAST,tt.id LIMIT 1 FOR UPDATE OF tt SKIP LOCKED`, s.Delivery != nil).Scan(
+			ORDER BY tt.lease_until NULLS LAST,tt.id LIMIT 1 FOR UPDATE OF tt SKIP LOCKED`, s.Delivery != nil, s.WindowsDelivery != nil).Scan(
 			&claim.Target, &claim.Task, &claim.Organization, &claim.Requester, &claim.ObjectKey, &prior, &count,
 			&claim.Kind, &claim.Operation)
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -75,7 +75,7 @@ func (s Store) claimTaskTarget(ctx context.Context, lease time.Duration) (taskCl
 
 func recordTaskOutcome(ctx context.Context, tx pgx.Tx, claim taskClaim, attemptID, code string) error {
 	result := "failure"
-	if code == "pending" || code == "exists" || code == "delivery_succeeded" {
+	if code == "pending" || code == "exists" || code == "delivery_succeeded" || code == "windows_verified" {
 		result = "success"
 	}
 	_, err := addAuditEvent(ctx, tx, auditEvent{OrganizationID: claim.Organization, ActorID: claim.Requester,
@@ -164,9 +164,12 @@ func (s Store) RunTaskWorker(ctx context.Context) {
 		step, cancel := context.WithTimeout(ctx, 10*time.Second)
 		claim, worked, err := s.claimTaskTarget(step, 30*time.Second)
 		if err == nil && claim.Token != "" {
-			if claim.Kind == "delivery" {
+			switch claim.Kind {
+			case "delivery":
 				err = s.runDelivery(step, claim)
-			} else {
+			case windowsDeliveryKind:
+				err = s.runWindowsDelivery(step, claim)
+			default:
 				_, err = s.finishTaskAttempt(step, claim)
 			}
 		}

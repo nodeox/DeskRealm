@@ -201,6 +201,7 @@ func NewHandler(store Store, origin *url.URL, web fs.FS, config ...AuthConfig) h
 	mux.HandleFunc("GET /v1/admin/tasks", api.listTasks)
 	mux.HandleFunc("GET /v1/admin/tasks/{id}", api.getTask)
 	mux.HandleFunc("POST /v1/admin/tasks/delivery", api.createDeliveryTask)
+	mux.HandleFunc("POST /v1/admin/tasks/windows-delivery", api.createWindowsDelivery)
 	mux.HandleFunc("POST /v1/admin/tasks/{id}/retry", api.retryTask)
 	mux.HandleFunc("POST /v1/admin/tasks/{id}/cancel", api.cancelTask)
 	apiNotFound := func(w http.ResponseWriter, _ *http.Request) {
@@ -291,6 +292,8 @@ func failure(w http.ResponseWriter, operation string, err error) {
 		writeError(w, http.StatusUnauthorized, errManagedIdentity.Error())
 	case errors.Is(err, errManagedUnavailable):
 		writeError(w, http.StatusServiceUnavailable, errManagedUnavailable.Error())
+	case errors.Is(err, errWindowsDeliveryUnavailable):
+		writeError(w, http.StatusServiceUnavailable, errWindowsDeliveryUnavailable.Error())
 	case errors.Is(err, errSessionMissing):
 		writeError(w, http.StatusNotFound, errSessionMissing.Error())
 	case errors.Is(err, errSessionInput):
@@ -325,13 +328,13 @@ func failure(w http.ResponseWriter, operation string, err error) {
 		writeError(w, http.StatusNotFound, err.Error())
 	case errors.Is(err, errConnectionStale), errors.Is(err, errPolicyStale):
 		writeError(w, http.StatusConflict, err.Error())
-	case errors.Is(err, errAuditInvalid), errors.Is(err, errTaskInvalid), errors.Is(err, errRelayInput):
+	case errors.Is(err, errAuditInvalid), errors.Is(err, errTaskInvalid), errors.Is(err, errRelayInput), errors.Is(err, errWindowsCandidateInvalid):
 		writeError(w, http.StatusBadRequest, err.Error())
 	case errors.Is(err, errAuditExportLimit), errors.Is(err, errAuditConflict), errors.Is(err, errTaskConflict),
 		errors.Is(err, errRelayConflict), errors.Is(err, errRelayEndpointConflict):
 		writeError(w, http.StatusConflict, err.Error())
 	case errors.Is(err, errDeviceMissing), errors.Is(err, errDeviceGroupMissing), errors.Is(err, errAuditMissing),
-		errors.Is(err, errTaskMissing), errors.Is(err, errRelayMissing):
+		errors.Is(err, errTaskMissing), errors.Is(err, errRelayMissing), errors.Is(err, errWindowsCandidateMissing):
 		writeError(w, http.StatusNotFound, err.Error())
 	case errors.Is(err, errBookMissing), errors.Is(err, errEntryMissing), errors.Is(err, errGrantMissing):
 		writeError(w, http.StatusNotFound, err.Error())

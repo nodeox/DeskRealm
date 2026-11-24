@@ -18,10 +18,27 @@ type InstallStep = {
   attempts: number
   updated_at?: string
 }
+type WindowsDelivery = {
+  manifest_sha256: string
+  verified_at?: string
+  verifier_key_sha256?: string
+  manifest: {
+    approval: {
+      version: string
+      source_commit: string
+      brand: { id: string; revision: number; name: string; icon_sha256: string }
+      center: { public_origin: string; id_server: string }
+      group_ids: string[]
+      builds: Record<string, { manifest_sha256: string; client_sha256: string }>
+    }
+    packages: Record<string, { file: string; sha256: string; bytes: number }>
+  }
+}
 type Task = TaskSummary & {
   targets: Target[]
   attempts: Attempt[]
   installation?: { deployment_id: string; revision: number; steps: InstallStep[] }
+  windows_delivery?: WindowsDelivery
 }
 
 const props = defineProps<{ csrf: string; admin: boolean }>()
@@ -31,6 +48,12 @@ const results: Record<string, string> = {
   approved: '设备已通过审批', rejected: '设备已被拒绝', retired: '待审批设备已退役',
   lease_expired: '执行租约已过期', authorization_changed: '重试申请人的管理员权限已变更',
   delivery_succeeded: '外部执行成功', delivery_failed: '外部执行失败', canceled: '执行前已取消',
+  windows_verified: '开发签名及双架构摘要已验证',
+  windows_files_missing: '暂存文件缺失或不可读',
+  windows_manifest_invalid: '清单摘要或中心身份不符',
+  windows_signature_invalid: '开发签名验证失败',
+  windows_package_invalid: '归档内容或双架构摘要不符',
+  windows_brand_conflict: '品牌修订已绑定不同内容',
   relay_pending_enrollment: '等待中继登记', relay_pending_probe: '已登记，等待验活',
   relay_available: '中继已入池', relay_draining: '中继已排空新会话', relay_disabled: '中继已停用',
   relay_resumed: '中继已恢复', relay_endpoint_changed: '公布地址已验证并更新',
@@ -56,6 +79,10 @@ const busy = ref(false)
 const detailHeading = ref<HTMLElement>()
 const confirm = ref<HTMLDialogElement>()
 const dialogError = ref('')
+const canVerifyWindows = ref(false)
+const windowsDialog = ref<HTMLDialogElement>()
+const windowsDigest = ref('')
+const windowsError = ref('')
 
 function message(cause: unknown) {
   if (cause instanceof RequestError && cause.status === 401) emit('expired')
@@ -70,9 +97,37 @@ async function readList(after = '') {
   const filters = new URLSearchParams()
   if (retryOnly) filters.set('retry', 'available')
   if (after) filters.set('before', after)
-  const response = await api<{ tasks: TaskSummary[]; next_cursor?: string }>(base + (filters.size ? '?' + filters : ''))
+  const response = await api<{ tasks: TaskSummary[]; next_cursor?: string; can_verify_windows?: boolean }>(base + (filters.size ? '?' + filters : ''))
   tasks.value = after ? [...tasks.value, ...response.tasks] : response.tasks
   next.value = response.next_cursor ?? ''
+  canVerifyWindows.value = !!response.can_verify_windows
+}
+
+function openWindowsDialog() {
+  windowsDigest.value = ''
+  windowsError.value = ''
+  windowsDialog.value?.showModal()
+}
+
+async function submitWindowsDelivery() {
+  const digest = windowsDigest.value.trim().toLowerCase()
+  if (busy.value || !/^[0-9a-f]{64}$/.test(digest)) return
+  busy.value = true
+  windowsError.value = ''
+  try {
+    const task = await api<{ id: string }>(base + '/windows-delivery', json({
+      request_key: 'windows-' + digest, manifest_sha256: digest,
+    }, props.csrf))
+    windowsDialog.value?.close()
+    await readList()
+    await openTask(task.id)
+    notice.value = '验证任务已提交。'
+  } catch (cause) {
+    if (windowsDialog.value?.open) windowsError.value = message(cause)
+    else error.value = message(cause)
+  } finally {
+    busy.value = false
+  }
 }
 
 async function readDetail(id: string, revision = '') {
@@ -150,6 +205,7 @@ onMounted(async () => {
       <h2 id="tasks-heading">任务列表</h2>
       <div class="control-actions">
         <a v-if="admin" href="/relays?add=1">接入区域中继</a>
+        <button v-if="canVerifyWindows && !retryOnly" class="secondary" :disabled="busy" @click="openWindowsDialog">验证 Windows 开发包</button>
         <button class="secondary" :disabled="busy" @click="refresh()">刷新</button>
       </div>
     </div>
@@ -185,6 +241,32 @@ onMounted(async () => {
       <div v-if="task.installation"><dt>部署 ID</dt><dd><code>{{ task.installation.deployment_id }}</code></dd></div>
       <div v-if="task.installation"><dt>记录修订</dt><dd>{{ task.installation.revision }}</dd></div>
     </dl>
+    <section v-if="task.windows_delivery" class="windows-evidence" aria-labelledby="windows-evidence-heading">
+      <h3 id="windows-evidence-heading">构建与签名证据</h3>
+      <dl>
+        <div><dt>版本</dt><dd>{{ task.windows_delivery.manifest.approval.version }}</dd></div>
+        <div><dt>品牌模板</dt><dd>{{ task.windows_delivery.manifest.approval.brand.name }}（{{ task.windows_delivery.manifest.approval.brand.id }} · 修订 {{ task.windows_delivery.manifest.approval.brand.revision }}）</dd></div>
+        <div><dt>图标 SHA-256</dt><dd><code>{{ task.windows_delivery.manifest.approval.brand.icon_sha256 }}</code></dd></div>
+        <div><dt>构建源码</dt><dd><code>{{ task.windows_delivery.manifest.approval.source_commit }}</code></dd></div>
+        <div><dt>中心</dt><dd>{{ task.windows_delivery.manifest.approval.center.public_origin }}</dd></div>
+        <div><dt>目标组</dt><dd><ul><li v-for="group in task.windows_delivery.manifest.approval.group_ids" :key="group"><code>{{ group }}</code></li></ul></dd></div>
+        <div><dt>清单 SHA-256</dt><dd><code>{{ task.windows_delivery.manifest_sha256 }}</code></dd></div>
+        <div v-if="task.windows_delivery.verified_at"><dt>开发签名验证时间</dt><dd>{{ formatTime(task.windows_delivery.verified_at) }}</dd></div>
+        <div v-if="task.windows_delivery.verifier_key_sha256"><dt>开发公钥 SHA-256</dt><dd><code>{{ task.windows_delivery.verifier_key_sha256 }}</code></dd></div>
+      </dl>
+      <div class="table-wrap">
+        <table aria-label="Windows 工件">
+          <thead><tr><th scope="col">架构</th><th scope="col">归档 SHA-256</th><th scope="col">原生构建证据 SHA-256</th></tr></thead>
+          <tbody>
+            <tr v-for="(artifact, arch) in task.windows_delivery.manifest.packages" :key="arch">
+              <th scope="row">{{ arch }}</th>
+              <td><code>{{ artifact.sha256 }}</code></td>
+              <td><code>{{ task.windows_delivery.manifest.approval.builds[arch]?.manifest_sha256 }}</code></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
     <div v-if="task.installation" class="table-wrap">
       <table>
         <thead><tr><th>步骤</th><th>状态</th><th>尝试次数</th><th>更新时间</th></tr></thead>
@@ -226,6 +308,20 @@ onMounted(async () => {
       </table>
     </div>
   </section>
+  <dialog ref="windowsDialog" aria-labelledby="windows-dialog-heading" @cancel.prevent="!busy && windowsDialog?.close()">
+    <form @submit.prevent="submitWindowsDelivery">
+      <h2 id="windows-dialog-heading">验证 Windows 开发包</h2>
+      <p>输入已存放在中心暂存区的发布清单 SHA-256。</p>
+      <div class="field"><label for="windows-digest">清单 SHA-256</label>
+        <input id="windows-digest" v-model.trim="windowsDigest" required pattern="[0-9A-Fa-f]{64}" maxlength="64" spellcheck="false">
+      </div>
+      <p v-if="windowsError" class="error" role="alert">{{ windowsError }}</p>
+      <div class="dialog-actions">
+        <button type="button" class="secondary" :disabled="busy" @click="windowsDialog?.close()">取消</button>
+        <button type="submit" class="primary" :disabled="busy">提交验证</button>
+      </div>
+    </form>
+  </dialog>
   <dialog ref="confirm" aria-labelledby="task-retry-heading" @cancel.prevent="!busy && confirm?.close()">
     <h2 id="task-retry-heading">{{ action === 'retry' ? '确认重试' : '确认取消' }}</h2>
     <p>{{ action === 'retry' ? '将重新调度以下失败对象。' : '将取消以下尚未开始的对象。' }}</p>
@@ -237,3 +333,8 @@ onMounted(async () => {
     </div>
   </dialog>
 </template>
+
+<style scoped>
+.windows-evidence code { overflow-wrap: anywhere; }
+.windows-evidence ul { padding-inline-start: 1.25rem; }
+</style>

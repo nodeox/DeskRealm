@@ -4,7 +4,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 case "${1:-}" in
   signed-build)
-    exec python3 -B -m unittest discover -v -s managed/tests -p 'windows_*test.py'
+    python3 -B -m unittest discover -v -s managed/tests -p 'windows_*test.py'
+    exec env GOFLAGS="${GOFLAGS:-} -race" bash scripts/deskrealm-m1-test windows-delivery
     ;;
   multi-relay)
     bash scripts/deskrealm-m3-test relay-selection

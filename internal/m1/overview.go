@@ -93,8 +93,9 @@ func (a *API) overview(w http.ResponseWriter, r *http.Request) {
 				return err
 			}
 			err = tx.QueryRow(ctx, `SELECT count(*) FROM task_targets tt JOIN tasks t ON t.id=tt.task_id
-				WHERE t.organization_id=$1 AND (t.kind='user_import' OR ($3 AND t.kind='delivery')) AND tt.retryable AND tt.attempt_count<$2`,
-				who.Organization, maxTaskAttempts, a.store.Delivery != nil).Scan(&result.Metrics.RetryableTargets)
+				WHERE t.organization_id=$1 AND (t.kind='user_import' OR ($3 AND t.kind='delivery') OR ($4 AND t.kind='windows_delivery'))
+				AND tt.retryable AND tt.attempt_count<$2`, who.Organization, maxTaskAttempts, a.store.Delivery != nil,
+				a.store.WindowsDelivery != nil).Scan(&result.Metrics.RetryableTargets)
 			if err != nil {
 				return err
 			}
