@@ -394,3 +394,17 @@ Task 2 接续已建立会话断线后的新授权重选、会话页明细和跨�
 2026-11-24，候选 `1f0b09286ffe6dc335de2706eabbb324bf20b29a` 使用临时 CA 和非生产发布者证书完成 Authenticode 用例。核验通过 x64、ARM64、同受信 CA 另一张证书拒绝、安装器互换拒绝、SHA-1 摘要拒绝和归档摘要复验。Go 全量测试通过。真实签名校验日志 `deskrealm-evidence/m3/1f0b09286ffe6dc335de2706eabbb324bf20b29a/windows-installer.log` 的 SHA-256 为 `6f60dc88c7e646c9205fb3bccbffdd8330b687586941d97c866dbbc0c9936500`。正式安装器签名须使用组织发布者证书并配置 RFC 3161 时间戳。
 
 含启动程序的 Windows CI 候选 `71079b6` 的 ARM64 原生归档已下载并通过本地复验。该归档 `client.zip` 的 SHA-256 为 `51533d6bb73589d88d9f7cab9c9b47d807108b80442784848696f64dc5971a53`。x64 原生构建仍在运行。Go 全量检查和 14 项 Python 构建与打包回归通过。当前提交的 PostgreSQL 专项复跑因本机 Docker 无响应中断。
+
+## 04-05 安装器分组发布
+
+2026-11-24，候选 `5d273db895a54365dd7319d2f275bca942089697` 将双架构安装器接入中心发布。独立环境先验证原 ZIP、Authenticode 签名、证书链和安装器文件，再用专用 Ed25519 密钥签署证据。中心验证证据签名、批准的证书指纹、ZIP 发布清单及实际工件摘要。按证据摘要保存安装器和分离签名，发布及下载使用原 ZIP 的设备组和撤回状态。
+
+| 检查 | 结果 |
+| --- | --- |
+| PostgreSQL 分组发布与登记 | 正常、并发同证据重试、处理器重建后的下载、分组权限及撤回通过。拒绝未经授权的发放人、无 CSRF、伪造签名、错误证书、错误 ZIP 发布、换包和已发布文件篡改。既有登记专项复跑通过。 |
+| Chromium | 从已通过复验的任务发布 ZIP，从 Windows 发布页提交安装器证据，下载 ARM64 EXE。浏览器记录的文件摘要与控制台一致。撤回发布后 ZIP 和安装器下载入口均消失。 |
+| 原生工件与真实签名 | 含启动程序的原生源提交 `71079b6e5d24cea6f018eb41cab0c5b121ab55a6` 两架构 CI 和证据验证通过，下载后本地复核通过。使用这两套原生工件重新生成开发 ZIP 和安装器，临时开发 CA Authenticode 签名通过，Python 生成的签名证据与安装器由 Go 校验并持久化。[Windows 原生构建](https://github.com/nodeox/DeskRealm/actions/runs/45380636466) |
+
+证据保存在 Git 目录 `deskrealm-evidence/m3/5d273db895a54365dd7319d2f275bca942089697/`。`managed-release.log` SHA-256 为 `db9773b3a7b6460adccb5d3e61cdd0840e3e76fab17beed304c26f7fa98718b0`，`delivery-tasks.log` 为 `8d3dabe18dd637c43e7363a4942d5477ccd10c076fda0443ba16d4461788e414`，`windows-native-installer.log` 为 `c356e0396251d95ada1609edff860579503212178190b88002397c9d5469178b`。`go vet`、Go 全量包测试和 Vue 类型检查通过。
+
+下一步接通组织部署工具的限时凭据交付。实际 Windows 安装、双端连接和 Linux 中心重建按 Phase 5 验收。
