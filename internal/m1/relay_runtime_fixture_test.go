@@ -184,7 +184,7 @@ func TestRegionalRelayRuntimePostgres(t *testing.T) {
 		for time.Now().Before(until) {
 			var sequence int64
 			var ready bool
-			if err := store.DB.QueryRow(ctx, `SELECT health_sequence,coalesce(protocol_ready AND health_config_version=config_version,false)
+			if err := store.DB.QueryRow(ctx, `SELECT health_sequence,COALESCE(`+relayHealthySQL+`,false)
 				FROM relay_nodes WHERE id=$1`, node.NodeID).Scan(&sequence, &ready); err != nil {
 				t.Fatal(err)
 			}
@@ -218,7 +218,7 @@ func TestRegionalRelayRuntimePostgres(t *testing.T) {
 	}
 	checkStates("awaiting_health", "awaiting_health")
 	stopA, _ := start(a), start(b)
-	sequence := waitHealth(a, 0)
+	waitHealth(a, 0)
 	waitHealth(b, 0)
 	checkStates("awaiting_probe", "awaiting_probe")
 	a.published.Store(&b.local)
@@ -248,10 +248,14 @@ func TestRegionalRelayRuntimePostgres(t *testing.T) {
 	taskSQL(t, ctx, store, "UPDATE relay_nodes SET active_sessions=capacity WHERE id=$1", a.NodeID)
 	checkStates("at_capacity", "available")
 	stopA()
-	taskSQL(t, ctx, store, "UPDATE relay_nodes SET health_at=statement_timestamp()-interval '16 seconds' WHERE id=$1", a.NodeID)
+	var stoppedSequence int64
+	if err := store.DB.QueryRow(ctx, `UPDATE relay_nodes SET health_at=statement_timestamp()-interval '16 seconds'
+		WHERE id=$1 RETURNING health_sequence`, a.NodeID).Scan(&stoppedSequence); err != nil {
+		t.Fatal(err)
+	}
 	checkStates("awaiting_health", "available")
 	start(a)
-	sequence = waitHealth(a, sequence)
+	sequence := waitHealth(a, stoppedSequence)
 	sweep()
 	checkStates("available", "available")
 	newEndpoint, newPublished := relayFixturePublish(t)
