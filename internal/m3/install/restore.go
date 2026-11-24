@@ -347,6 +347,13 @@ if [ -f "$data/postgresql.auto.conf" ]; then
 fi
 started=1
 gosu postgres pg_ctl -D "$data" -l "$socket/server.log" -o "-c config_file=$socket/postgresql.conf" -w -t 100 start >/dev/null
+# pg_ctl can return before a physical backup finishes recovery. With hot
+# standby disabled, SQL connections are rejected until WAL replay is complete.
+deadline=$(($(date +%s) + 60))
+until gosu postgres pg_isready -h "$socket" -U postgres -d deskrealm -t 1 -q; do
+  [ "$(date +%s)" -lt "$deadline" ]
+  sleep 1
+done
 step='application records'
 gosu postgres psql -h "$socket" -U postgres -d deskrealm -XqAt --set ON_ERROR_STOP=1 <<'SQL'
 SET ROLE deskrealm;
