@@ -26,11 +26,6 @@ from windows_build import require, sha_file, sha_format, sha_stream
 
 
 ARCH = {spec["arch"]: target for target, spec in build.TARGETS.items()}
-WINDOWS_INPUTS = (
-    "managed/upstream.lock", "managed/patches", "managed/native/deskrealm_protocol.rs",
-    "managed/windows_build.py", "managed/tests/windows_build_test.py", "scripts/deskrealm-managed-source",
-    "scripts/deskrealm-m2-test", ".github/workflows/deskrealm-windows.yml",
-)
 PUBLIC_FIELDS = ("public_origin", "id_server", "rendezvous_public_key", "signing_key_id", "signing_public_key")
 PLATFORM = re.compile(r"[a-z0-9][a-z0-9_-]{0,31}")
 VERSION = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+(?:-[a-z0-9]+(?:[.-][a-z0-9]+)*)?")
@@ -279,10 +274,10 @@ def check_package_contents(archive, expected, public, icon):
 
 
 def build_source(source_tree):
-    require(not build.git("status", "--porcelain=v1", "--untracked-files=all", "--", *WINDOWS_INPUTS, cwd=source_tree),
+    require(not build.git("status", "--porcelain=v1", "--untracked-files=all", "--", *build.WINDOWS_INPUTS, cwd=source_tree),
             "Windows source inputs differ from the approved checkout")
     commit = build.git("rev-parse", "HEAD", cwd=source_tree)
-    files = build.git("ls-tree", "-r", "--name-only", commit, "--", *WINDOWS_INPUTS, cwd=source_tree).splitlines()
+    files = build.git("ls-tree", "-r", "--name-only", commit, "--", *build.WINDOWS_INPUTS, cwd=source_tree).splitlines()
     inputs = {}
     for filename in files:
         blob = subprocess.check_output(["git", "show", f"{commit}:{filename}"], cwd=source_tree)

@@ -153,7 +153,7 @@ func TestWindowsEnrollmentPostgres(t *testing.T) {
 	complete(prove(requestPending, proof, autoKey), 401)
 	submitted := prove(requestPending, proof, pendingKey)
 	registered := complete(submitted, 200)
-	if registered.State != "pending" || registered.DeviceID == "" {
+	if registered.State != "pending" || registered.DeviceID == "" || !userIDPattern.MatchString(registered.Organization) {
 		t.Fatalf("unexpected manual enrollment: %+v", registered)
 	}
 	if status := get(pending, memberCookie, 200); status.Registration != "pending" ||

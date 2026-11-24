@@ -95,7 +95,13 @@ CANDIDATE_DIR/<manifest-sha256>/
 
 发布有效且发放人仍有审批权限时，使用原输入和部署 UUID 重试会保留原到期时间，并在凭据可用时返回原凭据。需要重新发放时使用新的部署 UUID。审批人可通过 `POST /v1/windows-releases/{release_id}/deployments/{deployment_id}/revoke` 提交空 JSON 对象撤销待用凭据。撤回发布也会使对应的待用凭据失效。已登记设备的后续停用和回收通过设备管理执行。中心持久化凭据摘要和登记回执，部署渠道应保护凭据传递和设备私钥。
 
-当前可通过中心接口验证分组发布、登记、审批及策略回执。Windows 安装器读取公开配置与自动提交登记仍在开发。
+## 开发包首次启动
+
+含启动程序的原生归档将 `DeskRealm.exe` 与 `rustdesk.exe` 打包。验证签名及摘要后，把 `client.zip` 解压到安装目录，并将外层归档中的 `deskrealm-public.json` 放到同一目录。用目标 Windows 用户执行 `DeskRealm.exe prepare RUSTDESK_ID`。此命令在本机创建并保留设备密钥，输出架构、RustDesk ID、设备公钥和 `deployment_file` 路径。相同 ID 的重复执行返回同一公钥。
+
+获授权的发放人使用输出字段申请上一节的凭据。部署工具将发放接口返回的 JSON 放到 `deployment_file`，文件应与密钥目录使用同一 Windows 用户的访问权限。部署工具应在该用户第一次启动前完成写入。直接启动 `DeskRealm.exe` 时，程序从公开配置获取中心地址和公钥，通过 Windows 信任的 HTTPS 连接核对中心签名身份，用本机密钥提交挑战，并将登记回执保存到当前用户的 `LOCALAPPDATA\DeskRealm\deployments`。保存回执后删除部署文件。中心已登记但回执丢失时，程序在下次启动重试原挑战。后续启动沿用本机身份与回执，并将中心、会合和中继设置传给受管客户端。
+
+开发包使用手动解压步骤。Windows Authenticode 安装器将自动放置已验证文件并创建指向 `DeskRealm.exe` 的入口。
 
 ```bash
 bash scripts/deskrealm-m3-test signed-build

@@ -28,6 +28,13 @@ TARGETS = {
     },
 }
 RUST_VERSION = "1.75.0"
+GO_VERSION = "go1.27.4"
+WINDOWS_INPUTS = (
+    "managed/upstream.lock", "managed/patches", "managed/native/deskrealm_protocol.rs",
+    "managed/windows_build.py", "managed/tests/windows_build_test.py", "scripts/deskrealm-managed-source",
+    "scripts/deskrealm-m2-test", ".github/workflows/deskrealm-windows.yml",
+    "go.mod", "go.sum", "cmd/deskrealm-windows-bootstrap", "internal/windowsdelivery", "internal/managedproto",
+)
 VCPKG_COMMIT = "9e593bb18ea69cc5095e012465dcd675a822ed0d"
 BRIDGE_FILES = (
     "src/bridge_generated.rs",
@@ -35,7 +42,7 @@ BRIDGE_FILES = (
     "flutter/lib/generated_bridge.dart",
     "flutter/lib/generated_bridge.freezed.dart",
 )
-PE_FILES = ("rustdesk.exe", "librustdesk.dll", "flutter_windows.dll", "dylib_virtual_display.dll")
+PE_FILES = ("DeskRealm.exe", "rustdesk.exe", "librustdesk.dll", "flutter_windows.dll", "dylib_virtual_display.dll")
 FLUTTER_DATA = ("data/icudtl.dat", "data/app.so", "data/flutter_assets/AssetManifest.bin")
 CLIENT_TESTS = (
     "managed_view_does_not_dispatch_legacy_or_other_capabilities",
@@ -58,7 +65,9 @@ LEASE_TESTS = (
     "managed_lease_renewal_requires_exact_identity_sequence_and_scope",
 )
 RESUME_TESTS = ("resume_requires_revalidation_before_any_access",)
-LOGS = ("vcpkg-build.log", "cargo-build.log", "desktop-tests.log", "lease-tests.log", "resume-tests.log", "flutter-build.log")
+LAUNCHER_TESTS = ("TestDeploymentRecoversLostRegistrationReceipt", "TestDesktopUsesVerifiedProfileSettings")
+LOGS = ("vcpkg-build.log", "cargo-build.log", "desktop-tests.log", "lease-tests.log", "resume-tests.log",
+        "flutter-build.log", "launcher-tests.log", "launcher-build.log")
 EVIDENCE_FILES = ("client.zip", "bridge.json", *LOGS)
 
 
@@ -97,14 +106,9 @@ def sha_format(value):
 
 
 def source_identity():
-    tracked = [
-        "managed/upstream.lock", "managed/patches", "managed/native/deskrealm_protocol.rs",
-        "managed/windows_build.py", "managed/tests/windows_build_test.py", "scripts/deskrealm-managed-source", "scripts/deskrealm-m2-test",
-        ".github/workflows/deskrealm-windows.yml",
-    ]
-    require(not git("status", "--porcelain=v1", "--untracked-files=all", "--", *tracked),
+    require(not git("status", "--porcelain=v1", "--untracked-files=all", "--", *WINDOWS_INPUTS),
             "commit the Windows build inputs before recording or verifying evidence")
-    files = git("ls-files", "--", *tracked).splitlines()
+    files = git("ls-files", "--", *WINDOWS_INPUTS).splitlines()
     # Hash committed bytes and also require the bytes used for the build to match.
     digests = {}
     for name in files:
@@ -341,6 +345,9 @@ def desktop_test_environment(target, env):
 
 def build_windows(target, work, bridge, evidence):
     tools = inspect_toolchains(target)
+    go_arch = "amd64" if TARGETS[target]["arch"] == "x64" else "arm64"
+    tools["go"] = output(["go", "version"])
+    require(tools["go"] == f"go version {GO_VERSION} windows/{go_arch}", "incorrect native Go toolchain")
     source = source_identity()
     generated = json_file(bridge / "bridge.json")
     check_bridge(generated, target, source)
@@ -349,6 +356,12 @@ def build_windows(target, work, bridge, evidence):
 
     destination = evidence / target / source["commit"]
     destination.mkdir(parents=True, exist_ok=False)
+    launcher = "./cmd/deskrealm-windows-bootstrap"
+    launcher_env = {**os.environ, "CGO_ENABLED": "0", "GOTOOLCHAIN": "local", "GOWORK": "off", "GOFLAGS": ""}
+    log_command(["go", "test", "-mod=readonly", "-count=1", "-v", launcher],
+                ROOT, destination / "launcher-tests.log", launcher_env)
+    log_command(["go", "build", "-mod=readonly", "-trimpath", "-buildvcs=false", "-o", destination / "DeskRealm.exe", launcher],
+                ROOT, destination / "launcher-build.log", launcher_env)
     client = prepare(work)
     upstream = upstream_identity()
     require(git("rev-parse", "HEAD", cwd=client) == upstream["client"]
@@ -395,6 +408,8 @@ def build_windows(target, work, bridge, evidence):
     log_command([*build, "--skip-cargo"], client, destination / "flutter-build.log", env)
 
     bundle = client / f"flutter/build/windows/{TARGETS[target]['arch']}/runner/Release"
+    require(not (bundle / "DeskRealm.exe").exists(), "Flutter bundle shadows the managed launcher")
+    shutil.move(destination / "DeskRealm.exe", bundle / "DeskRealm.exe")
     require(sha_file(bundle / "librustdesk.dll") == rust_digest and sha_file(rust_library) == rust_digest,
             "Flutter packaged a different Rust library")
     require(sha_file(client / "Cargo.lock") == cargo_lock, "locked Rust dependencies changed during the build")
@@ -415,6 +430,8 @@ def verify_target(directory, target, source):
             and report["upstream"] == upstream_identity() and report["target"] == target,
             "manifest is for different source or target")
     check_toolchains(report["toolchains"], target)
+    go_arch = "amd64" if TARGETS[target]["arch"] == "x64" else "arm64"
+    require(report["toolchains"].get("go") == f"go version {GO_VERSION} windows/{go_arch}", "incorrect native Go build evidence")
     require(sha_format(report["cargo_lock_sha256"]) and sha_format(report["flutter_lock_sha256"]),
             "missing dependency lock digests")
     require(set(report["files"]) == set(EVIDENCE_FILES), "incomplete build or test evidence")
@@ -430,6 +447,9 @@ def verify_target(directory, target, source):
     check_tests(directory / "desktop-tests.log", CLIENT_TESTS)
     check_tests(directory / "lease-tests.log", LEASE_TESTS)
     check_tests(directory / "resume-tests.log", RESUME_TESTS)
+    launcher_log = (directory / "launcher-tests.log").read_text(encoding="utf-8")
+    for test in LAUNCHER_TESTS:
+        require(re.search(rf"^--- PASS: {test} \(", launcher_log, re.MULTILINE), f"missing passing test {test}")
     print(f"{target}: native client bundle, architecture and managed test evidence verified", flush=True)
 
 

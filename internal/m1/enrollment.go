@@ -11,6 +11,8 @@ import (
 	"strings"
 	"time"
 
+	"deskrealm/internal/managedproto"
+
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
@@ -51,10 +53,8 @@ func (in enrollmentRequest) key() ([]byte, error) {
 	return key, nil
 }
 
-// All fields have restricted alphabets. Newlines cannot occur in a field.
 func enrollmentProof(id, nonce string, in enrollmentRequest) []byte {
-	return []byte(strings.Join([]string{"deskrealm/device-enrollment/v1", id, nonce, in.GroupID,
-		in.Platform, in.RustDeskID, in.PublicKey}, "\n"))
+	return managedproto.DeviceEnrollmentProof(id, nonce, in.GroupID, in.Platform, in.RustDeskID, in.PublicKey)
 }
 
 func (a *API) issueEnrollment(w http.ResponseWriter, r *http.Request) {
@@ -216,8 +216,9 @@ func (s Store) challengeEnrollment(ctx context.Context, in enrollmentRequest, ke
 }
 
 type enrollmentResult struct {
-	DeviceID string `json:"device_id"`
-	State    string `json:"registration_state"`
+	DeviceID     string `json:"device_id"`
+	State        string `json:"registration_state"`
+	Organization string `json:"organization_id,omitempty"`
 }
 
 func (s Store) completeEnrollment(ctx context.Context, in enrollmentRequest, key, signature []byte) (enrollmentResult, error) {
@@ -250,6 +251,9 @@ func (s Store) completeEnrollment(ctx context.Context, in enrollmentRequest, key
 		}
 		if !ed25519.Verify(key, enrollmentProof(in.AttemptID, nonce, in), signature) {
 			return errEnrollment
+		}
+		if e.Deployment != "" {
+			out.Organization = e.Organization
 		}
 		if out.DeviceID != "" && e.Consumed {
 			var active bool
