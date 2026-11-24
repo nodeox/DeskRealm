@@ -295,20 +295,24 @@ func RunRelay(ctx context.Context, args []string, stdout, stderr io.Writer) erro
   deskrealm-relay prepare --state DIR --center HTTPS_ORIGIN --node NODE_ID
   deskrealm-relay enroll  --state DIR [--ca PEM] [--credential-file FILE]
   deskrealm-relay run     --state DIR --hbbr ABSOLUTE_PATH [--port PORT] [--ca PEM]
+                        [--managed-upgrades]
+  deskrealm-relay upgrade --state DIR --task TASK_ID --hbbr ABSOLUTE_PATH --sha256 DIGEST [--ca PEM]
+  deskrealm-relay upgrade-status --state DIR
   deskrealm-relay status  --state DIR
 `
 	if len(args) == 1 && (args[0] == "--help" || args[0] == "-h") {
 		_, err := io.WriteString(stdout, help)
 		return err
 	}
-	if len(args) == 0 || (args[0] != "prepare" && args[0] != "enroll" && args[0] != "run" && args[0] != "status") {
+	if len(args) == 0 {
 		return errors.New(help)
 	}
 	command := args[0]
 	flags := flag.NewFlagSet(command, flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	path := flags.String("state", "", "absolute private node state directory")
-	var center, id, credential, ca, hbbr, port string
+	var center, id, credential, ca, hbbr, port, task, digest string
+	var managed bool
 	switch command {
 	case "prepare":
 		flags.StringVar(&center, "center", "", "HTTPS center origin")
@@ -320,6 +324,15 @@ func RunRelay(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 		flags.StringVar(&hbbr, "hbbr", "", "absolute path of the managed hbbr binary")
 		flags.StringVar(&port, "port", "", "local TCP port, defaults to the published port")
 		flags.StringVar(&ca, "ca", "", "optional center CA certificate")
+		flags.BoolVar(&managed, "managed-upgrades", false, "supervise verified relay binary upgrades")
+	case "upgrade":
+		flags.StringVar(&hbbr, "hbbr", "", "absolute path of the approved hbbr binary")
+		flags.StringVar(&task, "task", "", "center-authorized relay upgrade task")
+		flags.StringVar(&digest, "sha256", "", "approved SHA-256 of the candidate binary")
+		flags.StringVar(&ca, "ca", "", "optional center CA certificate")
+	case "status", "upgrade-status":
+	default:
+		return errors.New(help)
 	}
 	if err := flags.Parse(args[1:]); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -335,6 +348,8 @@ func RunRelay(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 		return err
 	}
 	var state relayHost
+	encoder := json.NewEncoder(stdout)
+	encoder.SetIndent("", "  ")
 	if command == "prepare" {
 		origin, err := relayOrigin(center)
 		if err != nil {
@@ -363,7 +378,7 @@ func RunRelay(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 		}
 		defer client.CloseIdleConnections()
 		if command == "run" {
-			return runRelayHost(ctx, client, directory, hbbr, port, state, stdout, stderr)
+			return runRelayHost(ctx, client, directory, hbbr, port, state, managed, stdout, stderr)
 		}
 		state, err = enrollRelayHost(ctx, client, directory, credential, state)
 		if err != nil {
@@ -374,8 +389,26 @@ func RunRelay(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 		if err != nil {
 			return err
 		}
+		upgradeDir := filepath.Join(directory, relayUpgradeDir)
+		if command == "upgrade-status" {
+			u, err := readRelayRuntime(upgradeDir, state.NodeID)
+			if err != nil {
+				return err
+			}
+			return encoder.Encode(u)
+		}
+		if command == "upgrade" {
+			client, err := newRelayClient(ca)
+			if err != nil {
+				return err
+			}
+			defer client.CloseIdleConnections()
+			u, err := requestRelayUpgrade(ctx, client, upgradeDir, state, task, hbbr, digest)
+			if err != nil {
+				return err
+			}
+			return encoder.Encode(u)
+		}
 	}
-	encoder := json.NewEncoder(stdout)
-	encoder.SetIndent("", "  ")
 	return encoder.Encode(state.status())
 }

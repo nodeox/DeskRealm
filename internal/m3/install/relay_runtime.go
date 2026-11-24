@@ -63,7 +63,7 @@ func reportRelayHealth(ctx context.Context, client *http.Client, directory, endp
 	}{health, base64.RawURLEncoding.EncodeToString(ed25519.Sign(key, health.Frame()))}, nil)
 }
 
-func runRelayHost(ctx context.Context, client *http.Client, directory, binary, port string, state relayHost, stdout, stderr io.Writer) error {
+func runRelayHost(ctx context.Context, client *http.Client, directory, binary, port string, state relayHost, managed bool, stdout, stderr io.Writer) error {
 	if state.Config == nil {
 		return errors.New("enroll the relay before starting hbbr")
 	}
@@ -93,31 +93,25 @@ func runRelayHost(ctx context.Context, client *http.Client, directory, binary, p
 	if err == nil && (centerKey.ID == "" || relayprotocol.PublicKey(centerKey.Public) == nil) {
 		return errors.New("center returned an invalid managed signing key")
 	}
-	childCtx, stop := context.WithCancel(ctx)
-	cmd := exec.CommandContext(childCtx, binary, "--port", port, "--deskrealm-regional")
-	cmd.Dir = directory
-	cmd.Env = append(os.Environ(), "DESKREALM_RELAY_STATE="+filepath.Join(directory, relayHostFile),
-		"DESKREALM_REGIONAL_CENTER_PROBE_KEY="+centerKey.Public)
-	cmd.Stdout, cmd.Stderr = stdout, stderr
-	cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGTERM) }
-	cmd.WaitDelay = 3 * time.Second
-	if err := cmd.Start(); err != nil {
-		stop()
+	start := func(path string) (*relayProcess, error) {
+		return startRelayProcess(ctx, directory, path, port, centerKey.Public, stdout, stderr)
+	}
+	endpoint := net.JoinHostPort("127.0.0.1", port)
+	if managed {
+		return superviseRelayUpgrade(ctx, client, directory, binary, endpoint, state, start, stderr)
+	}
+	if _, err := os.Lstat(filepath.Join(directory, relayUpgradeDir)); !errors.Is(err, os.ErrNotExist) {
+		return errors.New("relay state uses managed executables; restart with --managed-upgrades")
+	}
+	process, err := start(binary)
+	if err != nil {
 		return err
 	}
-	done := make(chan struct{})
-	var processErr error
-	go func() {
-		defer close(done)
-		processErr = cmd.Wait()
-		stop()
-	}()
-	defer func() {
-		stop()
-		<-done
-	}()
+	defer process.close()
+	childCtx, stop := context.WithCancel(ctx)
+	go func() { <-process.done; stop() }()
+	defer stop()
 	key := ed25519.NewKeyFromSeed(state.Seed)
-	endpoint := net.JoinHostPort("127.0.0.1", port)
 	tick := time.NewTicker(5 * time.Second)
 	defer tick.Stop()
 	for childCtx.Err() == nil {
@@ -139,12 +133,48 @@ func runRelayHost(ctx context.Context, client *http.Client, directory, binary, p
 		case <-tick.C:
 		}
 	}
-	<-done
+	<-process.done
 	if ctx.Err() != nil {
 		return nil
 	}
-	if processErr != nil {
-		return fmt.Errorf("hbbr exited: %w", processErr)
+	return process.exitError()
+}
+
+type relayProcess struct {
+	cancel context.CancelFunc
+	done   chan struct{}
+	err    error
+}
+
+func startRelayProcess(ctx context.Context, directory, binary, port, centerKey string, stdout, stderr io.Writer) (*relayProcess, error) {
+	childCtx, stop := context.WithCancel(ctx)
+	cmd := exec.CommandContext(childCtx, binary, "--port", port, "--deskrealm-regional")
+	cmd.Dir = directory
+	cmd.Env = append(os.Environ(), "DESKREALM_RELAY_STATE="+filepath.Join(directory, relayHostFile),
+		"DESKREALM_REGIONAL_CENTER_PROBE_KEY="+centerKey)
+	cmd.Stdout, cmd.Stderr = stdout, stderr
+	cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGTERM) }
+	cmd.WaitDelay = 3 * time.Second
+	if err := cmd.Start(); err != nil {
+		stop()
+		return nil, err
+	}
+	process := &relayProcess{cancel: stop, done: make(chan struct{})}
+	go func() {
+		defer close(process.done)
+		process.err = cmd.Wait()
+	}()
+	return process, nil
+}
+
+func (p *relayProcess) close() {
+	p.cancel()
+	<-p.done
+}
+
+func (p *relayProcess) exitError() error {
+	if p.err != nil {
+		return fmt.Errorf("hbbr exited: %w", p.err)
 	}
 	return errors.New("hbbr exited")
 }

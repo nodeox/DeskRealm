@@ -43,6 +43,26 @@ type ConfigRequest struct {
 	ObservedMS int64  `json:"observed_ms"`
 }
 
+type UpgradeRequest struct {
+	NodeID        string `json:"node_id"`
+	TaskID        string `json:"task_id"`
+	Nonce         string `json:"nonce"`
+	ObservedMS    int64  `json:"observed_ms"`
+	Action        string `json:"action"`
+	ConfigVersion int64  `json:"config_version"`
+	SHA256        string `json:"sha256"`
+}
+
+type Upgrade struct {
+	TaskID       string `json:"task_id"`
+	CandidateSHA string `json:"candidate_sha256"`
+	OriginalSHA  string `json:"original_sha256"`
+	State        string `json:"state"`
+	Ready        bool   `json:"ready"`
+}
+
+func (r UpgradeRequest) Frame() []byte { return frame("upgrade", r) }
+
 func (e Enrollment) Frame() []byte    { return frame("enrollment", e) }
 func (h Health) Frame() []byte        { return frame("health", h) }
 func (r ConfigRequest) Frame() []byte { return frame("configuration", r) }

@@ -80,6 +80,18 @@ test('区域中继处理接入、排空、停用、恢复及地址切换', async
   await expect(page.getByRole('heading', { name: '中继操作详情' })).toBeVisible()
   await expect(page.getByText('公布地址已验证并更新', { exact: true })).toBeVisible()
 
+  await page.goto('/relays?node=' + node)
+  await page.getByRole('button', { name: '排空并升级', exact: true }).click()
+  dialog = page.getByRole('dialog', { name: '排空并升级' })
+  await dialog.getByLabel('候选 hbbr 的 SHA-256').fill('a'.repeat(64))
+  await dialog.getByRole('button', { name: '确认排空并升级' }).click()
+  await expect(row).toContainText('排空中')
+  await expect(page.getByRole('button', { name: '恢复', exact: true })).toHaveCount(0)
+  await expect(page.getByRole('link', { name: '升级任务', exact: true })).toBeVisible()
+  await operate('取消升级')
+  await expect(page.getByRole('status')).toContainText('升级已取消')
+  await expect(row).toContainText('排空中')
+
   const member = await browser.newContext({ baseURL: process.env.DESKREALM_BROWSER_BASE })
   try {
     const memberPage = await member.newPage()

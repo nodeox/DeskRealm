@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http/httptest"
@@ -189,6 +190,9 @@ func TestRegionalRelayRuntimePostgres(t *testing.T) {
 		var output bytes.Buffer
 		processCtx, cancel := context.WithCancel(ctx)
 		args := []string{"run", "--state", node.state, "--hbbr", hbbr, "--port", node.port, "--ca", ca}
+		if os.Getenv("DESKREALM_TEST_RELAY_UPGRADE") == "1" {
+			args = append(args, "--managed-upgrades")
+		}
 		cmd := exec.CommandContext(processCtx, binary, args...)
 		cmd.Stdout, cmd.Stderr = &output, &output
 		cmd.Cancel = func() error { return cmd.Process.Signal(os.Interrupt) }
@@ -374,7 +378,7 @@ func TestRegionalRelayRuntimePostgres(t *testing.T) {
 		t.Fatal(err)
 	}
 	checkStates("awaiting_health", "available")
-	start(a)
+	stopA = start(a)
 	sequence := waitHealth(a, stoppedSequence)
 	sweep()
 	checkStates("available", "available")
@@ -395,6 +399,76 @@ func TestRegionalRelayRuntimePostgres(t *testing.T) {
 		count(*) FILTER (WHERE action='relay.available') FROM audit_events`).Scan(&registrations, &admissions)
 	if err != nil || registrations != 2 || admissions != 2 {
 		t.Fatalf("expected one registration and admission audit per node: %d %d %v", registrations, admissions, err)
+	}
+	if os.Getenv("DESKREALM_TEST_RELAY_UPGRADE") == "1" {
+		status := func() (string, string) {
+			value := responseValue[struct {
+				Active string `json:"active_sha256"`
+				State  string `json:"state"`
+			}](t, command("upgrade-status", "--state", a.state))
+			return value.State, value.Active
+		}
+		_, original := status()
+		replace := func(name string, script []byte, want string) string {
+			t.Helper()
+			candidate := filepath.Join(scratch, name)
+			if err := os.WriteFile(candidate, script, 0700); err != nil {
+				t.Fatal(err)
+			}
+			approved := fmt.Sprintf("%x", sha256.Sum256(script))
+			var revision int64
+			if err := store.DB.QueryRow(ctx, "SELECT revision FROM relay_nodes WHERE id=$1", a.NodeID).Scan(&revision); err != nil {
+				t.Fatal(err)
+			}
+			url := relayAdminURL + "/" + a.NodeID
+			reply := request(h, "POST", url+"/upgrade", testOrigin,
+				map[string]any{"action": "start", "revision": revision, "sha256": approved}, admin, csrf)
+			checkCode(t, reply, 200, "pending")
+			task := responseValue[relayprotocol.Upgrade](t, reply.Body.Bytes()).TaskID
+			command("upgrade", "--state", a.state, "--ca", ca, "--task", task, "--hbbr", candidate, "--sha256", approved)
+			checkCode(t, request(h, "POST", url+"/lifecycle", testOrigin, relayChange{"resume", revision + 1, ""}, admin, csrf), 409, "")
+			until := time.Now().Add(55 * time.Second)
+			var phase, active string
+			for time.Now().Before(until) {
+				phase, active = status()
+				if phase == want {
+					break
+				}
+				time.Sleep(200 * time.Millisecond)
+			}
+			if phase != want || want == "succeeded" && active != approved || want == "rolled_back" && active != original {
+				t.Fatalf("upgrade %s expected %s, got %s and active digest %s", name, want, phase, active)
+			}
+			checkCode(t, request(h, "GET", tasksPath+"/"+task, "", nil, admin, ""), 200, "relay_upgrade_"+want)
+			// The fixture drives the center's probes explicitly. Refresh beta after
+			// the upgrade grace period so its last probe has not expired.
+			sweep()
+			checkStates("draining", "available")
+			checkCode(t, request(h, "POST", url+"/lifecycle", testOrigin, relayChange{"resume", revision + 2, ""}, admin, csrf),
+				200, "relay_resumed")
+			checkStates("available", "available")
+			return active
+		}
+		replace("broken", []byte("#!/bin/sh\nexit 3\n"), "rolled_back")
+		base, err := os.ReadFile(hbbr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		active := replace("compatible", append(base, []byte("\n# compatible upgrade fixture\n")...), "succeeded")
+		if err := store.DB.QueryRow(ctx, "SELECT health_sequence FROM relay_nodes WHERE id=$1", a.NodeID).Scan(&sequence); err != nil {
+			t.Fatal(err)
+		}
+		stopA()
+		start(a)
+		waitHealth(a, sequence)
+		if phase, digest := status(); phase != "succeeded" || digest != active {
+			t.Fatal("runtime restart lost the active upgrade")
+		}
+		out := command("status", "--state", a.state)
+		if !strings.Contains(string(out), a.public) || !strings.Contains(string(out), newEndpoint) {
+			t.Fatal("upgrade changed the enrolled node identity or endpoint")
+		}
+		t.Log("Verified compatible digest switch, rollback of a failed process, retained identity, and unaffected second native relay")
 	}
 }
 

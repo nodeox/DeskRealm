@@ -9,9 +9,10 @@ type Node = {
 }
 type Probe = { endpoint: string; config_version: number; checked_at: string; result: string; task_id?: string }
 type RelaySession = { id: string; state: string; lease_until?: string }
-type Detail = Node & { probes: Probe[]; sessions: RelaySession[] }
+type Upgrade = { task_id: string; candidate_sha256: string; state: string }
+type Detail = Node & { probes: Probe[]; sessions: RelaySession[]; upgrade?: Upgrade }
 type Credential = { node_id: string; task_id: string; credential: string; expires_at: string }
-type Action = 'drain' | 'disable' | 'resume' | 'change_endpoint'
+type Action = 'drain' | 'disable' | 'resume' | 'change_endpoint' | 'upgrade' | 'cancel_upgrade'
 
 const props = defineProps<{ csrf: string }>()
 const emit = defineEmits<{ expired: [] }>()
@@ -29,6 +30,12 @@ const dialogError = ref('')
 const action = ref<Action | 'create' | 'reissue'>('create')
 const draft = reactive({ name: '', site: '', region: '', endpoint: '', build: '1.1.16', capacity: 16 })
 const endpoint = ref('')
+const digest = ref('')
+const upgradeHeld = computed(() => ['pending', 'claimed'].includes(detail.value?.upgrade?.state ?? ''))
+const upgradeLabels: Record<string, string> = {
+  pending: '等待节点排空并领取任务', claimed: '节点正在升级', succeeded: '升级已验证',
+  rolled_back: '升级失败，原版本已恢复', canceled: '升级已取消',
+}
 const states: Record<string, string> = {
   pending_enrollment: '待登记', awaiting_health: '待签名健康', awaiting_probe: '待探测',
   available: '可用', at_capacity: '已满载', probe_unreachable: '探测故障', draining: '排空中', disabled: '已停用',
@@ -41,7 +48,7 @@ const sessionLabels: Record<string, string> = {
 }
 const actionLabels = {
   create: '接入区域中继', reissue: '补发登记凭据', drain: '排空', disable: '停用', resume: '恢复',
-  change_endpoint: '切换公布地址',
+  change_endpoint: '切换公布地址', upgrade: '排空并升级', cancel_upgrade: '取消升级',
 }
 const results: Record<string, string> = {
   relay_draining: '已排空新会话。', relay_disabled: '已停用节点。', relay_resumed: '已恢复节点。',
@@ -87,6 +94,7 @@ function show(next: typeof action.value) {
   action.value = next
   dialogError.value = ''
   endpoint.value = ''
+  digest.value = ''
   dialog.value?.showModal()
 }
 
@@ -104,6 +112,10 @@ async function submit() {
       credential.value = response
       selected = response.node_id
       notice.value = undefined
+    } else if (node && (operation === 'upgrade' || operation === 'cancel_upgrade')) {
+      const response = await api<Upgrade>(base + '/' + selected + '/upgrade',
+        json({ action: operation === 'upgrade' ? 'start' : 'cancel', revision: node.revision, sha256: digest.value }, props.csrf))
+      notice.value = { text: upgradeLabels[response.state], task: response.task_id }
     } else if (node) {
       const response = await api<{ task_id: string; result_code: string }>(base + '/' + selected + '/lifecycle',
         json({ action: operation, revision: node.revision, endpoint: endpoint.value.trim() }, props.csrf))
@@ -172,11 +184,15 @@ onMounted(async () => {
       <h2 id="relay-detail-heading" ref="detailHeading" tabindex="-1">节点详情 · {{ detail.name }}</h2>
       <div class="control-actions">
         <button v-if="detail.state === 'pending_enrollment'" class="secondary" :disabled="busy" @click="show('reissue')">补发登记凭据</button>
+        <template v-else-if="upgradeHeld">
+          <button v-if="detail.upgrade?.state === 'pending'" class="secondary" :disabled="busy" @click="show('cancel_upgrade')">取消升级</button>
+        </template>
         <template v-else>
           <button v-if="detail.mode === 'enabled'" class="secondary" :disabled="busy" @click="show('drain')">排空</button>
           <button v-if="detail.mode !== 'disabled'" class="secondary" :disabled="busy" @click="show('disable')">停用</button>
           <button v-if="detail.mode !== 'enabled'" class="primary" :disabled="busy" @click="show('resume')">恢复</button>
           <button class="secondary" :disabled="busy" @click="show('change_endpoint')">切换公布地址</button>
+          <button v-if="detail.mode !== 'disabled'" class="secondary" :disabled="busy" @click="show('upgrade')">排空并升级</button>
         </template>
       </div>
     </div>
@@ -186,6 +202,10 @@ onMounted(async () => {
       <div><dt>任务</dt><dd><a :href="'/tasks?task=' + detail.task_id">登记任务</a>
         <a v-if="detail.operation_task_id" :href="'/tasks?task=' + detail.operation_task_id"> · 最近操作任务</a></dd></div>
     </dl>
+    <p v-if="detail.upgrade">
+      <a :href="'/tasks?task=' + detail.upgrade.task_id">升级任务</a> · {{ upgradeLabels[detail.upgrade.state] }}
+      <code>{{ detail.upgrade.candidate_sha256 }}</code>
+    </p>
     <h3>最近探测</h3>
     <div v-if="detail.probes.length" class="table-wrap"><table>
       <thead><tr><th>时间</th><th>端点</th><th>配置版本</th><th>结果</th></tr></thead>
@@ -220,6 +240,12 @@ onMounted(async () => {
         <label for="relay-new-endpoint">新公布地址</label>
         <input id="relay-new-endpoint" v-model.trim="endpoint" required :disabled="busy" placeholder="relay.example.com:21117">
       </div>
+      <div v-else-if="action === 'upgrade'" class="field">
+        <label for="relay-upgrade-digest">候选 hbbr 的 SHA-256</label>
+        <input id="relay-upgrade-digest" v-model.trim="digest" required pattern="[a-f0-9]{64}" maxlength="64" :disabled="busy">
+        <p>中心停止分配新会话，主机在已有连接结束后执行升级。</p>
+      </div>
+      <p v-else-if="action === 'cancel_upgrade'" class="dialog-copy">取消尚未被节点领取的任务。节点保持排空。</p>
       <p v-else-if="action === 'drain'" class="dialog-copy">停止将新会话分配给 {{ detail?.name }}。已建立的会话继续运行。</p>
       <p v-else-if="action === 'resume'" class="dialog-copy">中心将核对 {{ detail?.name }} 的公布地址和签名健康。</p>
       <p v-else class="dialog-copy">{{ detail?.name }}</p>

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	"deskrealm/internal/relayprotocol"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
@@ -39,8 +40,9 @@ func (a *API) relayNodeDetail(w http.ResponseWriter, r *http.Request) {
 	}
 	out := struct {
 		relayNodeSummary
-		Probes   []relayProbeHistory `json:"probes"`
-		Sessions []relaySession      `json:"sessions"`
+		Probes   []relayProbeHistory    `json:"probes"`
+		Sessions []relaySession         `json:"sessions"`
+		Upgrade  *relayprotocol.Upgrade `json:"upgrade,omitempty"`
 	}{Probes: []relayProbeHistory{}, Sessions: []relaySession{}}
 	err := a.withActor(r, false, func(tx pgx.Tx, who actor) error {
 		if !who.PlatformAdmin {
@@ -53,6 +55,12 @@ func (a *API) relayNodeDetail(w http.ResponseWriter, r *http.Request) {
 			return errRelayMissing
 		}
 		if err != nil {
+			return err
+		}
+		upgrade, err := readRelayUpgrade(ctx, tx, id, "")
+		if err == nil {
+			out.Upgrade = &upgrade.Upgrade
+		} else if !errors.Is(err, pgx.ErrNoRows) {
 			return err
 		}
 		rows, err := tx.Query(ctx, `SELECT endpoint,config_version,checked_at,result,COALESCE(task_id::text,'')
@@ -93,20 +101,22 @@ type relayChange struct {
 
 type relayChangeNode struct {
 	relayProbeTarget
-	mode     string
-	revision int64
-	healthy  bool
+	mode        string
+	revision    int64
+	healthy     bool
+	upgradeHeld bool
 }
 
 func relayChangeTarget(ctx context.Context, tx pgx.Tx, id, org string, write bool) (relayChangeNode, error) {
 	node := relayChangeNode{relayProbeTarget: relayProbeTarget{nodeID: id}}
 	query := `SELECT endpoint,build,identity_key,config_version,capacity,mode,revision,COALESCE(` + relayHealthySQL +
-		`,false) FROM relay_nodes WHERE id=$1 AND organization_id=$2`
+		`,false),EXISTS(SELECT 1 FROM relay_upgrades WHERE node_id=relay_nodes.id AND state IN ('pending','claimed'))
+		FROM relay_nodes WHERE id=$1 AND organization_id=$2`
 	if write {
 		query += " FOR UPDATE"
 	}
 	err := tx.QueryRow(ctx, query, id, org).Scan(&node.endpoint, &node.build, &node.key, &node.version,
-		&node.capacity, &node.mode, &node.revision, &node.healthy)
+		&node.capacity, &node.mode, &node.revision, &node.healthy, &node.upgradeHeld)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return node, errRelayMissing
 	}
@@ -156,7 +166,7 @@ func (a *API) changeRelayLifecycle(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return err
 		}
-		if len(current.key) == 0 || current.revision != change.Revision ||
+		if len(current.key) == 0 || current.revision != change.Revision || current.upgradeHeld ||
 			(change.Action == "drain" && current.mode != "enabled") ||
 			(change.Action == "disable" && current.mode == "disabled") ||
 			(change.Action == "resume" && current.mode == "enabled") || change.Endpoint == current.endpoint {
@@ -199,7 +209,7 @@ func (a *API) changeRelayLifecycle(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return err
 		}
-		if node.revision != current.revision || node.version != current.version {
+		if node.revision != current.revision || node.version != current.version || node.upgradeHeld {
 			return errRelayConflict
 		}
 		result := map[string]string{"drain": "relay_draining", "disable": "relay_disabled",

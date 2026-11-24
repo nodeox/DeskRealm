@@ -58,6 +58,8 @@ const results: Record<string, string> = {
   relay_available: '中继已入池', relay_draining: '中继已排空新会话', relay_disabled: '中继已停用',
   relay_resumed: '中继已恢复', relay_endpoint_changed: '公布地址已验证并更新',
   relay_probe_failed: '公布地址探测未通过', relay_health_required: '等待当前配置的签名健康回执',
+  relay_upgrade_pending: '等待中继排空', relay_upgrade_claimed: '节点已领取升级任务',
+  relay_upgrade_succeeded: '中继升级已验证', relay_upgrade_rolled_back: '中继原版本已恢复', relay_upgrade_canceled: '中继升级已取消',
 }
 const steps = { images: '准备镜像', database: '检查数据库', services: '启动服务', health: '验证服务健康' }
 const installStates = { pending: '待执行', running: '执行中', completed: '成功', failed: '失败', interrupted: '已中断' }

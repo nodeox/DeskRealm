@@ -45,6 +45,9 @@ case "${1:-}" in
   relay-enrollment)
     exec python3 -B managed/tests/relay_enrollment.py
     ;;
+  relay-upgrade)
+    exec python3 -B managed/tests/relay_enrollment.py --upgrade
+    ;;
   relay-host)
     scratch=$(mktemp -d "${TMPDIR:-/tmp}/deskrealm-relay.XXXXXX")
     trap 'rm -rf "$scratch"' EXIT
@@ -104,7 +107,7 @@ case "${1:-}" in
     )
     ;;
   *)
-    echo "usage: $0 install-preflight|install-prepare|install-bootstrap|install-offline|install-resume|install-relay|install-task|delivery-tasks|relay-identity|relay-host|relay-enrollment|relay-lifecycle|relay-probes|relay-selection|multi-relay|signed-build|managed-release|windows-installer|center-restore|restore-upgrade" >&2
+    echo "usage: $0 install-preflight|install-prepare|install-bootstrap|install-offline|install-resume|install-relay|install-task|delivery-tasks|relay-identity|relay-host|relay-enrollment|relay-lifecycle|relay-upgrade|relay-probes|relay-selection|multi-relay|signed-build|managed-release|windows-installer|center-restore|restore-upgrade" >&2
     exit 2
     ;;
 esac

@@ -52,7 +52,7 @@ exec docker run --rm --network host \\
 """
 
 
-def verify(binary, scratch, endpoint=None, hbbs=None):
+def verify(binary, scratch, endpoint=None, hbbs=None, upgrade=False):
     cli = scratch / "deskrealm-relay"
     subprocess.run(["go", "build", "-o", cli, "./cmd/deskrealm-relay"], cwd=ROOT, check=True)
     runner = scratch / "run-hbbr"
@@ -89,8 +89,11 @@ def verify(binary, scratch, endpoint=None, hbbs=None):
             "DESKREALM_TEST_HBBS_RUNNER": str(hub_runner),
             "DESKREALM_TEST_NATIVE_HBBS": str(hbbs),
         })
+    if upgrade:
+        env["DESKREALM_TEST_RELAY_UPGRADE"] = "1"
     try:
-        subprocess.run(["bash", "scripts/deskrealm-m1-test", "relay-enrollment"], cwd=ROOT, env=env, check=True)
+        suite = "relay-upgrade" if upgrade else "relay-enrollment"
+        subprocess.run(["bash", "scripts/deskrealm-m1-test", suite], cwd=ROOT, env=env, check=True)
     finally:
         containers = subprocess.check_output(
             ["docker", "ps", "-aq", "--filter", f"label=deskrealm.relay-test={label}"], text=True
@@ -103,6 +106,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--client-probes", action="store_true")
     parser.add_argument("--multi-relay", action="store_true")
+    parser.add_argument("--upgrade", action="store_true")
     args = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix="deskrealm-relay-enrollment-") as directory:
         scratch = Path(directory)
@@ -115,7 +119,7 @@ def main():
         cargo(server, scratch / "cargo", SERVER_IMAGE, "build", "--locked", *bins)
         endpoint = interoperability_binary(source / "client", scratch / "cargo-client", "deskrealm_relay_probes") if args.client_probes or args.multi_relay else None
         binaries = target_directory(server) / "debug"
-        verify(binaries / "hbbr", scratch, endpoint, binaries / "hbbs" if args.multi_relay else None)
+        verify(binaries / "hbbr", scratch, endpoint, binaries / "hbbs" if args.multi_relay else None, args.upgrade)
 
 
 if __name__ == "__main__":

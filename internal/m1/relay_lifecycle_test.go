@@ -317,7 +317,8 @@ func TestRegionalRelayBrowserPostgres(t *testing.T) {
 	if err != nil || !bytes.Contains(reportData, []byte(`"expected": 1`)) || !bytes.Contains(reportData, []byte(`"skipped": 0`)) {
 		t.Fatalf("missing passing Chromium relay test: %v", err)
 	}
-	f.count(t, 1, "SELECT count(*) FROM relay_nodes WHERE id=$1 AND endpoint=$2 AND config_version=2 AND mode='enabled'", a.NodeID, good)
+	f.count(t, 1, "SELECT count(*) FROM relay_nodes WHERE id=$1 AND endpoint=$2 AND config_version=2 AND mode='draining'", a.NodeID, good)
 	f.count(t, 5, "SELECT count(*) FROM audit_events WHERE resource_id=$1 AND source='relay_lifecycle'", a.NodeID)
+	f.count(t, 2, "SELECT count(*) FROM audit_events WHERE resource_id=$1 AND source='relay_upgrade'", a.NodeID)
 	t.Logf("%s", output)
 }

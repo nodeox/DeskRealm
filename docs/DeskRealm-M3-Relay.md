@@ -45,6 +45,29 @@
 
 区域模式在同一 TCP 端口提供验活、会话 RTT 探测和受管会话转发。节点在已配对且仍转发的连接数内执行配置容量，签名验活响应报告当前会话数。
 
+## 排空并升级区域中继
+
+此流程适用于同一构建版本、与现行配置和会话协议兼容的受管 `hbbr` 二进制。中心需要应用中继升级迁移。用节点服务账户启动主管进程，持久挂载节点状态目录，并允许从该目录执行二进制。首次改用此方式时，先通过现有排空流程安排一次服务重启。
+
+```sh
+deskrealm-relay run --managed-upgrades --state /var/lib/deskrealm/relay \
+  --hbbr /usr/local/bin/hbbr
+```
+
+在「区域中继」打开节点详情，选择「排空并升级」，填写已核验的候选文件 SHA-256。中心立即停止向该节点分配新会话。已建立的连接继续按租约运行。升级任务处于待领取时可以取消，取消后节点保持排空。
+
+在该中继主机用同一服务账户提交候选文件，使用控制台升级任务的 ID。
+
+```sh
+deskrealm-relay upgrade --state /var/lib/deskrealm/relay \
+  --task "$TASK_ID" --hbbr /srv/deskrealm/releases/hbbr --sha256 "$SHA256"
+deskrealm-relay upgrade-status --state /var/lib/deskrealm/relay
+```
+
+私有 CA 部署在 `run` 和 `upgrade` 使用相同的 `--ca`。主机会复制并校验候选文件。中心等待已有配对票据到期，确认没有有效且未结束的会话租约，再从公布端点独立验证节点身份和零活动连接。主机也检查本机报告为零才切换。保持中心和中继的系统时钟同步。领取升级时中心要求两端时钟差在 2 秒以内。
+
+候选通过本机验活、签名健康上报及中心端点探测后，任务记录为升级已验证。如果候选失败，主机启动保存在状态目录中的原二进制，由中心复验后记录回滚。升级与回滚结束后，由平台管理员验证任务并选择「恢复」使节点重新接收会话。状态为 `switching` 或 `rolling_back` 时，使用原来的 `run --managed-upgrades` 参数重启可续接记录。监督进程异常终止时，先确认旧 `hbbr` 已退出并释放端口。若原二进制也无法启动，节点保持排空，检查主机日志和状态目录中的已校验文件。状态目录同时保存节点密钥、升级记录和升级前后的二进制。
+
 ## 会话探测轮次
 
 主控使用发起会话的受管用户凭据，受控端使用此会话目标设备的受管设备凭据。两端各自用设备密钥签署加入证明，向 `POST /v1/sessions/{id}/relay-candidates` 提交 `connection_id` 和 `signature`。主控先创建等待轮次，目标设备加入后开启最长两秒的采样窗口。新连接开始时替换此前轮次。
@@ -99,6 +122,7 @@
 ```sh
 bash scripts/deskrealm-m3-test relay-enrollment
 bash scripts/deskrealm-m3-test relay-lifecycle
+bash scripts/deskrealm-m3-test relay-upgrade
 bash scripts/deskrealm-m3-test relay-probes
 bash scripts/deskrealm-m3-test relay-selection
 bash scripts/deskrealm-m3-test multi-relay
