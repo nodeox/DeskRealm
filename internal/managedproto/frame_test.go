@@ -71,7 +71,7 @@ func TestSharedSigningVectors(t *testing.T) {
 			passed[vector.Kind] = true
 		})
 	}
-	if len(passed) != 6 || rejected != 17 {
+	if len(passed) != 8 || rejected != 20 {
 		t.Fatalf("missing fixture coverage: %v, %d rejected", passed, rejected)
 	}
 }

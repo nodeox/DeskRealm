@@ -9,6 +9,8 @@ pub const SESSION_GRANT: u8 = 3;
 pub const CONNECTION_PROOF: u8 = 4;
 pub const POLICY_RECEIPT: u8 = 5;
 pub const SESSION_CONSENT: u8 = 6;
+pub const RELAY_ROUND_JOIN: u8 = 7;
+pub const RELAY_PROBE: u8 = 8;
 
 const PREFIX: &[u8] = b"DR-M2\0\x01";
 
@@ -52,6 +54,19 @@ fn valid_values(kind: u8, f: &[&[u8]]) -> bool {
                 && ((f[6][0] == 1 && f[7][0] == 0) || (f[6][0] == 2 && (1..=7).contains(&f[7][0])))
         }
         SESSION_CONSENT => (1..=0x1f).contains(&f[4][0]),
+        RELAY_ROUND_JOIN => (1..=2).contains(&f[0][0]),
+        RELAY_PROBE => {
+            (1..=2).contains(&f[0][0])
+                && positive(f[6])
+                && f[8].chunks_exact(5).all(|sample| {
+                    let rtt = u32::from_be_bytes(sample[1..].try_into().expect("validated RTT width"));
+                    match sample[0] {
+                        1 => rtt <= 2_000_000,
+                        2..=5 => rtt == 0,
+                        _ => false,
+                    }
+                })
+        }
         _ => false,
     }
 }
@@ -64,6 +79,8 @@ fn widths(kind: u8) -> Option<&'static [usize]> {
         CONNECTION_PROOF => &[1, 32, 16, 16, 32, 32, 32, 1],
         POLICY_RECEIPT => &[16, 16, 16, 8, 32, 8, 1, 1],
         SESSION_CONSENT => &[32, 16, 16, 32, 1],
+        RELAY_ROUND_JOIN => &[1, 16, 16, 16],
+        RELAY_PROBE => &[1, 16, 16, 16, 16, 16, 8, 32, 15],
         _ => return None,
     })
 }

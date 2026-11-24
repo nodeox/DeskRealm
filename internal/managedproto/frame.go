@@ -17,6 +17,8 @@ const (
 	ConnectionProof Kind = 4
 	PolicyReceipt   Kind = 5
 	SessionConsent  Kind = 6
+	RelayRoundJoin  Kind = 7
+	RelayProbe      Kind = 8
 )
 
 const prefix = "DR-M2\x00\x01"
@@ -38,6 +40,8 @@ var fieldWidths = map[Kind][]int{
 	ConnectionProof: {1, digest, uuid, uuid, digest, digest, digest, 1},
 	PolicyReceipt:   {uuid, uuid, uuid, word, digest, word, 1, 1},
 	SessionConsent:  {digest, uuid, uuid, digest, 1},
+	RelayRoundJoin:  {1, uuid, uuid, uuid},
+	RelayProbe:      {1, uuid, uuid, uuid, uuid, uuid, word, digest, 15},
 }
 
 // Encode produces the exact signed bytes. Frame validation checks the wire
@@ -106,7 +110,24 @@ func validValues(kind Kind, f [][]byte) bool {
 			((f[6][0] == 1 && f[7][0] == 0) || (f[6][0] == 2 && f[7][0] > 0 && f[7][0] <= 7))
 	case SessionConsent:
 		return f[4][0] > 0 && f[4][0] <= 31
+	case RelayRoundJoin:
+		return f[0][0] == 1 || f[0][0] == 2
+	case RelayProbe:
+		return (f[0][0] == 1 || f[0][0] == 2) && positive(f[6]) && validRelayProbeSamples(f[8])
 	default:
 		return false
 	}
+}
+
+func validRelayProbeSamples(samples []byte) bool {
+	for offset := 0; offset < len(samples); offset += 5 {
+		rtt := binary.BigEndian.Uint32(samples[offset+1 : offset+5])
+		switch {
+		case samples[offset] == 1 && rtt <= 2_000_000:
+		case samples[offset] >= 2 && samples[offset] <= 5 && rtt == 0:
+		default:
+			return false
+		}
+	}
+	return true
 }

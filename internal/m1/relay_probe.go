@@ -13,16 +13,17 @@ import (
 )
 
 const relayProbeInterval = 5 * time.Second
-const relayHealthySQL = `health_config_version=config_version AND health_at>statement_timestamp()-interval '15 seconds' AND protocol_ready`
+const relayHealthySQL = `relay_nodes.health_config_version=relay_nodes.config_version
+	AND relay_nodes.health_at>statement_timestamp()-interval '15 seconds' AND relay_nodes.protocol_ready`
 const relayStateSQL = `CASE
-	WHEN registered_at IS NULL THEN 'pending_enrollment'
-	WHEN mode='disabled' THEN 'disabled'
-	WHEN mode='draining' THEN 'draining'
+	WHEN relay_nodes.registered_at IS NULL THEN 'pending_enrollment'
+	WHEN relay_nodes.mode='disabled' THEN 'disabled'
+	WHEN relay_nodes.mode='draining' THEN 'draining'
 	WHEN NOT COALESCE(` + relayHealthySQL + `,false) THEN 'awaiting_health'
-	WHEN probe_failures>=3 THEN 'probe_unreachable'
-	WHEN probe_config_version IS DISTINCT FROM config_version
-		OR probe_succeeded_at IS NULL OR probe_succeeded_at<=statement_timestamp()-interval '15 seconds' THEN 'awaiting_probe'
-	WHEN greatest(active_sessions,probe_active_sessions)>=capacity THEN 'at_capacity'
+	WHEN relay_nodes.probe_failures>=3 THEN 'probe_unreachable'
+	WHEN relay_nodes.probe_config_version IS DISTINCT FROM relay_nodes.config_version
+		OR relay_nodes.probe_succeeded_at IS NULL OR relay_nodes.probe_succeeded_at<=statement_timestamp()-interval '15 seconds' THEN 'awaiting_probe'
+	WHEN greatest(relay_nodes.active_sessions,relay_nodes.probe_active_sessions)>=relay_nodes.capacity THEN 'at_capacity'
 	ELSE 'available' END`
 
 type relayProbeTarget struct {

@@ -45,11 +45,22 @@
 
 当前区域模式提供身份验证和候选目录所需的探测监听。双端选点、节点票据和实际会话转发由 04-04 接续。
 
+## 会话探测轮次
+
+主控使用发起会话的受管用户凭据，受控端使用此会话目标设备的受管设备凭据。两端各自用设备密钥签署加入证明，向 `POST /v1/sessions/{id}/relay-candidates` 提交 `connection_id` 和 `signature`。主控先创建等待轮次，目标设备加入后开启最长两秒的采样窗口。新连接开始时替换此前轮次。
+
+`GET /v1/sessions/{id}/relay-candidates?connection_id=…` 返回当前轮次、有效期、快照中的公布地址、公钥、构建及配置版本。候选快照按组织及当前健康、探测、排空与容量状态生成。轮次内配置或资格变动的节点标记为不可用。
+
+两端通过 `POST /v1/sessions/{id}/relay-probes` 各自为每个节点提交一批三个有序采样。请求包含 `connection_id`、`round_id`、`relay_id`、`samples` 和 `signature`。每个采样的 `result` 为 `ok`、`unreachable`、`timeout`、`protocol_mismatch` 或 `missing`。仅成功采样携带 `rtt_us`。至少两个成功采样才计算中位数。加入和报告使用共用的 Go/Rust 签名帧，报告签名覆盖会话、连接、轮次、角色、节点、配置版本及公布端点摘要。
+
+此检查点已提供中心轮次与结果接口。站点及 CIDR 规则、受管客户端采样入口、节点探测授权与实际转发接续开发。
+
 ## 开发验证
 
 ```sh
 bash scripts/deskrealm-m3-test relay-enrollment
 bash scripts/deskrealm-m3-test relay-lifecycle
+bash scripts/deskrealm-m3-test relay-probes
 ```
 
-登记检查构建受管 `hbbr` 并运行两个隔离的 Linux 实例。生命周期检查使用临时 PostgreSQL、受控端点和 Chromium。目标环境的 Linux 中心、中继和双 Windows 验收安排在 M0–M3 开发完成后。
+登记检查构建受管 `hbbr` 并运行两个隔离的 Linux 实例。生命周期检查使用临时 PostgreSQL、受控端点和 Chromium。会话探测检查核对签名帧与中心授权，并由两份独立端点夹具对两套实际 Linux `hbbr` 采样。目标环境的 Linux 中心、中继和双 Windows 验收安排在 M0–M3 开发完成后。

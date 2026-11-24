@@ -15,6 +15,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"deskrealm/internal/relayprotocol"
 )
 
 func relayFixtureListener(t *testing.T) net.Listener {
@@ -71,8 +73,9 @@ func TestRegionalRelayRuntimePostgres(t *testing.T) {
 	if binary == "" || hbbr == "" {
 		t.Skip("run scripts/deskrealm-m3-test relay-enrollment")
 	}
-	ctx, store, _ := postgres(t)
-	h, admin, csrf, _ := adminSession(t, ctx, store)
+	f := newSessionFixture(t)
+	ctx, store, h, admin := f.ctx, f.store, f.h, f.admin
+	csrf := csrfToken(admin.Value)
 	center := httptest.NewTLSServer(h)
 	defer center.Close()
 	scratch := t.TempDir()
@@ -198,6 +201,7 @@ func TestRegionalRelayRuntimePostgres(t *testing.T) {
 	a.published.Store(&a.local)
 	sweep()
 	checkStates("available", "available")
+	sampleRegionalRelays(t, f, a.NodeID, b.NodeID)
 	for _, n := range []node{a, b} {
 		checkCode(t, request(h, "GET", tasksPath+"/"+n.TaskID, "", nil, admin, ""), 200, "relay_available")
 	}
@@ -238,4 +242,60 @@ func TestRegionalRelayRuntimePostgres(t *testing.T) {
 	if err != nil || registrations != 2 || admissions != 2 {
 		t.Fatalf("expected one registration and admission audit per node: %d %d %v", registrations, admissions, err)
 	}
+}
+
+func sampleRegionalRelays(t *testing.T, f sessionFixture, alpha, beta string) {
+	t.Helper()
+	grant := relayRoundSession(t, f, 591)
+	controller, target := f.roundPeers()
+	conn := testSessionUUID(592)
+	checkCode(t, controller.join(t, f.h, grant, conn), 200, "waiting_for_target")
+	response := target.join(t, f.h, grant, conn)
+	checkCode(t, response, 200, "collecting")
+	round := responseValue[relayRound](t, response.Body.Bytes())
+	if len(round.Candidates) != 2 || round.Deadline == nil {
+		t.Fatalf("expected both enrolled native nodes: %+v", round)
+	}
+	ctx, stop := context.WithDeadline(f.ctx, *round.Deadline)
+	defer stop()
+	type measured struct {
+		peer      roundPeer
+		candidate relayRoundCandidate
+		samples   []relayProbeSample
+		err       error
+	}
+	results := make(chan measured, 4)
+	for _, peer := range []roundPeer{controller, target} {
+		for _, candidate := range []relayRoundCandidate{roundCandidate(t, round, alpha), roundCandidate(t, round, beta)} {
+			go func() {
+				result := measured{peer: peer, candidate: candidate, samples: make([]relayProbeSample, 0, 3)}
+				for range 3 {
+					started := time.Now()
+					_, err := relayprotocol.Probe(ctx, candidate.Endpoint, relayprotocol.PublicKey(candidate.PublicKey), candidate.Build)
+					if err != nil {
+						result.err = err
+						break
+					}
+					result.samples = append(result.samples, measuredRTT(uint32(time.Since(started).Microseconds())))
+				}
+				results <- result
+			}()
+		}
+	}
+	for range cap(results) {
+		result := <-results
+		if result.err != nil {
+			t.Fatalf("could not measure native relay %s from role %d: %v", result.candidate.ID, result.peer.role, result.err)
+		}
+		checkCode(t, result.peer.report(t, f.h, grant, round, result.candidate, result.samples), 204, "")
+	}
+	response = controller.get(f.h, grant, conn)
+	checkCode(t, response, 200, round.ID)
+	observed := responseValue[relayRound](t, response.Body.Bytes())
+	for _, candidate := range observed.Candidates {
+		if !candidate.Eligible || candidate.Controller.Median == nil || candidate.Target.Median == nil {
+			t.Fatalf("missing one of the native RTT results: %+v", candidate)
+		}
+	}
+	f.count(t, 4, "SELECT count(*) FROM session_relay_reports WHERE round_id=$1", round.ID)
 }
