@@ -220,3 +220,20 @@ Task 1 接续站点与 CIDR 许可范围、Rust 端点采样入口和节点侧�
 日志保存在本地 Git 目录 `deskrealm-evidence/m3/1b6a28190893121ec8c2bcf1edddac4a1947c143/`。其中 `relay-probes.log` 的 SHA-256 为 `2b7c7e8fc3574ac1477038850195d4376bdc73f59add748820b5ddb399bc74f7`，`m1-all.log` 为 `c0cc1c148a003e347549ee9e216fa53e2d09a604b88942bb65b4dcf34bfee16f`。
 
 Task 1 接续受管客户端的原生采样入口，以及绑定会话、角色和节点的探测凭据。规则目前通过管理员 API 配置。
+
+## 04-04 中继侧探测授权
+
+2026-11-23，候选 `3672befa982631e3e2a7fd9c812bf37165f1c632` 的 `relay-probes`、`relay-enrollment`、`managed-db`、M1 全量回归、全仓 Go 测试和 `go vet` 均通过。
+
+| 检查 | 结果 |
+| --- | --- |
+| 会话和节点边界 | 中心为当前端点角色签发与会话、授权、连接、轮次、节点、配置版本及公布地址绑定的凭据，窗口最长两秒。`deskrealm-relay run` 经中心 HTTPS 取得验签公钥并交给 `hbbr`。 |
+| 有效探测 | 两套 Linux ARM64 `hbbr` 上，两个 Go 端点夹具各获得自己的凭据，分别对两台中继完成三个带随机挑战的持钥往返。四组签名报告入库，两台节点均有双端中位数。 |
+| 拒绝和重放 | 实际节点拒绝错节点、错端点私钥、错中心签名、错公布端点、错配置版本、已消费序号和过期凭据。Go/Rust 签名向量包含超长有效期、零配置版本以及序号越界。轮次结束后中心不再下发凭据。 |
+| 现有路径 | 中心独立健康探测和当前区域中继地址切换用例继续通过。M1 PostgreSQL 和三个 Chromium 场景通过。 |
+
+日志保存在本地 Git 目录 `deskrealm-evidence/m3/3672befa982631e3e2a7fd9c812bf37165f1c632/`。`relay-probes.log` 的 SHA-256 为 `6a41ebbb4068f9e2f0c5b2b51ce1c0efa9941d726a3fea1fc05e0b3d852f4150`，`m1-all.log` 为 `dae597156ae2376e3f8addbe353c35d437dcbdf8d3f5b6479ec734018266f439`。
+
+同目录的 `relay-enrollment.log` SHA-256 为 `8fca02e7cc548dffe667adceb7ff0333d11dfdec49665e665c3b0c08645e6d78`，`managed-db.log` 为 `277e7f8e5671e9389a80d0f8c759eba481dde71a924b771dd6e601ec0d1e178c`。
+
+Task 1 接续 Rust 主控和受控端的采样入口。节点在本地校验，中心撤销后，之前签出的凭据可用到两秒窗口结束。
