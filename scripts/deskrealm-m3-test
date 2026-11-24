@@ -3,6 +3,10 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 case "${1:-}" in
+  center-restore)
+    DESKREALM_TEST_CENTER_BACKUP=1 go test -race -count=1 -v ./internal/m3/install -run '^(TestCenterBackupRestoresOriginalCluster|TestRecoveryRejectsDifferentManifestDigest|TestRecoveryRejectsArchiveChanges)$'
+    exit
+    ;;
   windows-installer)
     go test -race ./internal/windowssetup
     exec env DESKREALM_REQUIRE_OSSLSIGNCODE=1 python3 -B -m unittest discover -v -s managed/tests -p windows_installer_test.py
@@ -95,7 +99,7 @@ case "${1:-}" in
     )
     ;;
   *)
-    echo "usage: $0 install-preflight|install-prepare|install-bootstrap|install-offline|install-resume|install-relay|install-task|delivery-tasks|relay-identity|relay-host|relay-enrollment|relay-lifecycle|relay-probes|relay-selection|multi-relay|signed-build|managed-release|windows-installer" >&2
+    echo "usage: $0 install-preflight|install-prepare|install-bootstrap|install-offline|install-resume|install-relay|install-task|delivery-tasks|relay-identity|relay-host|relay-enrollment|relay-lifecycle|relay-probes|relay-selection|multi-relay|signed-build|managed-release|windows-installer|center-restore" >&2
     exit 2
     ;;
 esac

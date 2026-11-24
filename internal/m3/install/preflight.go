@@ -26,6 +26,8 @@ const usage = `DeskRealm center installer
   deskrealm-install install-record --config FILE
   deskrealm-install import-record --config FILE --actor USERNAME
   deskrealm-install bootstrap-ticket --config FILE
+  deskrealm-install backup --config FILE --output NEW_DIRECTORY
+  deskrealm-install restore-check --backup DIRECTORY --sha256 SHA256 --output NEW_DIRECTORY
 
 Preflight checks configuration, TLS materials, local Docker and host ports.
 Prepare-runtime reuses local Docker or prepares pinned Docker packages on supported Linux hosts.
@@ -35,6 +37,8 @@ Status inspects the persisted deployment and running services.
 Install-record prints the versioned local installation task and step outcomes.
 Import-record submits the local task snapshot to the running center.
 Bootstrap-ticket prints a one-time initialization link for a ready center.
+Backup captures the center identity and PostgreSQL cluster to a private directory.
+Restore-check starts the recovered database in an isolated container and preserves the verified directory.
 `
 
 type portBinding struct {
@@ -199,16 +203,23 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		return encoder.Encode(result)
 	}
 	switch args[0] {
-	case "preflight", "prepare", "install", "status", "bootstrap-ticket", "install-record", "import-record":
+	case "preflight", "prepare", "install", "status", "bootstrap-ticket", "install-record", "import-record", "backup", "restore-check":
 	default:
 		return errors.New("unknown installer command; see --help")
 	}
 	flags := flag.NewFlagSet(args[0], flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	path := flags.String("config", "", "path to the center installation JSON")
-	var actor string
+	var actor, output, backup, sha string
 	if args[0] == "import-record" {
 		flags.StringVar(&actor, "actor", "", "active platform administrator to attribute in the audit log")
+	}
+	if args[0] == "backup" || args[0] == "restore-check" {
+		flags.StringVar(&output, "output", "", "new private destination directory")
+	}
+	if args[0] == "restore-check" {
+		flags.StringVar(&backup, "backup", "", "private center backup directory")
+		flags.StringVar(&sha, "sha256", "", "SHA-256 recorded when the backup was created")
 	}
 	if err := flags.Parse(args[1:]); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -219,13 +230,29 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	if flags.NArg() != 0 {
 		return errors.New("unexpected positional arguments")
 	}
+	encoder := json.NewEncoder(stdout)
+	encoder.SetIndent("", "  ")
+	if args[0] == "restore-check" {
+		if *path != "" {
+			return errors.New("restore-check uses the configuration captured in the backup")
+		}
+		result, err := restoreCenterBackup(ctx, backup, sha, output)
+		if err != nil {
+			return err
+		}
+		return encoder.Encode(result)
+	}
 	c, err := loadConfig(*path, time.Now())
 	if err != nil {
 		return err
 	}
-	encoder := json.NewEncoder(stdout)
-	encoder.SetIndent("", "  ")
 	switch args[0] {
+	case "backup":
+		result, err := centerBackup(ctx, c, output)
+		if err != nil {
+			return err
+		}
+		return encoder.Encode(result)
 	case "prepare":
 		result, err := prepareDeployment(c)
 		if err != nil {

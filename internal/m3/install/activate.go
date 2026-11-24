@@ -22,8 +22,12 @@ import (
 const databaseRecord = "database-ready"
 
 func composeCommand(ctx context.Context, run dockerRunner, center publicDeployment, args ...string) ([]byte, error) {
+	return run(ctx, composeArgs(center, args...)...)
+}
+
+func composeArgs(center publicDeployment, args ...string) []string {
 	command := []string{"compose", "--env-file", "/dev/null", "--project-name", center.Project, "--file", center.ComposeFile}
-	return run(ctx, append(command, args...)...)
+	return append(command, args...)
 }
 
 func lockDeployment(directory string) (*os.File, error) {

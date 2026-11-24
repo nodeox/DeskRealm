@@ -99,6 +99,21 @@ docker compose --env-file /dev/null -f /var/lib/deskrealm/compose.json \
 
 中断后用同一配置重新执行 `install`。备份部署目录时保留 `database-ready`、`install-record.json`、原密钥和 PostgreSQL 数据。安装器按记录核对 PostgreSQL 系统标识，遇到数据缺失或不同实例时停止启动。
 
+## 中心备份和隔离恢复
+
+使用运行中心安装器的主机账号执行备份。源 Compose 的 PostgreSQL 18 服务必须健康且与安装记录的系统标识一致。目标路径必须位于部署目录以外，父目录应已存在。命令以 PostgreSQL 在线物理备份收集数据库及所需 WAL，同时保存中心会合私钥、受管签名种子、TOTP 加密材料、数据库角色凭据、有效配置和安装记录。提供证书模式保存中心的 TLS 文件。输出为私有目录，和数据库及私钥按同等敏感级别保管。将命令输出的 `backup_sha256` 与备份分开留存。
+
+```bash
+deskrealm-install backup --config /srv/deskrealm/center.json \
+  --output /srv/deskrealm-backups/center-001
+deskrealm-install restore-check --backup /srv/deskrealm-backups/center-001 \
+  --sha256 "$backup_sha256" --output /srv/deskrealm-backups/center-001-restored
+```
+
+恢复检查先校验清单、文件摘要、私钥与记录公钥，再在无网络、无对外端口的临时容器里验证 PostgreSQL 文件及 WAL，启动数据库并用应用角色检查初始化状态、用户、设备、策略、任务和审计。数据库干净停机后才输出恢复目录、`center-config.json` 和 `restore-verification.json`。恢复目录保留原部署 ID、Compose 项目、公开地址和数据库系统标识。执行计划性切换时，应先停止原 Compose 项目，再按恢复配置进行部署。隔离恢复检查只启动数据库。
+
+当前恢复覆盖标准安装器生成的中心和 PostgreSQL 主存储。外部反向代理配置、Compose 额外挂载的 Windows 发布目录、OIDC 外部配置及离线镜像载体由各自部署流程保留。会合缓存由设备重新注册填充。当前备份使用带 WAL 的 PostgreSQL TAR 格式，部署额外表空间时须使用相应备份方案。 [PostgreSQL 18 物理备份](https://www.postgresql.org/docs/18/app-pgbasebackup.html) · [备份校验](https://www.postgresql.org/docs/18/app-pgverifybackup.html)
+
 ```sh
 deskrealm-install install-record --config /absolute/path/to/center.json
 ```
