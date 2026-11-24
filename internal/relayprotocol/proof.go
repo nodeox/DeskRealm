@@ -37,8 +37,15 @@ type Health struct {
 	ActiveSessions int    `json:"active_sessions"`
 }
 
-func (e Enrollment) Frame() []byte { return frame("enrollment", e) }
-func (h Health) Frame() []byte     { return frame("health", h) }
+type ConfigRequest struct {
+	NodeID     string `json:"node_id"`
+	Nonce      string `json:"nonce"`
+	ObservedMS int64  `json:"observed_ms"`
+}
+
+func (e Enrollment) Frame() []byte    { return frame("enrollment", e) }
+func (h Health) Frame() []byte        { return frame("health", h) }
+func (r ConfigRequest) Frame() []byte { return frame("configuration", r) }
 
 func frame(purpose string, value any) []byte {
 	// Only the fixed structs above are passed here. Their scalar fields have no custom encoders.

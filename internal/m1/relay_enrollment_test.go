@@ -56,6 +56,11 @@ func TestRelayEnrollmentAndHealthPostgres(t *testing.T) {
 	checkCode(t, request(h, "POST", adminPath, testOrigin, left, member, csrfToken(member.Value)), 403, "forbidden")
 	checkCode(t, request(h, "GET", adminPath, "", nil, member, ""), 403, "forbidden")
 	checkCode(t, request(h, "POST", adminPath, testOrigin, left, admin, ""), 403, "csrf_denied")
+	for _, endpoint := range []string{"[::ffff:0.0.0.0]:21117", "[::ffff:224.0.0.1]:21117", "[::ffff:127.0.0.1%eth0]:21117"} {
+		invalid := left
+		invalid.Endpoint = endpoint
+		checkCode(t, request(h, "POST", adminPath, testOrigin, invalid, admin, csrf), 400, "invalid_task_request")
+	}
 
 	issue := func(input relayRequest) relayCredential {
 		t.Helper()
@@ -147,6 +152,17 @@ func TestRelayEnrollmentAndHealthPostgres(t *testing.T) {
 	if err := store.DB.QueryRow(ctx, "SELECT clock_timestamp()").Scan(&now); err != nil {
 		t.Fatal(err)
 	}
+	configuration := func(proof relayprotocol.ConfigRequest, signer ed25519.PrivateKey) *httptest.ResponseRecorder {
+		return relayNodeRequest(h, "/v1/relays/configuration", "", struct {
+			relayprotocol.ConfigRequest
+			Signature string `json:"signature"`
+		}{proof, signRelay(signer, proof.Frame())})
+	}
+	configProof := relayprotocol.ConfigRequest{NodeID: a.NodeID, Nonce: proofA.Challenge, ObservedMS: now.UnixMilli()}
+	checkCode(t, configuration(configProof, keyB), 401, "managed_identity_denied")
+	checkCode(t, configuration(configProof, keyA), 200, proofA.Endpoint)
+	configProof.ObservedMS = now.Add(-time.Minute).UnixMilli()
+	checkCode(t, configuration(configProof, keyA), 401, "managed_identity_denied")
 	status := relayprotocol.Health{NodeID: a.NodeID, ConfigVersion: 1, Sequence: 1,
 		ObservedMS: now.UnixMilli(), Build: left.Build, ProtocolReady: true, ActiveSessions: 5}
 	checkCode(t, report(status, keyB), 401, "managed_identity_denied")

@@ -44,10 +44,14 @@ func normalizedRelayEndpoint(value string) string {
 		return ""
 	}
 	if ip, err := netip.ParseAddr(host); err == nil {
-		if ip.Zone() != "" || ip.IsUnspecified() || ip.IsMulticast() {
+		if ip.Zone() != "" {
 			return ""
 		}
-		host = ip.Unmap().String()
+		ip = ip.Unmap()
+		if ip.IsUnspecified() || ip.IsMulticast() {
+			return ""
+		}
+		host = ip.String()
 	} else {
 		host = strings.TrimSuffix(strings.ToLower(host), ".")
 		if len(host) == 0 || len(host) > 253 {
@@ -322,6 +326,40 @@ func (a *API) relayHealth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (a *API) relayConfiguration(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		relayprotocol.ConfigRequest
+		Signature string `json:"signature"`
+	}
+	if !readJSON(w, r, &in) {
+		return
+	}
+	if !userIDPattern.MatchString(in.NodeID) || !validToken(in.Nonce) {
+		failure(w, "relay configuration", errManagedIdentity)
+		return
+	}
+	var out relayprotocol.Configuration
+	var key []byte
+	var now time.Time
+	err := a.store.DB.QueryRow(r.Context(), `SELECT id,site,region,endpoint,build,capacity,config_version,identity_key,clock_timestamp()
+		FROM relay_nodes WHERE id=$1 AND registered_at IS NOT NULL`, in.NodeID).Scan(
+		&out.NodeID, &out.Site, &out.Region, &out.Endpoint, &out.Build, &out.Capacity, &out.Version, &key, &now)
+	if errors.Is(err, pgx.ErrNoRows) {
+		err = errManagedIdentity
+	}
+	if err != nil {
+		failure(w, "relay configuration", err)
+		return
+	}
+	window := relayTimestampWindow.Milliseconds()
+	if in.ObservedMS < now.UnixMilli()-window || in.ObservedMS > now.UnixMilli()+window ||
+		!relayprotocol.Verify(key, in.ConfigRequest.Frame(), in.Signature) {
+		failure(w, "relay configuration", errManagedIdentity)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 type relayNodeSummary struct {

@@ -3,6 +3,13 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 case "${1:-}" in
+  relay-host)
+    scratch=$(mktemp -d "${TMPDIR:-/tmp}/deskrealm-relay.XXXXXX")
+    trap 'rm -rf "$scratch"' EXIT
+    go build -o "$scratch/deskrealm-relay" ./cmd/deskrealm-relay
+    DESKREALM_RELAY_TEST_BINARY="$scratch/deskrealm-relay" GOFLAGS="${GOFLAGS:-} -race" bash scripts/deskrealm-m1-test relay-host
+    exit
+    ;;
   relay-identity)
     exec env GOFLAGS="${GOFLAGS:-} -race" bash scripts/deskrealm-m1-test relay-identity
     ;;
@@ -55,7 +62,7 @@ case "${1:-}" in
     )
     ;;
   *)
-    echo "usage: $0 install-preflight|install-prepare|install-bootstrap|install-offline|install-resume|install-relay|install-task|delivery-tasks|relay-identity" >&2
+    echo "usage: $0 install-preflight|install-prepare|install-bootstrap|install-offline|install-resume|install-relay|install-task|delivery-tasks|relay-identity|relay-host" >&2
     exit 2
     ;;
 esac
