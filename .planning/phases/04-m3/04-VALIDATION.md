@@ -187,3 +187,21 @@ Task 1 的节点验活及入池开发验证通过。Task 2 接续排空、停用
 日志保存在本地 Git 目录 `deskrealm-evidence/m3/8977de324e6a50edf30ed93aa735eda190433e35/`。`relay-lifecycle.log` SHA-256 为 `6245279a7b98871c8e9c8064559e94042d115d1fe7e29b08823bcdc58bdb2f58`，`relay-enrollment.log` 为 `1dee8b124b6cd556a6d115212d2efbb58e7e12120acb6cef805eedd735f7fbaf`，`m1-all.log` 为 `a105e4bd9abb27821105e72d0d8a5f9c7988776ed4571306932a3e35b07babcd`。
 
 04-03 开发验证完成。04-04 接续区域会话候选、票据与实际转发。
+
+## 04-04 会话探测轮次与双端报告
+
+2026-11-23，候选 `70723e0f1dbaef0514b766547083dea603b123f9` 运行 `bash scripts/deskrealm-m3-test relay-probes`，退出 0。
+
+| 检查 | 结果 |
+| --- | --- |
+| 会话与候选范围 | 临时 PostgreSQL 18.7 验证主控先建立轮次、受控端签名加入后开启两秒窗口。候选快照按组织、节点生命周期、容量和中心探测筛选。排空、满载及签名健康过期的节点不入集合，轮次中排空的节点退出有效结果。 |
+| 结果及回放 | 各端按节点提交三个签名采样。两个成功时取两值平均数，三个成功时取居中值。超时、不可达、缺样和样本不足保留状态。拒绝错端、错轮次、错地址、错配置版本、重复、过窗和撤销后的请求。新连接生成新版本轮次。 |
+| Go 与 Rust 签名 | 两套实现均通过加入与采样报告向量，以及无效角色、失败采样夹带 RTT、RTT 越界的反向向量。 |
+| 两套实际中继 | Linux ARM64 Docker 启动两套锁定补丁的 `hbbr`。Go 测试中的主控和受控端分别对两节点各做三次真实 TCP 往返并验证节点签名，四组报告通过会话 API 入库，两节点均有双端中位数。 |
+| 回归 | `managed-db` 的 12 项具名竞态测试通过，涵盖原有规则、设备身份、会话核销、租约与撤销。M1 全量 Go、Vue 类型检查和 Chromium 门禁通过。 |
+
+`relay-probes.log` 和 `managed-db.log` 保存在本地 Git 目录 `deskrealm-evidence/m3/70723e0f1dbaef0514b766547083dea603b123f9/`，SHA-256 分别为 `0c7291f0bfd87e78480ded6250aaa953c55e7f214b632b2c0ff9ad760464527e` 和 `277e7f8e5671e9389a80d0f8c759eba481dde71a924b771dd6e601ec0d1e178c`。
+
+同目录的 `m1-all.log` SHA-256 为 `df734bffa1f5966cc1cdaa1a3c470995f78d4763df6a963b142d663afd5a17a0`。
+
+Task 1 接续站点与 CIDR 许可范围、Rust 端点采样入口和节点侧探测凭据。最低双端 RTT 选点与区域转发由 Task 2 接入。
