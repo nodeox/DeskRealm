@@ -19,6 +19,10 @@ case "${1:-}" in
   managed-release)
     exec env GOFLAGS="${GOFLAGS:-} -race" bash scripts/deskrealm-m1-test windows-release
     ;;
+  windows-rollout)
+    npm --prefix web run build
+    exec env DESKREALM_WINDOWS_ROLLOUT_BROWSER=1 GOFLAGS="${GOFLAGS:-} -race" bash scripts/deskrealm-m1-test windows-release
+    ;;
   signed-build)
     python3 -B -m unittest discover -v -s managed/tests -p windows_build_test.py
     python3 -B -m unittest discover -v -s managed/tests -p windows_package_test.py
@@ -107,7 +111,7 @@ case "${1:-}" in
     )
     ;;
   *)
-    echo "usage: $0 install-preflight|install-prepare|install-bootstrap|install-offline|install-resume|install-relay|install-task|delivery-tasks|relay-identity|relay-host|relay-enrollment|relay-lifecycle|relay-upgrade|relay-probes|relay-selection|multi-relay|signed-build|managed-release|windows-installer|center-restore|restore-upgrade" >&2
+    echo "usage: $0 install-preflight|install-prepare|install-bootstrap|install-offline|install-resume|install-relay|install-task|delivery-tasks|relay-identity|relay-host|relay-enrollment|relay-lifecycle|relay-upgrade|relay-probes|relay-selection|multi-relay|signed-build|managed-release|windows-installer|windows-rollout|center-restore|restore-upgrade" >&2
     exit 2
     ;;
 esac

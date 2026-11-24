@@ -1,0 +1,30 @@
+diff --git a/libs/base/src/deskrealm_endpoint/runtime.rs b/libs/base/src/deskrealm_endpoint/runtime.rs
+index 02dfb57..4e45418 100644
+--- a/libs/base/src/deskrealm_endpoint/runtime.rs
++++ b/libs/base/src/deskrealm_endpoint/runtime.rs
+@@ -163,12 +163,22 @@ impl Authority {
+     }
+ 
+     pub async fn heartbeat(&self, credential: &DeviceCredential, build: &str) -> ResultType<()> {
++        let mut heartbeat = serde_json::json!({
++            "device_id": credential.device.to_string(), "reported_build": build,
++        });
++        if cfg!(windows) {
++            if let Ok(bundle) = std::env::var("DESKREALM_MANAGED_BUNDLE_SHA256") {
++                if bundle.len() == 64
++                    && bundle.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
++                {
++                    heartbeat["bundle_sha256"] = bundle.into();
++                }
++            }
++        }
+         self.post(
+             "/v1/managed/devices/heartbeat",
+             credential.bearer(),
+-            serde_json::json!({
+-                "device_id": credential.device.to_string(), "reported_build": build,
+-            }),
++            heartbeat,
+             &[204],
+         )
+         .await?;

@@ -107,7 +107,7 @@ func (a *API) issueWindowsEnrollment(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return err
 		}
-		if record.Packages[in.Arch].File == "" || !allowed ||
+		if record.RolloutOnly || record.Packages[in.Arch].File == "" || !allowed ||
 			(token.ID != "" && (record.Installer == nil || record.Installer.Installers[in.Arch].File == "")) {
 			return errWindowsReleaseMissing
 		}

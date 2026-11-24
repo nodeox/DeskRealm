@@ -22,11 +22,12 @@ type windowsRelease struct {
 	Published   time.Time                          `json:"published_at"`
 	Revoked     *time.Time                         `json:"revoked_at,omitempty"`
 	Installer   *windowsInstallerPublication       `json:"installer_publication,omitempty"`
+	RolloutOnly bool                               `json:"rollout_only,omitempty"`
 	manifestSHA string
 	task        string
 }
 
-const windowsReleaseColumns = `SELECT r.id,r.version,r.signature_scope,r.packages,r.published_at,r.revoked_at,r.installer_publication,r.manifest_sha256,r.task_id`
+const windowsReleaseColumns = `SELECT r.id,r.version,r.signature_scope,r.packages,r.published_at,r.revoked_at,r.installer_publication,r.manifest_sha256,r.task_id,r.rollout_only`
 
 const windowsReleaseAccess = ` FROM windows_releases r WHERE r.organization_id=$1 AND ($3 OR (
 	r.revoked_at IS NULL AND EXISTS (
@@ -37,7 +38,7 @@ const windowsReleaseAccess = ` FROM windows_releases r WHERE r.organization_id=$
 func scanWindowsRelease(row pgx.Row) (windowsRelease, error) {
 	var result windowsRelease
 	err := row.Scan(&result.ID, &result.Version, &result.Scope, &result.Packages, &result.Published, &result.Revoked,
-		&result.Installer, &result.manifestSHA, &result.task)
+		&result.Installer, &result.manifestSHA, &result.task, &result.RolloutOnly)
 	return result, err
 }
 
@@ -138,7 +139,10 @@ func (a *API) publishWindowsRelease(w http.ResponseWriter, r *http.Request) {
 		failure(w, "publish Windows release", errTaskMissing)
 		return
 	}
-	if !readJSON(w, r, &struct{}{}) {
+	var input struct {
+		RolloutOnly bool `json:"rollout_only"`
+	}
+	if !readJSON(w, r, &input) {
 		return
 	}
 	ctx := r.Context()
@@ -164,6 +168,10 @@ func (a *API) publishWindowsRelease(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if release.ID != "" {
+		if release.RolloutOnly != input.RolloutOnly {
+			failure(w, "publish Windows release", errTaskConflict)
+			return
+		}
 		writeJSON(w, http.StatusOK, release)
 		return
 	}
@@ -188,15 +196,18 @@ func (a *API) publishWindowsRelease(w http.ResponseWriter, r *http.Request) {
 		}
 		release, err = readPublishedManifest(ctx, tx, who.Organization, detail.ManifestSHA)
 		if err == nil {
+			if release.RolloutOnly != input.RolloutOnly {
+				return errTaskConflict
+			}
 			return nil
 		}
 		if !errors.Is(err, pgx.ErrNoRows) {
 			return err
 		}
-		release = windowsRelease{Version: manifest.Approval.Version, Scope: manifest.Scope, Packages: manifest.Packages}
+		release = windowsRelease{Version: manifest.Approval.Version, Scope: manifest.Scope, Packages: manifest.Packages, RolloutOnly: input.RolloutOnly}
 		if err := tx.QueryRow(ctx, `INSERT INTO windows_releases(organization_id,task_id,manifest_sha256,version,signature_scope,
-			packages,verifier_key_sha256) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING id,published_at`,
-			who.Organization, task, detail.ManifestSHA, release.Version, release.Scope, release.Packages, detail.VerifierKey).
+			packages,verifier_key_sha256,rollout_only) VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id,published_at`,
+			who.Organization, task, detail.ManifestSHA, release.Version, release.Scope, release.Packages, detail.VerifierKey, input.RolloutOnly).
 			Scan(&release.ID, &release.Published); err != nil {
 			return err
 		}
@@ -295,7 +306,7 @@ func (a *API) downloadWindowsArtifact(w http.ResponseWriter, r *http.Request, in
 		return
 	}
 	snapshot, pkg, published := release.artifact(arch, installer)
-	if pkg.File == "" {
+	if release.RolloutOnly || pkg.File == "" {
 		failure(w, "download Windows release", errWindowsReleaseMissing)
 		return
 	}
@@ -321,7 +332,7 @@ func (a *API) downloadWindowsArtifact(w http.ResponseWriter, r *http.Request, in
 			return err
 		}
 		currentSnapshot, currentPackage, _ := current.artifact(arch, installer)
-		if current.Revoked != nil || currentSnapshot != snapshot || currentPackage != pkg {
+		if current.Revoked != nil || current.RolloutOnly || currentSnapshot != snapshot || currentPackage != pkg {
 			return errWindowsReleaseMissing
 		}
 		if r.Method == http.MethodGet {

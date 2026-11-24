@@ -122,7 +122,19 @@ func run(args []string) error {
 	desktop := exec.Command(filepath.Join(install, "rustdesk.exe"))
 	desktop.Dir = install
 	desktop.Env = desktopEnvironment(desktop.Environ(), profile.Center, registered, id, filepath.Join(stateDir, seedName))
+	if bundle := installedBundle(local, install); bundle != "" {
+		desktop.Env = append(desktop.Env, "DESKREALM_MANAGED_BUNDLE_SHA256="+bundle)
+	}
 	return desktop.Run()
+}
+
+func installedBundle(local, install string) string {
+	want := filepath.Join(local, "Programs", "DeskRealm", "releases")
+	name := filepath.Base(install)
+	if strings.EqualFold(filepath.Dir(install), want) && windowsdelivery.ValidDigest(name) {
+		return name
+	}
+	return ""
 }
 
 func prepare(state *os.Root, id string) (ed25519.PrivateKey, error) {
@@ -215,6 +227,7 @@ func desktopEnvironment(in []string, center windowsdelivery.Center, r registrati
 		"DESKREALM_MANAGED_DEVICE_ID": r.Device, "DESKREALM_MANAGED_ORGANIZATION_ID": r.Organization,
 		"DESKREALM_MANAGED_DEVICE_SEED_FILE": seed, "DESKREALM_MANAGED_CA_FILE": "",
 		"DESKREALM_MANAGED_RELAY_ID": "", "DESKREALM_MANAGED_RELAY_ADDRESS": "",
+		"DESKREALM_MANAGED_BUNDLE_SHA256": "",
 	}
 	if relay := center.DefaultRelay; relay != nil {
 		values["DESKREALM_MANAGED_RELAY_ID"] = relay.ID

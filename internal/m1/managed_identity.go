@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"deskrealm/internal/managedproto"
+	"deskrealm/internal/windowsdelivery"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -407,11 +408,13 @@ func (a *API) managedHeartbeat(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		Device string `json:"device_id"`
 		Build  string `json:"reported_build"`
+		Bundle string `json:"bundle_sha256"`
 	}
 	if !readJSON(w, r, &in) {
 		return
 	}
-	if !userIDPattern.MatchString(in.Device) || !reportedBuild.MatchString(in.Build) {
+	if !userIDPattern.MatchString(in.Device) || !reportedBuild.MatchString(in.Build) ||
+		(in.Bundle != "" && !windowsdelivery.ValidDigest(in.Bundle)) {
 		writeError(w, http.StatusBadRequest, "invalid_heartbeat")
 		return
 	}
@@ -426,9 +429,9 @@ func (a *API) managedHeartbeat(w http.ResponseWriter, r *http.Request) {
 			return err
 		}
 		tag, err := tx.Exec(ctx, `UPDATE devices SET managed_heartbeat_at=clock_timestamp(),
-			managed_heartbeat_epoch=$2,managed_reported_build=$3,managed_heartbeat_protocol=$5
+			managed_heartbeat_epoch=$2,managed_reported_build=$3,managed_heartbeat_protocol=$5,managed_bundle_sha=NULLIF($6,'')
 			WHERE id=$1 AND $4::timestamptz>clock_timestamp()`,
-			d.ID, d.Epoch, in.Build, expires, protocol)
+			d.ID, d.Epoch, in.Build, expires, protocol, in.Bundle)
 		if err == nil && tag.RowsAffected() != 1 {
 			return errManagedIdentity
 		}

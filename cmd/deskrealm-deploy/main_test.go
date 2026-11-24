@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -26,6 +27,7 @@ func TestDeploymentToolPublishesOnlyVerifiedOutputs(t *testing.T) {
 	install := "test signed installer"
 	sum := sha256.Sum256([]byte(install))
 	base := "/v1/deployment/windows-releases/" + release
+	var rolloutOnly atomic.Bool
 	receipt := enrollmentReceipt{Deployment: deployment, Group: group, Release: release, Platform: "windows-arm64",
 		State: "issued", Credential: credential, Expires: time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC)}
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -36,13 +38,15 @@ func TestDeploymentToolPublishesOnlyVerifiedOutputs(t *testing.T) {
 		}
 		switch r.Method + " " + r.URL.Path {
 		case "GET " + base:
-			_ = json.NewEncoder(w).Encode(map[string]any{"id": release, "installer_publication": map[string]any{
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": release, "rollout_only": rolloutOnly.Load(), "installer_publication": map[string]any{
 				"installers": map[string]any{
 					"arm64": map[string]any{"file": "DeskRealm-Setup-arm64.exe", "bytes": len(install), "sha256": hex.EncodeToString(sum[:])},
 					"x64":   map[string]any{"file": "DeskRealm-Setup-x64.exe", "bytes": len(install), "sha256": hex.EncodeToString(sum[:])},
 				},
 			}})
 		case "GET " + base + "/installers/arm64":
+			_, _ = io.WriteString(w, install)
+		case "GET " + base + "/rollouts/" + deployment + "/" + group:
 			_, _ = io.WriteString(w, install)
 		case "GET " + base + "/installers/x64":
 			_, _ = io.WriteString(w, "changed")
@@ -94,6 +98,19 @@ func TestDeploymentToolPublishesOnlyVerifiedOutputs(t *testing.T) {
 	if _, err := os.Stat(o.output); !os.IsNotExist(err) {
 		t.Fatalf("left unverified installer: %v", err)
 	}
+	rolloutOnly.Store(true)
+	o.arch, o.output = "arm64", filepath.Join(dir, "batch.exe")
+	if err := c.execute("fetch", o, &out); err == nil {
+		t.Fatal("used an ordinary download for a batch-only release")
+	}
+	o.rollout, o.device = deployment, group
+	if err := c.execute("fetch", o, &out); err != nil {
+		t.Fatal(err)
+	}
+	if raw, err := os.ReadFile(o.output); err != nil || string(raw) != install {
+		t.Fatalf("wrong batch installer: %v", err)
+	}
+	rolloutOnly.Store(false)
 	o.output = filepath.Join(dir, "deployment.json")
 	for range 2 {
 		if err := c.execute("issue", o, &out); err != nil {

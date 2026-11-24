@@ -31,6 +31,7 @@ var (
 
 type options struct {
 	center, tokenFile, release, group, deployment, arch, target, output, purpose string
+	rollout, device                                                              string
 	lifetime                                                                     int
 }
 
@@ -75,6 +76,8 @@ func run(args []string, out io.Writer) error {
 	case "fetch":
 		flags.StringVar(&o.arch, "arch", "", "x64 or arm64")
 		flags.StringVar(&o.output, "output", "", "installer destination")
+		flags.StringVar(&o.rollout, "rollout", "", "Windows rollout task UUID")
+		flags.StringVar(&o.device, "device", "", "enrolled device UUID in the rollout")
 	case "issue":
 		flags.StringVar(&o.group, "group", "", "authorized device group UUID")
 		flags.StringVar(&o.target, "target", "", "public device file from DeskRealm.exe prepare")
@@ -93,6 +96,9 @@ func run(args []string, out io.Writer) error {
 	if flags.NArg() != 0 || !uuid.MatchString(o.release) ||
 		(args[0] != "fetch" && !uuid.MatchString(o.deployment)) {
 		return errors.New("release and deployment must be UUIDs")
+	}
+	if (o.rollout != "" || o.device != "") && (!uuid.MatchString(o.rollout) || !uuid.MatchString(o.device)) {
+		return errors.New("rollout fetch requires both rollout and device UUIDs")
 	}
 	origin, err := url.Parse(o.center)
 	if err != nil || origin.Scheme != "https" || origin.Hostname() == "" ||
@@ -245,11 +251,15 @@ func (c deploymentClient) fetch(o options) error {
 		return err
 	}
 	var release struct {
-		ID        string                             `json:"id"`
-		Installer *windowsdelivery.InstallerEvidence `json:"installer_publication"`
+		ID          string                             `json:"id"`
+		Installer   *windowsdelivery.InstallerEvidence `json:"installer_publication"`
+		RolloutOnly bool                               `json:"rollout_only"`
 	}
 	if json.Unmarshal(raw, &release) != nil || release.ID != o.release || release.Installer == nil {
 		return errors.New("signed installer is unavailable")
+	}
+	if release.RolloutOnly != (o.rollout != "") {
+		return errors.New("download must use the published release distribution mode")
 	}
 	pkg := release.Installer.Installers[o.arch]
 	if pkg.File != "DeskRealm-Setup-"+o.arch+".exe" || !windowsdelivery.ValidDigest(pkg.SHA) ||
@@ -260,7 +270,11 @@ func (c deploymentClient) fetch(o options) error {
 	if err != nil {
 		return err
 	}
-	file, err := c.request("GET", "/installers/"+o.arch, nil, 200)
+	endpoint := "/installers/" + o.arch
+	if o.rollout != "" {
+		endpoint = "/rollouts/" + o.rollout + "/" + o.device
+	}
+	file, err := c.request("GET", endpoint, nil, 200)
 	if err != nil {
 		return err
 	}

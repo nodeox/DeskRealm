@@ -39,6 +39,11 @@ type Task = TaskSummary & {
   attempts: Attempt[]
   installation?: { deployment_id: string; revision: number; steps: InstallStep[] }
   windows_delivery?: WindowsDelivery
+  windows_rollout?: {
+    release_id: string; rollback_release_id?: string; batch: number; batches: number; revision: number
+    state: 'active' | 'ready' | 'paused' | 'succeeded' | 'canceled'; deadline: string
+    devices: { device_id: string; batch: number; target_id: string }[]
+  }
 }
 
 const props = defineProps<{ csrf: string; admin: boolean; windowsReleaseEnabled: boolean }>()
@@ -60,7 +65,12 @@ const results: Record<string, string> = {
   relay_probe_failed: '公布地址探测未通过', relay_health_required: '等待当前配置的签名健康回执',
   relay_upgrade_pending: '等待中继排空', relay_upgrade_claimed: '节点已领取升级任务',
   relay_upgrade_succeeded: '中继升级已验证', relay_upgrade_rolled_back: '中继原版本已恢复', relay_upgrade_canceled: '中继升级已取消',
+  windows_batch_waiting: '等待放行', windows_batch_open: '可获取安装器', windows_batch_healthy: '版本与健康已验证',
+  windows_batch_device_changed: '设备身份或所属组已变更', windows_batch_release_revoked: '发布已撤回',
+  windows_batch_health_timeout: '未在期限内收到健康结果', windows_batch_install_failed: '运维报告安装失败',
+  windows_batch_canceled: '发布已取消', windows_batch_rollback_verified: '原版本已验证',
 }
+const rolloutStates = { active: '当前批次已放行', ready: '可放行下一批', paused: '已暂停', succeeded: '全部通过', canceled: '已取消' }
 const steps = { images: '准备镜像', database: '检查数据库', services: '启动服务', health: '验证服务健康' }
 const installStates = { pending: '待执行', running: '执行中', completed: '成功', failed: '失败', interrupted: '已中断' }
 const base = '/v1/admin/tasks'
@@ -87,6 +97,7 @@ const windowsDigest = ref('')
 const windowsError = ref('')
 const releaseDialog = ref<HTMLDialogElement>()
 const releaseError = ref('')
+const rolloutOnly = ref(false)
 const published = ref('')
 
 function message(cause: unknown) {
@@ -148,11 +159,30 @@ async function publishWindows() {
   busy.value = true
   releaseError.value = ''
   try {
-    const release = await api<{ id: string }>(base + '/' + task.value.id + '/windows-release', json({}, props.csrf))
+    const release = await api<{ id: string }>(base + '/' + task.value.id + '/windows-release', json({ rollout_only: rolloutOnly.value }, props.csrf))
     published.value = release.id
     releaseDialog.value?.close()
   } catch (cause) {
     releaseError.value = message(cause)
+  } finally {
+    busy.value = false
+  }
+}
+
+async function changeRollout(action: string, device = '') {
+  const current = task.value
+  if (!current?.windows_rollout || busy.value) return
+  if (action === 'cancel' && !window.confirm('取消尚未执行的发布并保留已有结果？')) return
+  if (action === 'fail' && !window.confirm('记录此设备安装失败并暂停后续批次？')) return
+  busy.value = true
+  error.value = ''
+  try {
+    await api(base + '/' + current.id + '/windows-rollout',
+      json({ action, revision: current.windows_rollout.revision, device_id: device }, props.csrf))
+    await readDetail(current.id)
+    await readList()
+  } catch (cause) {
+    error.value = message(cause)
   } finally {
     busy.value = false
   }
@@ -262,11 +292,23 @@ onMounted(async () => {
       <div v-if="task.installation"><dt>部署 ID</dt><dd><code>{{ task.installation.deployment_id }}</code></dd></div>
       <div v-if="task.installation"><dt>记录修订</dt><dd>{{ task.installation.revision }}</dd></div>
     </dl>
+    <section v-if="task.windows_rollout">
+      <h3>批次 {{ task.windows_rollout.batch }} / {{ task.windows_rollout.batches }} · {{ rolloutStates[task.windows_rollout.state] }}</h3>
+      <p>发布 ID <code>{{ task.windows_rollout.release_id }}</code></p>
+      <p v-if="task.windows_rollout.rollback_release_id">回滚发布 ID <code>{{ task.windows_rollout.rollback_release_id }}</code></p>
+      <p v-if="task.windows_rollout.state === 'active'">健康检查截止 {{ formatTime(task.windows_rollout.deadline) }}</p>
+      <div v-if="!['canceled', 'succeeded'].includes(task.windows_rollout.state)" class="control-actions">
+        <button class="secondary" :disabled="busy" @click="changeRollout('review')">核对设备结果</button>
+        <button v-if="task.windows_rollout.state === 'ready'" class="primary" :disabled="busy" @click="changeRollout('advance')">放行下一批</button>
+        <button v-if="task.windows_rollout.state === 'paused' && !task.queued" class="primary" :disabled="busy" @click="changeRollout('retry')">重试本批失败设备</button>
+        <button class="secondary" :disabled="busy" @click="changeRollout('cancel')">取消待执行设备</button>
+      </div>
+    </section>
     <section v-if="task.windows_delivery" class="windows-evidence" aria-labelledby="windows-evidence-heading">
       <h3 id="windows-evidence-heading">构建与签名证据</h3>
       <p v-if="published" class="inline-success" role="status">开发包已发布。<a href="/windows-releases">查看 Windows 发布</a></p>
       <button v-else-if="admin && windowsReleaseEnabled && task.windows_delivery.verified_at" type="button" class="primary"
-        :disabled="busy" @click="releaseError = ''; releaseDialog?.showModal()">发布已验证开发包</button>
+        :disabled="busy" @click="releaseError = ''; rolloutOnly = false; releaseDialog?.showModal()">发布已验证开发包</button>
       <dl>
         <div><dt>版本</dt><dd>{{ task.windows_delivery.manifest.approval.version }}</dd></div>
         <div><dt>品牌模板</dt><dd>{{ task.windows_delivery.manifest.approval.brand.name }}（{{ task.windows_delivery.manifest.approval.brand.id }} · 修订 {{ task.windows_delivery.manifest.approval.brand.revision }}）</dd></div>
@@ -311,14 +353,21 @@ onMounted(async () => {
               <label v-if="target.can_retry || target.can_cancel" class="control-actions"><input v-model="selected" type="checkbox" :value="target.id" :disabled="busy"> {{ target.object_key }}</label>
               <a v-else-if="task.kind === 'relay_enrollment' || task.kind === 'relay_lifecycle'" :href="'/relays?node=' + target.object_key">{{ target.object_key }}</a>
               <span v-else>{{ target.object_key }}</span>
+              <div v-if="task.windows_rollout" class="muted">第 {{ task.windows_rollout.devices.find(device => device.target_id === target.id)?.batch }} 批</div>
               <div v-if="target.operation_id" class="muted">操作 ID <code>{{ target.operation_id }}</code></div>
             </td>
-            <td>{{ task.kind === 'relay_enrollment' && target.state === 'waiting' ? '待执行' : states[target.state] }}</td>
-            <td>{{ results[target.result_code] ?? '—' }}</td>
+            <td>{{ (task.kind === 'relay_enrollment' || task.windows_rollout) && target.state === 'waiting' ? '待执行' : states[target.state] }}</td>
+            <td>{{ results[target.result_code] ?? '—' }}
+              <template v-if="task.windows_rollout && !['canceled', 'succeeded'].includes(task.windows_rollout.state)">
+                <button v-if="target.state === 'queued'" class="secondary" :disabled="busy" @click="changeRollout('fail', target.object_key)">记录安装失败</button>
+                <button v-if="target.state === 'failed' && target.result_code !== 'windows_batch_rollback_verified' && task.windows_rollout.rollback_release_id"
+                  class="secondary" :disabled="busy" @click="changeRollout('confirm_rollback', target.object_key)">核对回滚</button>
+              </template>
+            </td>
             <td>
               <div v-for="attempt in task.attempts.filter(row => row.target_id === target.id)" :key="attempt.sequence">
                 <details>
-                  <summary>{{ task.kind === 'delivery' ? '第 ' + attempt.sequence + ' 次尝试' : attempt.sequence ? '第 ' + attempt.sequence + ' 次重试' : '首次处理' }} · {{ attempt.result_code ? results[attempt.result_code] : '执行中' }}</summary>
+                  <summary>{{ task.kind === 'delivery' || task.windows_rollout ? '第 ' + attempt.sequence + ' 次尝试' : attempt.sequence ? '第 ' + attempt.sequence + ' 次重试' : '首次处理' }} · {{ attempt.result_code ? results[attempt.result_code] : '执行中' }}</summary>
                   <div>开始于 {{ formatTime(attempt.started_at) }}</div>
                   <div v-if="attempt.finished_at">完成于 {{ formatTime(attempt.finished_at) }}</div>
                   <div v-if="attempt.id"><code>{{ attempt.id }}</code></div>
@@ -335,7 +384,9 @@ onMounted(async () => {
   <dialog ref="releaseDialog" aria-labelledby="release-dialog-heading" @cancel.prevent="!busy && releaseDialog?.close()">
     <form @submit.prevent="publishWindows">
       <h2 id="release-dialog-heading">确认发布开发包</h2>
-      <p>已批准的目标设备组可下载此版本的 x64 和 ARM64 开发 ZIP。</p>
+      <label class="control-actions"><input type="checkbox" v-model="rolloutOnly">仅通过分批任务分发</label>
+      <p v-if="rolloutOnly">发布签名安装器后，已获准的当前批次可通过部署工具获取。</p>
+      <p v-else>已批准的目标设备组可下载此版本的 x64 和 ARM64 开发 ZIP。</p>
       <p v-if="releaseError" class="error" role="alert">{{ releaseError }}</p>
       <div class="dialog-actions">
         <button type="button" class="secondary" :disabled="busy" @click="releaseDialog?.close()">取消</button>

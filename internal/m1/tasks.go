@@ -141,6 +141,7 @@ func (a *API) getTask(w http.ResponseWriter, r *http.Request) {
 		Attempts        []taskAttempt         `json:"attempts"`
 		Installation    *installrecord.Record `json:"installation,omitempty"`
 		WindowsDelivery *windowsTaskDetail    `json:"windows_delivery,omitempty"`
+		WindowsRollout  *windowsRollout       `json:"windows_rollout,omitempty"`
 	}{}
 	err := a.withActor(r, false, func(tx pgx.Tx, who actor) error {
 		rows, err := tx.Query(ctx, taskSummaries+` AND t.id=$4`+taskSummaryGroup, who.Organization, who.ID, who.PlatformAdmin, id)
@@ -172,6 +173,13 @@ func (a *API) getTask(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				return err
 			}
+		}
+		if result.Kind == "windows_rollout" {
+			rollout, err := readWindowsRollout(ctx, tx, who.Organization, id)
+			if err != nil {
+				return err
+			}
+			result.WindowsRollout = &rollout
 		}
 		canRetry := who.PlatformAdmin && a.store.taskRetryEnabled(result.Kind)
 		rows, err = tx.Query(ctx, `SELECT id,object_key,state,result_code,($2 AND retryable),version,
