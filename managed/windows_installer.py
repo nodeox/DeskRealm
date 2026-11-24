@@ -115,7 +115,7 @@ def verify(signed, unsigned, host, ca, signer, authenticode, openssl):
                                       encoding="utf-8", errors="replace")
             print(verified.stdout, file=sys.stderr, end="")
             verified.check_returncode()
-            digests = re.findall(r"^Message digest algorithm\s*:\s*(\w+)\s*$", verified.stdout, re.MULTILINE)
+            digests = re.findall(r"^[ \t]*Message digest algorithm[ \t]*:[ \t]*(\w+)[ \t]*$", verified.stdout, re.MULTILINE)
             require(len(digests) >= 2 and set(digests) == {"SHA256"},
                     f"{arch}: Authenticode and image digests must use SHA-256")
             require(matches_file(submitted, size, digest), f"{arch}: installer changed during verification")
