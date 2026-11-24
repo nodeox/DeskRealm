@@ -9,6 +9,14 @@ pub const SESSION_GRANT: u8 = 3;
 pub const CONNECTION_PROOF: u8 = 4;
 pub const POLICY_RECEIPT: u8 = 5;
 pub const SESSION_CONSENT: u8 = 6;
+pub const RELAY_ROUND_JOIN: u8 = 7;
+pub const RELAY_PROBE: u8 = 8;
+pub const RELAY_PROBE_PERMIT: u8 = 9;
+pub const RELAY_PROBE_HOLDER: u8 = 10;
+pub const RELAY_SELECTION: u8 = 11;
+pub const RELAY_TICKET: u8 = 12;
+pub const RELAY_TICKET_PROOF: u8 = 13;
+pub const RELAY_PAIR_RECEIPT: u8 = 14;
 
 const PREFIX: &[u8] = b"DR-M2\0\x01";
 
@@ -52,6 +60,34 @@ fn valid_values(kind: u8, f: &[&[u8]]) -> bool {
                 && ((f[6][0] == 1 && f[7][0] == 0) || (f[6][0] == 2 && (1..=7).contains(&f[7][0])))
         }
         SESSION_CONSENT => (1..=0x1f).contains(&f[4][0]),
+        RELAY_ROUND_JOIN => (1..=2).contains(&f[0][0]),
+        RELAY_PROBE => {
+            (1..=2).contains(&f[0][0])
+                && positive(f[6])
+                && f[8].chunks_exact(5).all(|sample| {
+                    let rtt =
+                        u32::from_be_bytes(sample[1..].try_into().expect("validated RTT width"));
+                    match sample[0] {
+                        1 => rtt <= 2_000_000,
+                        2..=5 => rtt == 0,
+                        _ => false,
+                    }
+                })
+        }
+        RELAY_PROBE_PERMIT | RELAY_TICKET => {
+            let (start, expires) = (number(f[9]), number(f[10]));
+            let window = if kind == RELAY_TICKET { 10_000 } else { 2_000 };
+            (1..=2).contains(&f[0][0])
+                && positive(f[6])
+                && positive(f[9])
+                && positive(f[10])
+                && expires > start
+                && expires - start <= window
+        }
+        RELAY_PROBE_HOLDER => f[1][0] < 3,
+        RELAY_SELECTION => (1..=2).contains(&f[0][0]),
+        RELAY_TICKET_PROOF => true,
+        RELAY_PAIR_RECEIPT => positive(f[5]),
         _ => false,
     }
 }
@@ -64,8 +100,90 @@ fn widths(kind: u8) -> Option<&'static [usize]> {
         CONNECTION_PROOF => &[1, 32, 16, 16, 32, 32, 32, 1],
         POLICY_RECEIPT => &[16, 16, 16, 8, 32, 8, 1, 1],
         SESSION_CONSENT => &[32, 16, 16, 32, 1],
+        RELAY_ROUND_JOIN => &[1, 16, 16, 16],
+        RELAY_PROBE => &[1, 16, 16, 16, 16, 16, 8, 32, 15],
+        RELAY_PROBE_PERMIT | RELAY_TICKET => &[1, 16, 16, 16, 16, 16, 8, 32, 32, 8, 8],
+        RELAY_PROBE_HOLDER => &[32, 1, 32],
+        RELAY_SELECTION => &[1, 16, 16, 16, 16, 16],
+        RELAY_TICKET_PROOF => &[32, 32],
+        RELAY_PAIR_RECEIPT => &[16, 16, 16, 16, 16, 8],
         _ => return None,
     })
+}
+
+pub const SESSION_PROBE_FRAME_SIZE: usize = 199;
+pub const SESSION_PROBE_PREFIX: &[u8] = b"DeskRealm/relay/v1/rtt-1\0";
+pub const SESSION_TICKET_FRAME_SIZE: usize = SESSION_PROBE_FRAME_SIZE;
+pub const SESSION_TICKET_PREFIX: &[u8] = b"DeskRealm/relay/v1/pair1\0";
+
+pub struct RelayCredential<'a> {
+    pub role: u8,
+    pub session: &'a [u8],
+    pub grant: &'a [u8],
+    pub connection: &'a [u8],
+    pub round: &'a [u8],
+    pub node: [u8; 16],
+    pub version: u64,
+    pub endpoint: sha256::Digest,
+    pub holder: sign::PublicKey,
+    pub opens: u64,
+    pub expires: u64,
+}
+
+pub type RelayProbePermit<'a> = RelayCredential<'a>;
+
+impl<'a> RelayCredential<'a> {
+    pub fn verify(frame: &'a [u8], signature: &[u8], key: &sign::PublicKey) -> Option<Self> {
+        Self::verify_kind(RELAY_PROBE_PERMIT, frame, signature, key)
+    }
+
+    pub fn verify_ticket(frame: &'a [u8], signature: &[u8], key: &sign::PublicKey) -> Option<Self> {
+        Self::verify_kind(RELAY_TICKET, frame, signature, key)
+    }
+
+    fn verify_kind(
+        kind: u8,
+        frame: &'a [u8],
+        signature: &[u8],
+        key: &sign::PublicKey,
+    ) -> Option<Self> {
+        let fields = decode(kind, frame)?;
+        let signature = sign::Signature::from_bytes(signature).ok()?;
+        if !sign::verify_detached(&signature, frame, key) {
+            return None;
+        }
+        Some(Self {
+            role: fields[0][0],
+            session: fields[1],
+            grant: fields[2],
+            connection: fields[3],
+            round: fields[4],
+            node: fields[5].try_into().ok()?,
+            version: number(fields[6]),
+            endpoint: sha256::Digest::from_slice(fields[7])?,
+            holder: sign::PublicKey::from_slice(fields[8])?,
+            opens: number(fields[9]),
+            expires: number(fields[10]),
+        })
+    }
+
+    pub fn active(&self, now_ms: u64) -> bool {
+        self.opens <= now_ms && now_ms < self.expires
+    }
+
+    pub fn pair_receipt_frame(&self) -> Option<Vec<u8>> {
+        encode(
+            RELAY_PAIR_RECEIPT,
+            &[
+                self.session,
+                self.grant,
+                self.connection,
+                self.round,
+                &self.node,
+                &self.version.to_be_bytes(),
+            ],
+        )
+    }
 }
 
 fn valid_fields(kind: u8, fields: &[&[u8]]) -> bool {

@@ -1,0 +1,245 @@
+diff --git a/src/regional_relay.rs b/src/regional_relay.rs
+index b4faa6e..0b709aa 100644
+--- a/src/regional_relay.rs
++++ b/src/regional_relay.rs
+@@ -1,19 +1,33 @@
+ use hbb_common::{
+     bail,
+-    base64::{engine::general_purpose::STANDARD, Engine as _},
++    base64::{
++        engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
++        Engine as _,
++    },
++    deskrealm_protocol::{
++        encode, RelayProbePermit, RELAY_PROBE_HOLDER, SESSION_PROBE_FRAME_SIZE, SESSION_PROBE_PREFIX,
++    },
+     tcp::listen_any,
+     tokio::{
+         self,
+         io::{AsyncReadExt, AsyncWriteExt},
+         net::TcpStream,
+-        sync::Semaphore,
++        sync::{Mutex, Semaphore},
+         time::{timeout, Duration},
+     },
+     ResultType,
+ };
+ use serde::Deserialize;
+-use sodiumoxide::crypto::sign;
+-use std::{fs::File, io::Read, path::PathBuf, sync::Arc};
++use sodiumoxide::crypto::{hash::sha256, sign};
++use std::{
++    collections::HashMap,
++    fs::File,
++    io::Read,
++    path::{Path, PathBuf},
++    sync::Arc,
++    time::{SystemTime, UNIX_EPOCH},
++};
++use uuid::Uuid;
+ 
+ const PREFIX: &[u8] = b"DeskRealm/relay/v1/probe\0";
+ const BUILD: &[u8] = env!("CARGO_PKG_VERSION").as_bytes();
+@@ -24,21 +38,41 @@ const FRAME_TIMEOUT: Duration = Duration::from_secs(2);
+ #[derive(Deserialize)]
+ struct RelayIdentity {
+     version: u8,
++    node_id: String,
+     seed: String,
++    configuration: RelayConfiguration,
+ }
+ 
+-#[tokio::main(flavor = "multi_thread", worker_threads = 2)]
+-pub(crate) async fn run(port: u16, state: PathBuf) -> ResultType<()> {
+-    if port == 0 || BUILD.len() > BUILD_SIZE {
+-        bail!("invalid regional relay port or build");
+-    }
++#[derive(Deserialize)]
++struct RelayConfiguration {
++    endpoint: String,
++    config_version: u64,
++}
++
++struct RegionalRelay {
++    state: PathBuf,
++    node: Uuid,
++    key: sign::SecretKey,
++    center: Option<sign::PublicKey>,
++    samples: Mutex<HashMap<[u8; 32], (u64, u8)>>,
++}
++
++fn load_identity(state: &Path) -> ResultType<RelayIdentity> {
+     let mut data = Vec::new();
+     File::open(state)?.take(8193).read_to_end(&mut data)?;
+     if data.len() > 8192 {
+         bail!("invalid regional relay identity");
+     }
+-    let identity: RelayIdentity = serde_json::from_slice(&data)
+-        .map_err(|_| hbb_common::anyhow::anyhow!("invalid regional relay identity"))?;
++    serde_json::from_slice(&data)
++        .map_err(|_| hbb_common::anyhow::anyhow!("invalid regional relay identity").into())
++}
++
++#[tokio::main(flavor = "multi_thread", worker_threads = 2)]
++pub(crate) async fn run(port: u16, state: PathBuf) -> ResultType<()> {
++    if port == 0 || BUILD.len() > BUILD_SIZE {
++        bail!("invalid regional relay port or build");
++    }
++    let identity = load_identity(&state)?;
+     let seed = STANDARD
+         .decode(identity.seed)
+         .ok()
+@@ -46,10 +80,31 @@ pub(crate) async fn run(port: u16, state: PathBuf) -> ResultType<()> {
+     let Some(seed) = seed.filter(|_| identity.version == 1) else {
+         bail!("invalid regional relay identity");
+     };
++    let node = Uuid::parse_str(&identity.node_id)?;
++    let center = match std::env::var("DESKREALM_REGIONAL_CENTER_PROBE_KEY") {
++        Ok(value) if !value.is_empty() => {
++            let key = URL_SAFE_NO_PAD
++                .decode(value)
++                .ok()
++                .and_then(|raw| sign::PublicKey::from_slice(&raw));
++            let Some(key) = key else {
++                bail!("invalid center probe verification key");
++            };
++            Some(key)
++        }
++        Ok(_) | Err(std::env::VarError::NotPresent) => None,
++        Err(err) => return Err(err.into()),
++    };
+     sodiumoxide::init()
+         .map_err(|_| hbb_common::anyhow::anyhow!("cannot initialize relay cryptography"))?;
+-    let (_, private) = sign::keypair_from_seed(&seed);
+-    let private = Arc::new(private);
++    let (_, key) = sign::keypair_from_seed(&seed);
++    let relay = Arc::new(RegionalRelay {
++        state,
++        node,
++        key,
++        center,
++        samples: Mutex::new(HashMap::new()),
++    });
+     let listener = listen_any(port).await?;
+     let slots = Arc::new(Semaphore::new(64));
+     let serve = async move {
+@@ -58,10 +113,10 @@ pub(crate) async fn run(port: u16, state: PathBuf) -> ResultType<()> {
+             let Ok(permit) = slots.clone().try_acquire_owned() else {
+                 continue;
+             };
+-            let key = Arc::clone(&private);
++            let relay = Arc::clone(&relay);
+             tokio::spawn(async move {
+                 let _permit = permit;
+-                let _ = timeout(FRAME_TIMEOUT, probe(stream, &key)).await;
++                let _ = timeout(FRAME_TIMEOUT, relay.probe(stream)).await;
+             });
+         }
+     };
+@@ -69,21 +124,90 @@ pub(crate) async fn run(port: u16, state: PathBuf) -> ResultType<()> {
+     tokio::select!(result = serve => result, result = crate::common::listen_signal() => Ok(result?))
+ }
+ 
+-async fn probe(mut stream: TcpStream, key: &sign::SecretKey) -> ResultType<()> {
+-    let mut request = [0; PREFIX.len() + 32];
+-    stream.read_exact(&mut request[..PREFIX.len()]).await?;
+-    if !request.starts_with(PREFIX) {
+-        return Ok(());
++fn unix_ms() -> ResultType<u64> {
++    Ok(u64::try_from(
++        SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis(),
++    )?)
++}
++
++impl RegionalRelay {
++    async fn probe(&self, mut stream: TcpStream) -> ResultType<()> {
++        let mut prefix = [0; PREFIX.len()];
++        stream.read_exact(&mut prefix).await?;
++        let (purpose, proof) = match prefix.as_slice() {
++            PREFIX => {
++                let mut challenge = [0; 32];
++                stream.read_exact(&mut challenge).await?;
++                (PREFIX, challenge.to_vec())
++            }
++            SESSION_PROBE_PREFIX => (SESSION_PROBE_PREFIX, self.authorize_probe(&mut stream).await?),
++            _ => return Ok(()),
++        };
++        let mut data = [0; BODY_SIZE];
++        data[..BUILD.len()].copy_from_slice(BUILD);
++        // Regional session pairing is enabled with node-bound tickets.
++        let mut message = purpose.to_vec();
++        message.extend_from_slice(&proof);
++        message.extend_from_slice(&data);
++        let signature = sign::sign_detached(&message, &self.key);
++        let mut reply = Vec::from(data);
++        reply.extend_from_slice(&signature.to_bytes());
++        stream.write_all(&reply).await?;
++        Ok(())
++    }
++
++    async fn authorize_probe(&self, stream: &mut TcpStream) -> ResultType<Vec<u8>> {
++        let Some(center) = &self.center else {
++            bail!("session probes require a center verification key");
++        };
++        let mut request = [0; SESSION_PROBE_FRAME_SIZE + sign::SIGNATUREBYTES];
++        stream.read_exact(&mut request).await?;
++        let (frame, signature) = request.split_at(SESSION_PROBE_FRAME_SIZE);
++        let Some(permit) = RelayProbePermit::verify(frame, signature, center) else {
++            bail!("invalid session probe permit");
++        };
++        if permit.node != *self.node.as_bytes() || !permit.active(unix_ms()?) {
++            bail!("session probe permit is inactive or for another node");
++        }
++        let config = load_identity(&self.state)?.configuration;
++        if permit.version != config.config_version
++            || permit.endpoint != sha256::hash(config.endpoint.as_bytes())
++        {
++            bail!("session probe permit is for another relay configuration");
++        }
++
++        let nonce = crate::managed_transport::nonce();
++        stream.write_all(&nonce).await?;
++        let mut answer = [0; 1 + sign::SIGNATUREBYTES];
++        stream.read_exact(&mut answer).await?;
++        let slot = answer[0];
++        let digest = sha256::hash(frame);
++        let Some(proof) = encode(RELAY_PROBE_HOLDER, &[digest.as_ref(), &[slot], &nonce]) else {
++            bail!("invalid session probe sample");
++        };
++        let Ok(signature) = sign::Signature::from_bytes(&answer[1..]) else {
++            bail!("invalid session probe holder signature");
++        };
++        if !sign::verify_detached(&signature, &proof, &permit.holder) {
++            bail!("invalid session probe holder");
++        }
++        let now = unix_ms()?;
++        if !permit.active(now) {
++            bail!("session probe permit expired");
++        }
++        let mut samples = self.samples.lock().await;
++        if samples.len() >= 4096 {
++            samples.retain(|_, (expires, _)| *expires > now);
++        }
++        if samples.len() >= 4096 && !samples.contains_key(&digest.0) {
++            bail!("session probe capacity exhausted");
++        }
++        let (_, seen) = samples.entry(digest.0).or_insert((permit.expires, 0));
++        let bit = 1 << slot;
++        if *seen & bit != 0 {
++            bail!("session probe sample already used");
++        }
++        *seen |= bit;
++        Ok(proof)
+     }
+-    stream.read_exact(&mut request[PREFIX.len()..]).await?;
+-    let mut data = [0; BODY_SIZE];
+-    data[..BUILD.len()].copy_from_slice(BUILD);
+-    // Regional session pairing is enabled with node-bound tickets.
+-    let mut proof = Vec::from(request);
+-    proof.extend_from_slice(&data);
+-    let signature = sign::sign_detached(&proof, key);
+-    let mut reply = Vec::from(data);
+-    reply.extend_from_slice(&signature.to_bytes());
+-    stream.write_all(&reply).await?;
+-    Ok(())
+ }

@@ -1,0 +1,129 @@
+diff --git a/src/hbbr.rs b/src/hbbr.rs
+index 24258d2..c53bd1d 100644
+--- a/src/hbbr.rs
++++ b/src/hbbr.rs
+@@ -1,4 +1,5 @@
+ mod managed_transport;
++mod regional_relay;
+ use clap::App;
+ mod common;
+ mod relay_server;
+@@ -16,6 +17,7 @@ fn main() -> ResultType<()> {
+     let args = format!(
+         "-p, --port=[NUMBER(default={RELAY_PORT})] 'Sets the listening port'
+         -k, --key=[KEY] 'Only allow the client with the same key'
++        --deskrealm-regional 'Start DeskRealm regional relay'
+         ",
+     );
+     let matches = App::new("hbbr")
+@@ -24,6 +26,15 @@ fn main() -> ResultType<()> {
+         .about("RustDesk Relay Server")
+         .args_from_usage(&args)
+         .get_matches();
++    if matches.is_present("deskrealm-regional") {
++        let state = std::env::var_os("DESKREALM_RELAY_STATE")
++            .ok_or_else(|| hbb_common::anyhow::anyhow!("regional relay requires node state"))?;
++        let port: u16 = matches
++            .value_of("port")
++            .ok_or_else(|| hbb_common::anyhow::anyhow!("regional relay requires --port"))?
++            .parse()?;
++        return regional_relay::run(port, state.into());
++    }
+     if let Ok(v) = ini::Ini::load_from_file(".env") {
+         if let Some(section) = v.section(None::<String>) {
+             section.iter().for_each(|(k, v)| std::env::set_var(k, v));
+diff --git a/src/regional_relay.rs b/src/regional_relay.rs
+new file mode 100644
+index 0000000..b4faa6e
+--- /dev/null
++++ b/src/regional_relay.rs
+@@ -0,0 +1,89 @@
++use hbb_common::{
++    bail,
++    base64::{engine::general_purpose::STANDARD, Engine as _},
++    tcp::listen_any,
++    tokio::{
++        self,
++        io::{AsyncReadExt, AsyncWriteExt},
++        net::TcpStream,
++        sync::Semaphore,
++        time::{timeout, Duration},
++    },
++    ResultType,
++};
++use serde::Deserialize;
++use sodiumoxide::crypto::sign;
++use std::{fs::File, io::Read, path::PathBuf, sync::Arc};
++
++const PREFIX: &[u8] = b"DeskRealm/relay/v1/probe\0";
++const BUILD: &[u8] = env!("CARGO_PKG_VERSION").as_bytes();
++const BUILD_SIZE: usize = 64;
++const BODY_SIZE: usize = BUILD_SIZE + 4;
++const FRAME_TIMEOUT: Duration = Duration::from_secs(2);
++
++#[derive(Deserialize)]
++struct RelayIdentity {
++    version: u8,
++    seed: String,
++}
++
++#[tokio::main(flavor = "multi_thread", worker_threads = 2)]
++pub(crate) async fn run(port: u16, state: PathBuf) -> ResultType<()> {
++    if port == 0 || BUILD.len() > BUILD_SIZE {
++        bail!("invalid regional relay port or build");
++    }
++    let mut data = Vec::new();
++    File::open(state)?.take(8193).read_to_end(&mut data)?;
++    if data.len() > 8192 {
++        bail!("invalid regional relay identity");
++    }
++    let identity: RelayIdentity = serde_json::from_slice(&data)
++        .map_err(|_| hbb_common::anyhow::anyhow!("invalid regional relay identity"))?;
++    let seed = STANDARD
++        .decode(identity.seed)
++        .ok()
++        .and_then(|raw| sign::Seed::from_slice(&raw));
++    let Some(seed) = seed.filter(|_| identity.version == 1) else {
++        bail!("invalid regional relay identity");
++    };
++    sodiumoxide::init()
++        .map_err(|_| hbb_common::anyhow::anyhow!("cannot initialize relay cryptography"))?;
++    let (_, private) = sign::keypair_from_seed(&seed);
++    let private = Arc::new(private);
++    let listener = listen_any(port).await?;
++    let slots = Arc::new(Semaphore::new(64));
++    let serve = async move {
++        loop {
++            let (stream, _) = listener.accept().await?;
++            let Ok(permit) = slots.clone().try_acquire_owned() else {
++                continue;
++            };
++            let key = Arc::clone(&private);
++            tokio::spawn(async move {
++                let _permit = permit;
++                let _ = timeout(FRAME_TIMEOUT, probe(stream, &key)).await;
++            });
++        }
++    };
++    hbb_common::log::info!("Regional relay listening on TCP port {}", port);
++    tokio::select!(result = serve => result, result = crate::common::listen_signal() => Ok(result?))
++}
++
++async fn probe(mut stream: TcpStream, key: &sign::SecretKey) -> ResultType<()> {
++    let mut request = [0; PREFIX.len() + 32];
++    stream.read_exact(&mut request[..PREFIX.len()]).await?;
++    if !request.starts_with(PREFIX) {
++        return Ok(());
++    }
++    stream.read_exact(&mut request[PREFIX.len()..]).await?;
++    let mut data = [0; BODY_SIZE];
++    data[..BUILD.len()].copy_from_slice(BUILD);
++    // Regional session pairing is enabled with node-bound tickets.
++    let mut proof = Vec::from(request);
++    proof.extend_from_slice(&data);
++    let signature = sign::sign_detached(&proof, key);
++    let mut reply = Vec::from(data);
++    reply.extend_from_slice(&signature.to_bytes());
++    stream.write_all(&reply).await?;
++    Ok(())
++}

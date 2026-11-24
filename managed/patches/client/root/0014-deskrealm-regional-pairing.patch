@@ -1,0 +1,886 @@
+diff --git a/libs/base/src/deskrealm_endpoint.rs b/libs/base/src/deskrealm_endpoint.rs
+index e4b4a2f..9551e13 100644
+--- a/libs/base/src/deskrealm_endpoint.rs
++++ b/libs/base/src/deskrealm_endpoint.rs
+@@ -39,6 +39,7 @@ const MAX_HANDSHAKE_FRAME: usize = 1024;
+ 
+ mod lease;
+ mod relay_probes;
++mod relay_selection;
+ mod runtime;
+ use lease::{LeaseClock, LeaseWindow};
+ pub use lease::{
+@@ -239,20 +240,24 @@ impl Authority {
+         request: reqwest::RequestBuilder,
+         allowed: &[u16],
+     ) -> ResultType<Vec<u8>> {
+-        let mut response = request
++        let response = request
+             .send()
+             .await
+             .map_err(|_| anyhow!("managed center is unavailable"))?;
+         if !allowed.contains(&response.status().as_u16()) {
+             bail!("managed center denied the request");
+         }
++        Self::read_response_body(response, MAX_HTTP_BODY).await
++    }
++
++    async fn read_response_body(mut response: reqwest::Response, limit: usize) -> ResultType<Vec<u8>> {
+         let mut data = Vec::new();
+         while let Some(chunk) = response
+             .chunk()
+             .await
+             .map_err(|_| anyhow!("managed center response is incomplete"))?
+         {
+-            if chunk.len() > MAX_HTTP_BODY - data.len() {
++            if chunk.len() > limit - data.len() {
+                 bail!("managed center response is too large");
+             }
+             data.extend_from_slice(&chunk);
+@@ -579,7 +584,7 @@ impl Authority {
+         } = target;
+         check_credential(device_credential, "drd_")?;
+         if (path == Path::Direct && !relay_id.is_empty())
+-            || (path == Path::Relay && !valid_identifier(relay_id, 32))
++            || (path == Path::Relay && !valid_identifier(relay_id, 32) && uuid_bytes(relay_id).is_err())
+         {
+             bail!("invalid managed path");
+         }
+diff --git a/libs/base/src/deskrealm_endpoint/relay_probes.rs b/libs/base/src/deskrealm_endpoint/relay_probes.rs
+index fd8ba8f..e5df5cc 100644
+--- a/libs/base/src/deskrealm_endpoint/relay_probes.rs
++++ b/libs/base/src/deskrealm_endpoint/relay_probes.rs
+@@ -31,6 +31,8 @@ struct Round {
+     round_id: String,
+     connection_id: String,
+     state: String,
++    #[serde(default)]
++    regional: bool,
+     candidates: Vec<Candidate>,
+ }
+ 
+@@ -86,10 +88,9 @@ impl Authority {
+         route: &DeskRealmRoute,
+         device: &DeviceIdentity,
+         bearer: &str,
+-    ) -> ResultType<()> {
+-        self.join_relay_probes(route, device, bearer, PeerRole::Controller)
+-            .await?;
+-        Ok(())
++    ) -> ResultType<bool> {
++        let round = self.join_relay_probes(route, device, bearer, PeerRole::Controller).await?;
++        Ok(round.regional)
+     }
+ 
+     async fn read_probe_round(&self, request: reqwest::RequestBuilder) -> ResultType<Round> {
+diff --git a/libs/base/src/deskrealm_endpoint/relay_selection.rs b/libs/base/src/deskrealm_endpoint/relay_selection.rs
+new file mode 100644
+index 0000000..422772c
+--- /dev/null
++++ b/libs/base/src/deskrealm_endpoint/relay_selection.rs
+@@ -0,0 +1,287 @@
++use super::{now_ms, uuid_bytes, Authority, DeviceIdentity};
++use hbb_common::{
++    anyhow::{anyhow, bail},
++    base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _},
++    deskrealm_protocol::{
++        encode, PeerRole, RelayCredential, VerifiedGrant, RELAY_SELECTION, RELAY_TICKET_PROOF,
++        SESSION_TICKET_FRAME_SIZE, SESSION_TICKET_PREFIX,
++    },
++    rendezvous_proto::DeskRealmRoute,
++    sodiumoxide::crypto::{hash::sha256, sign},
++    uuid::Uuid,
++    ResultType, Stream,
++};
++use serde_derive::Deserialize;
++use tokio::{
++    io::{AsyncReadExt, AsyncWriteExt},
++    net::TcpStream,
++    time::{sleep, timeout, Duration},
++};
++
++const PAIR_WINDOW: Duration = Duration::from_secs(13);
++const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(3);
++
++#[derive(Deserialize)]
++struct Selection {
++    state: String,
++    round_id: String,
++    connection_id: String,
++    selected: Option<Candidate>,
++    #[serde(default)]
++    options: Vec<Candidate>,
++    ticket: Option<Ticket>,
++}
++
++#[derive(Deserialize)]
++struct Candidate {
++    relay_id: String,
++    endpoint: String,
++    config_version: u64,
++}
++
++#[derive(Deserialize)]
++struct Ticket {
++    frame: String,
++    signature: String,
++    public_key: String,
++}
++
++struct RelaySession<'a> {
++    authority: &'a Authority,
++    device: &'a DeviceIdentity,
++    bearer: &'a str,
++    grant: VerifiedGrant<'a>,
++    session: Uuid,
++    connection: Uuid,
++    role: PeerRole,
++}
++
++impl Authority {
++    pub(crate) async fn connect_regional_relay(
++        &self,
++        route: &DeskRealmRoute,
++        device: &DeviceIdentity,
++        bearer: &str,
++        role: PeerRole,
++    ) -> ResultType<(Stream, String)> {
++        let grant = self.verify(route, device, role)?;
++        let session = RelaySession {
++            authority: self,
++            device,
++            bearer,
++            session: Uuid::from_slice(grant.session_id())?,
++            connection: Uuid::from_slice(&route.connection_uuid)?,
++            grant,
++            role,
++        };
++        // Measured samples inform the choice. Missing reports use the center's
++        // fallback policy, which still requires a signed ticket.
++        let _ = self.collect_relay_probes(route, device, bearer, role).await;
++        timeout(PAIR_WINDOW, session.connect()).await?
++    }
++}
++
++impl RelaySession<'_> {
++    async fn connect(&self) -> ResultType<(Stream, String)> {
++        let endpoint = format!("/v1/sessions/{}/relay-selection", self.session);
++        let url = self.authority.center.join(&endpoint)?;
++        let mut failed = None;
++        loop {
++            sleep(Duration::from_millis(80)).await;
++            let request = self
++                .authority
++                .client
++                .get(url.clone())
++                .query(&[("connection_id", self.connection.to_string())]);
++            let Some(mut state) = self.read_selection(request).await? else {
++                continue;
++            };
++            let round = uuid_bytes(&state.round_id)?;
++            if self.role == PeerRole::Controller {
++                match state.state.as_str() {
++                    "ready" => {
++                        let candidate = state
++                            .options
++                            .first()
++                            .ok_or_else(|| anyhow!("invalid center relay options"))?;
++                        let relay = uuid_bytes(&candidate.relay_id)?;
++                        let Some(confirmed) = self.change(&url, round, relay, "select", 1).await?
++                        else {
++                            continue;
++                        };
++                        if uuid_bytes(&confirmed.round_id)? != round {
++                            bail!("center changed regional relay round");
++                        }
++                        state = confirmed;
++                    }
++                    "exhausted" => bail!("no eligible regional relay"),
++                    "unavailable" => {
++                        let selected = state
++                            .selected
++                            .as_ref()
++                            .ok_or_else(|| anyhow!("invalid center relay selection"))?;
++                        let relay = uuid_bytes(&selected.relay_id)?;
++                        self.change(&url, round, relay, "fail", 2).await?;
++                        continue;
++                    }
++                    _ => {}
++                }
++            }
++            if state.state != "confirmed" {
++                continue;
++            }
++            let (Some(candidate), Some(ticket)) = (state.selected, state.ticket) else {
++                bail!("center omitted a confirmed relay ticket");
++            };
++            let relay = uuid_bytes(&candidate.relay_id)?;
++            if failed == Some(relay) {
++                if self.role == PeerRole::Controller {
++                    self.change(&url, round, relay, "fail", 2).await?;
++                }
++                continue;
++            }
++            match timeout(ATTEMPT_TIMEOUT, self.join(round, relay, &candidate, ticket)).await {
++                Ok(Ok((stream, signature))) => {
++                    if self.role == PeerRole::Target {
++                        let endpoint = format!("/v1/sessions/{}/relay-pairing", self.session);
++                        self.authority
++                            .post(
++                                &endpoint,
++                                self.bearer,
++                                serde_json::json!({
++                                    "connection_id": self.connection.to_string(),
++                                    "round_id": round.to_string(),
++                                    "relay_id": candidate.relay_id,
++                                    "signature": URL_SAFE_NO_PAD.encode(signature),
++                                }),
++                                &[204],
++                            )
++                            .await?;
++                    }
++                    return Ok((stream, candidate.relay_id));
++                }
++                _ => {
++                    failed = Some(relay);
++                    if self.role == PeerRole::Controller {
++                        self.change(&url, round, relay, "fail", 2).await?;
++                    }
++                }
++            }
++        }
++    }
++
++    async fn read_selection(
++        &self,
++        request: reqwest::RequestBuilder,
++    ) -> ResultType<Option<Selection>> {
++        let response = request
++            .bearer_auth(self.bearer)
++            .send()
++            .await
++            .map_err(|_| anyhow!("center relay selection unavailable"))?;
++        if response.status() == reqwest::StatusCode::CONFLICT {
++            // The center closes the probe window and commits selections using
++            // its own clock. A concurrent health change also returns conflict.
++            return Ok(None);
++        }
++        if response.status() != reqwest::StatusCode::OK {
++            bail!("center denied relay selection");
++        }
++        let state: Selection =
++            serde_json::from_slice(&Authority::read_response_body(response, 128 * 1024).await?)?;
++        if uuid_bytes(&state.connection_id)? != self.connection {
++            bail!("center returned another relay connection");
++        }
++        Ok(Some(state))
++    }
++
++    async fn change(
++        &self,
++        url: &reqwest::Url,
++        round: Uuid,
++        relay: Uuid,
++        action: &str,
++        code: u8,
++    ) -> ResultType<Option<Selection>> {
++        let frame = encode(
++            RELAY_SELECTION,
++            &[
++                &[code],
++                self.grant.session_id(),
++                self.grant.grant_id(),
++                self.connection.as_bytes(),
++                round.as_bytes(),
++                relay.as_bytes(),
++            ],
++        )
++        .ok_or_else(|| anyhow!("invalid relay selection frame"))?;
++        self.read_selection(
++            self.authority
++                .client
++                .post(url.clone())
++                .json(&serde_json::json!({
++                    "connection_id": self.connection.to_string(),
++                    "round_id": round.to_string(),
++                    "relay_id": relay.to_string(),
++                    "action": action,
++                    "signature": URL_SAFE_NO_PAD.encode(self.device.sign(&frame)),
++                })),
++        )
++        .await
++    }
++
++    async fn join(
++        &self,
++        round: Uuid,
++        relay: Uuid,
++        candidate: &Candidate,
++        ticket: Ticket,
++    ) -> ResultType<(Stream, [u8; sign::SIGNATUREBYTES])> {
++        let frame = URL_SAFE_NO_PAD.decode(ticket.frame)?;
++        let signature = URL_SAFE_NO_PAD.decode(ticket.signature)?;
++        let key = sign::PublicKey::from_slice(&URL_SAFE_NO_PAD.decode(ticket.public_key)?)
++            .ok_or_else(|| anyhow!("invalid regional relay key"))?;
++        let signed = RelayCredential::verify_ticket(&frame, &signature, &self.authority.center_key)
++            .ok_or_else(|| anyhow!("invalid center relay ticket"))?;
++        if frame.len() != SESSION_TICKET_FRAME_SIZE
++            || signed.session != self.grant.session_id()
++            || signed.grant != self.grant.grant_id()
++            || signed.connection != self.connection.as_bytes()
++            || signed.round != round.as_bytes()
++            || signed.node != *relay.as_bytes()
++            || signed.version != candidate.config_version
++            || signed.endpoint != sha256::hash(candidate.endpoint.as_bytes())
++            || signed.role != self.role as u8
++            || signed.holder != self.device.public_key
++            || !signed.active(now_ms()?)
++        {
++            bail!("relay ticket does not match this endpoint's session");
++        }
++        let mut socket = TcpStream::connect(&candidate.endpoint).await?;
++        socket.set_nodelay(true)?;
++        socket.write_all(SESSION_TICKET_PREFIX).await?;
++        socket.write_all(&frame).await?;
++        socket.write_all(&signature).await?;
++        let mut nonce = [0; 32];
++        socket.read_exact(&mut nonce).await?;
++        let digest = sha256::hash(&frame);
++        let proof = encode(RELAY_TICKET_PROOF, &[digest.as_ref(), &nonce])
++            .ok_or_else(|| anyhow!("invalid relay holder frame"))?;
++        socket.write_all(&self.device.sign(&proof)).await?;
++        let mut receipt = [0; sign::SIGNATUREBYTES];
++        socket.read_exact(&mut receipt).await?;
++        let Ok(signature) = sign::Signature::from_bytes(&receipt) else {
++            bail!("invalid regional relay pairing signature");
++        };
++        let paired = signed
++            .pair_receipt_frame()
++            .ok_or_else(|| anyhow!("invalid regional relay pairing frame"))?;
++        if !sign::verify_detached(&signature, &paired, &key) || !signed.active(now_ms()?) {
++            bail!("invalid regional relay pairing receipt");
++        }
++        let addr = socket.local_addr()?;
++        let mut stream = Stream::from(socket, addr);
++        stream.set_max_packet_length(4096);
++        Ok((stream, receipt))
++    }
++}
+diff --git a/libs/base/src/deskrealm_transport.rs b/libs/base/src/deskrealm_transport.rs
+index 82903d2..bf636a5 100644
+--- a/libs/base/src/deskrealm_transport.rs
++++ b/libs/base/src/deskrealm_transport.rs
+@@ -44,6 +44,31 @@ impl Network<'_> {
+         device: &DeviceIdentity,
+         route: &DeskRealmRoute,
+         path: Path,
++    ) -> ResultType<Stream> {
++        self.connect_controller_route(authority, device, route, path, None).await
++    }
++
++    pub async fn connect_controller_with_selection(
++        &self,
++        authority: &Authority,
++        device: &DeviceIdentity,
++        route: &DeskRealmRoute,
++        path: Path,
++        bearer: &str,
++    ) -> ResultType<Stream> {
++        let regional = path == Path::Relay
++            && authority.begin_relay_probes(route, device, bearer).await?;
++        self.connect_controller_route(authority, device, route, path, regional.then_some(bearer))
++            .await
++    }
++
++    async fn connect_controller_route(
++        &self,
++        authority: &Authority,
++        device: &DeviceIdentity,
++        route: &DeskRealmRoute,
++        path: Path,
++        regional: Option<&str>,
+     ) -> ResultType<Stream> {
+         let (op, purpose) = match path {
+             Path::Direct => (
+@@ -54,9 +79,9 @@ impl Network<'_> {
+                 TransportPurpose::DirectRequest,
+             ),
+             Path::Relay => {
+-                self.relay
+-                    .as_ref()
+-                    .ok_or_else(|| anyhow!("managed relay is not configured"))?;
++                if regional.is_none() && self.relay.is_none() {
++                    bail!("managed relay is not configured");
++                }
+                 (
+                     Operation::RelayRequest(RequestRelay {
+                         id: route.target_rustdesk_id.clone(),
+@@ -76,10 +101,14 @@ impl Network<'_> {
+             purpose,
+             PeerRole::Controller,
+             NO_OFFER,
++            regional.is_some(),
+         )
+         .await?;
+         let reply = read(&mut center, OFFER_TIMEOUT).await?;
+         let offer = match_offer(&reply, route)?;
++        if reply.regional_relay != regional.is_some() {
++            bail!("managed rendezvous returned a different relay mode");
++        }
+         match (path, reply.operation) {
+             (Path::Direct, Some(Operation::DirectResponse(response))) => {
+                 let candidate = checked_address(&response.socket_addr)?;
+@@ -95,6 +124,13 @@ impl Network<'_> {
+                 Ok(stream)
+             }
+             (Path::Relay, Some(Operation::RelayResponse(response))) => {
++                if let Some(bearer) = regional {
++                    check_regional_offer(route, &response.uuid, &response.relay_server)?;
++                    let (stream, _) = authority.connect_regional_relay(
++                        route, device, bearer, PeerRole::Controller,
++                    ).await?;
++                    return Ok(stream);
++                }
+                 let relay = self
+                     .relay
+                     .as_ref()
+@@ -115,6 +151,33 @@ impl Network<'_> {
+         rustdesk_id: &str,
+         forwarded: DeskRealmSignal,
+     ) -> ResultType<(Stream, DeskRealmRoute, Path)> {
++        let (stream, route, path, _) = self.accept_target_route(
++            authority, device, rustdesk_id, forwarded, None,
++        ).await?;
++        Ok((stream, route, path))
++    }
++
++    pub async fn accept_target_with_selection(
++        &self,
++        authority: &Authority,
++        device: &DeviceIdentity,
++        rustdesk_id: &str,
++        forwarded: DeskRealmSignal,
++        bearer: &str,
++    ) -> ResultType<(Stream, DeskRealmRoute, Path, Option<String>)> {
++        self.accept_target_route(authority, device, rustdesk_id, forwarded, Some(bearer))
++            .await
++    }
++
++    async fn accept_target_route(
++        &self,
++        authority: &Authority,
++        device: &DeviceIdentity,
++        rustdesk_id: &str,
++        forwarded: DeskRealmSignal,
++        bearer: Option<&str>,
++    ) -> ResultType<(Stream, DeskRealmRoute, Path, Option<String>)> {
++        let regional = forwarded.regional_relay;
+         let route = forwarded
+             .route
+             .into_option()
+@@ -125,7 +188,7 @@ impl Network<'_> {
+         }
+         authority.verify(&route, device, PeerRole::Target)?;
+         match forwarded.operation {
+-            Some(Operation::DirectCandidate(candidate)) => {
++            Some(Operation::DirectCandidate(candidate)) if !regional => {
+                 // The source address is supplied by hbbs and used only as a
+                 // family/shape check. The listener receives the inbound TCP.
+                 checked_address(&candidate.socket_addr)?;
+@@ -149,20 +212,28 @@ impl Network<'_> {
+                     TransportPurpose::DirectReply,
+                     PeerRole::Target,
+                     offer,
++                    false,
+                 )
+                 .await?;
+                 drop(center);
+                 let listener = new_listener(socket, true).await?;
+                 let (stream, _) = timeout(PROOF_TIMEOUT, listener.accept()).await??;
+                 let addr = stream.local_addr()?;
+-                Ok((Stream::from(stream, addr), route, Path::Direct))
++                Ok((Stream::from(stream, addr), route, Path::Direct, None))
+             }
+             Some(Operation::RelayRequest(request)) => {
+-                let relay = self
+-                    .relay
+-                    .as_ref()
+-                    .ok_or_else(|| anyhow!("managed relay is not configured"))?;
+-                check_relay(relay, &route, &request.uuid, &request.relay_server)?;
++                let relay = if regional {
++                    check_regional_offer(&route, &request.uuid, &request.relay_server)?;
++                    if bearer.is_none() {
++                        bail!("regional relay requires a device credential");
++                    }
++                    None
++                } else {
++                    let relay = self.relay.as_ref()
++                        .ok_or_else(|| anyhow!("managed relay is not configured"))?;
++                    check_relay(relay, &route, &request.uuid, &request.relay_server)?;
++                    Some(relay)
++                };
+                 let mut center = dial(self.rendezvous, None).await?;
+                 let op = Operation::RelayResponse(RelayResponse::new());
+                 prove(
+@@ -174,11 +245,23 @@ impl Network<'_> {
+                     TransportPurpose::RelayReply,
+                     PeerRole::Target,
+                     offer,
++                    regional,
+                 )
+                 .await?;
+-                let stream =
+-                    join_relay(authority, device, relay, &route, offer, PeerRole::Target).await?;
+-                Ok((stream, route, Path::Relay))
++                let (stream, relay_id) = match relay {
++                    Some(relay) => (
++                        join_relay(authority, device, relay, &route, offer, PeerRole::Target).await?,
++                        None,
++                    ),
++                    None => {
++                        let bearer = bearer.ok_or_else(|| anyhow!("missing device credential"))?;
++                        let (stream, relay_id) = authority.connect_regional_relay(
++                            &route, device, bearer, PeerRole::Target,
++                        ).await?;
++                        (stream, Some(relay_id))
++                    }
++                };
++                Ok((stream, route, Path::Relay, relay_id))
+             }
+             _ => bail!("unsupported managed target offer"),
+         }
+@@ -219,6 +302,14 @@ fn checked_address(encoded: &[u8]) -> ResultType<SocketAddr> {
+     Ok(candidate)
+ }
+ 
++fn check_regional_offer(route: &DeskRealmRoute, id: &str, authority: &str) -> ResultType<()> {
++    let connection = hbb_common::uuid::Uuid::from_slice(&route.connection_uuid)?;
++    if id != connection.to_string() || !authority.is_empty() {
++        bail!("invalid regional relay offer");
++    }
++    Ok(())
++}
++
+ fn check_relay(
+     relay: &RelayNode<'_>,
+     route: &DeskRealmRoute,
+@@ -250,6 +341,7 @@ async fn join_relay(
+         TransportPurpose::RelayJoin,
+         role,
+         offer,
++        false,
+     )
+     .await?;
+     let ready = read(&mut stream, OFFER_TIMEOUT).await?;
+@@ -300,6 +392,7 @@ async fn prove(
+     purpose: TransportPurpose,
+     role: PeerRole,
+     offer: [u8; 32],
++    regional: bool,
+ ) -> ResultType<()> {
+     authority.verify(route, device, role)?;
+     send(
+@@ -311,6 +404,7 @@ async fn prove(
+             } else {
+                 Bytes::copy_from_slice(&offer)
+             },
++            regional_relay: regional,
+             operation: Some(operation),
+             ..Default::default()
+         },
+diff --git a/libs/base/tests/deskrealm_relay_probes.rs b/libs/base/tests/deskrealm_relay_probes.rs
+index 97d2323..12ab3f7 100644
+--- a/libs/base/tests/deskrealm_relay_probes.rs
++++ b/libs/base/tests/deskrealm_relay_probes.rs
+@@ -1,13 +1,24 @@
+-use base::deskrealm_endpoint::{Authority, DeviceIdentity, SessionTarget};
++use base::{
++    deskrealm_endpoint::{AppliedPolicy, Authority, DeviceIdentity, SessionTarget, TargetSession},
++    deskrealm_transport::Network,
++};
+ use hbb_common::{
+     anyhow::{anyhow, ensure},
+     base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _},
+-    deskrealm_protocol::PeerRole,
++    bytes::Bytes,
++    deskrealm_protocol::{Path, PeerRole},
++    rendezvous_proto::{register_pk_response, rendezvous_message, RegisterPeer, RegisterPk, RendezvousMessage},
+     sodiumoxide::crypto::sign,
+     uuid::Uuid,
+     ResultType,
+ };
++use protobuf::Message as _;
+ use serde_derive::Deserialize;
++use std::time::Duration;
++use tokio::{net::UdpSocket, time::timeout};
++
++const TARGET: &str = "10700002";
++const WAIT: Duration = Duration::from_secs(25);
+ 
+ #[derive(Deserialize)]
+ struct Peer {
+@@ -31,24 +42,31 @@ struct Fixture {
+     kid: String,
+     controller: Peer,
+     target: Peer,
++    rendezvous: String,
++    policy_version: u64,
+ }
+ 
+-#[tokio::test]
+-async fn managed_native_endpoints_report_both_regional_relays() -> ResultType<()> {
++fn environment() -> ResultType<(Fixture, Authority)> {
+     let path = std::env::var("DESKREALM_RELAY_PROBE_FIXTURE")?;
+     let input: Fixture = serde_json::from_slice(&std::fs::read(path)?)?;
+     let ca = std::fs::read(std::env::var("DESKREALM_RELAY_PROBE_CA")?)?;
+-    let controller = input.controller.identity()?;
+-    let target = input.target.identity()?;
+     let center_key = URL_SAFE_NO_PAD.decode(&input.center_key)?;
+     let center_key = sign::PublicKey::from_slice(&center_key)
+         .ok_or_else(|| anyhow!("invalid fixture center verification key"))?;
+-    let authority = Authority::new(&input.center, input.kid, center_key, Some(&ca))?;
++    let authority = Authority::new(&input.center, input.kid.clone(), center_key, Some(&ca))?;
++    Ok((input, authority))
++}
++
++#[tokio::test]
++async fn managed_native_endpoints_report_both_regional_relays() -> ResultType<()> {
++    let (input, authority) = environment()?;
++    let controller = input.controller.identity()?;
++    let target = input.target.identity()?;
+     let route = authority
+         .issue(
+             &controller,
+             &input.controller.credential,
+-            SessionTarget::RustDeskId("10700002"),
++            SessionTarget::RustDeskId(TARGET),
+             Uuid::new_v4(),
+             "helpdesk",
+             1,
+@@ -72,3 +90,141 @@ async fn managed_native_endpoints_report_both_regional_relays() -> ResultType<()
+     ensure!(second? == 2, "target missed a regional relay");
+     Ok(())
+ }
++
++#[tokio::test]
++async fn managed_native_endpoints_forward_on_selected_regional_relay() -> ResultType<()> {
++    let (input, authority) = environment()?;
++    let controller = input.controller.identity()?;
++    let target = input.target.identity()?;
++    // With no pinned single relay, the only valid route is the center-selected node.
++    let network = Network {
++        rendezvous: input.rendezvous.parse()?,
++        relay: None,
++    };
++    let socket = UdpSocket::bind("127.0.0.1:0").await?;
++    socket.connect(network.rendezvous).await?;
++    let mut registration = RendezvousMessage::new();
++    registration.set_register_pk(RegisterPk {
++        id: TARGET.to_owned(),
++        uuid: Bytes::copy_from_slice(target.id.as_bytes()),
++        pk: Bytes::copy_from_slice(target.public_key.as_ref()),
++        ..Default::default()
++    });
++    socket.send(&registration.write_to_bytes()?).await?;
++    let mut packet = [0; 4096];
++    let size = timeout(WAIT, socket.recv(&mut packet)).await??;
++    let reply = RendezvousMessage::parse_from_bytes(&packet[..size])?;
++    ensure!(
++        reply.has_register_pk_response()
++            && reply.register_pk_response().result.enum_value()
++                == Ok(register_pk_response::Result::OK),
++        "target did not register with native hbbs"
++    );
++
++    // RegisterPk acknowledges an unchanged key without refreshing the UDP endpoint.
++    registration.set_register_peer(RegisterPeer { id: TARGET.to_owned(), ..Default::default() });
++    socket.send(&registration.write_to_bytes()?).await?;
++    let size = timeout(WAIT, socket.recv(&mut packet)).await??;
++    let reply = RendezvousMessage::parse_from_bytes(&packet[..size])?;
++    ensure!(reply.has_register_peer_response() && !reply.register_peer_response().request_pk);
++
++    let route = authority
++        .issue(
++            &controller,
++            &input.controller.credential,
++            SessionTarget::RustDeskId(TARGET),
++            Uuid::new_v4(),
++            "helpdesk",
++            1,
++            true,
++        )
++        .await?;
++    let (left, right) = timeout(WAIT, async {
++        tokio::join!(
++            async {
++                let mut stream = network
++                    .connect_controller_with_selection(
++                        &authority,
++                        &controller,
++                        &route,
++                        Path::Relay,
++                        &input.controller.credential,
++                    )
++                    .await?;
++                let admitted = authority
++                    .connect_controller(&mut stream, &route, &controller, Path::Relay)
++                    .await?;
++                ensure!(admitted.allowed_mask == 1 && admitted.lease_sequence == 1);
++                Ok::<_, hbb_common::anyhow::Error>(stream)
++            },
++            async {
++                let size = socket.recv(&mut packet).await?;
++                let message = RendezvousMessage::parse_from_bytes(&packet[..size])?;
++                let Some(rendezvous_message::Union::DeskrealmSignal(signal)) = message.union else {
++                    hbb_common::bail!("regional rendezvous offer expected");
++                };
++                ensure!(signal.regional_relay);
++                let (mut stream, route, path, regional) = network
++                    .accept_target_with_selection(
++                        &authority,
++                        &target,
++                        TARGET,
++                        signal,
++                        &input.target.credential,
++                    )
++                    .await?;
++                let relay = regional.ok_or_else(|| anyhow!("target lost its paired node"))?;
++                ensure!(path == Path::Relay);
++                let mut lease = authority
++                    .connect_target(
++                        &mut stream,
++                        TargetSession {
++                            route: &route,
++                            device: &target,
++                            device_credential: &input.target.credential,
++                            path,
++                            relay_id: &relay,
++                            policy: AppliedPolicy {
++                                version: input.policy_version,
++                                allowed_mask: 1,
++                                unattended_purposes: &[],
++                            },
++                        },
++                        |_| async { Some(1) },
++                        || true,
++                    )
++                    .await?;
++                authority
++                    .renew(&mut lease, &input.target.credential)
++                    .await?;
++                ensure!(lease.sequence == 2);
++                Ok::<_, hbb_common::anyhow::Error>(stream)
++            },
++        )
++    })
++    .await?;
++    if let Err(error) = &right {
++        eprintln!("regional target: {error:#}");
++    }
++    let mut left = left?;
++    let mut right = right?;
++    let payload = Bytes::from_static(b"controller to target");
++    left.send_raw(payload.to_vec()).await?;
++    let forwarded = timeout(WAIT, right.next())
++        .await?
++        .ok_or_else(|| anyhow!("regional relay disconnected"))??;
++    ensure!(
++        forwarded.as_ref() == payload.as_ref(),
++        "forwarded data changed"
++    );
++    let payload = Bytes::from_static(b"target to controller");
++    right.send_raw(payload.to_vec()).await?;
++    let forwarded = timeout(WAIT, left.next())
++        .await?
++        .ok_or_else(|| anyhow!("regional relay disconnected"))??;
++    ensure!(
++        forwarded.as_ref() == payload.as_ref(),
++        "forwarded data changed"
++    );
++    Ok(())
++}
+diff --git a/src/deskrealm_desktop.rs b/src/deskrealm_desktop.rs
+index f7009d1..248301d 100644
+--- a/src/deskrealm_desktop.rs
++++ b/src/deskrealm_desktop.rs
+@@ -275,28 +275,9 @@ pub(crate) async fn connect(
+     if grant.organization_id() != desktop.organization.as_bytes() {
+         bail!("managed grant belongs to a different organization");
+     }
+-    let probe_round = path == Path::Relay
+-        && desktop
+-            .authority
+-            .begin_relay_probes(&route, &desktop.device, bearer)
+-            .await
+-            .is_ok();
+-    let network = desktop.network();
+-    let (stream, ()) = tokio::join!(
+-        network.connect_controller(&desktop.authority, &desktop.device, &route, path),
+-        async {
+-            if probe_round
+-                && desktop
+-                    .authority
+-                    .collect_relay_probes(&route, &desktop.device, bearer, PeerRole::Controller)
+-                    .await
+-                    .is_err()
+-            {
+-                hbb_common::log::debug!("Managed controller relay measurements unavailable");
+-            }
+-        }
+-    );
+-    let mut stream = stream?;
++    let mut stream = desktop.network()
++        .connect_controller_with_selection(&desktop.authority, &desktop.device, &route, path, bearer)
++        .await?;
+     let admitted = desktop
+         .authority
+         .connect_controller(&mut stream, &route, &desktop.device, path)
+@@ -488,39 +469,20 @@ pub(crate) async fn authorize_target(
+             .map_err(|_| anyhow!("managed display is busy"))?;
+         (None, Some(capture))
+     };
+-    let probe_route = matches!(
+-        signal.operation.as_ref(),
+-        Some(hbb_common::rendezvous_proto::desk_realm_signal::Operation::RelayRequest(_))
+-    )
+-    .then(|| route.clone());
+-    let network = desktop.network();
+-    let (transport, ()) = tokio::join!(
+-        network.accept_target(&desktop.authority, &desktop.device, &desktop.rustdesk_id, signal),
+-        async {
+-            if let Some(route) = probe_route {
+-                if desktop
+-                    .authority
+-                    .collect_relay_probes(
+-                        &route,
+-                        &desktop.device,
+-                        state.credential.bearer(),
+-                        PeerRole::Target,
+-                    )
+-                    .await
+-                    .is_err()
+-                {
+-                    hbb_common::log::debug!("Managed target relay measurements unavailable");
+-                }
+-            }
+-        }
+-    );
+-    let (mut stream, route, path) = transport?;
++    let (mut stream, route, path, regional_relay) = desktop.network()
++        .accept_target_with_selection(
++            &desktop.authority, &desktop.device, &desktop.rustdesk_id, signal,
++            state.credential.bearer(),
++        )
++        .await?;
+     let unattended = policy
+         .unattended_purposes()
+         .iter()
+         .map(String::as_str)
+         .collect::<Vec<_>>();
+-    let relay_id = if path == Path::Relay {
++    let relay_id = if let Some(id) = regional_relay.as_deref() {
++        id
++    } else if path == Path::Relay {
+         &desktop
+             .relay
+             .as_ref()

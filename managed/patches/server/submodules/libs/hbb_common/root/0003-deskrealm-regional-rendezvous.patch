@@ -1,0 +1,12 @@
+diff --git a/protos/rendezvous.proto b/protos/rendezvous.proto
+index 9c5289f..5c1e35f 100644
+--- a/protos/rendezvous.proto
++++ b/protos/rendezvous.proto
+@@ -182,6 +182,7 @@ message DeskRealmRoute {
+ message DeskRealmSignal {
+   DeskRealmRoute route = 1;
+   bytes offer_nonce = 10;
++  bool regional_relay = 15;
+   oneof operation {
+     PunchHoleRequest direct_request = 2;
+     PunchHole direct_candidate = 3;

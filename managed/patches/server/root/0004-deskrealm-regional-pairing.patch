@@ -1,0 +1,248 @@
+diff --git a/src/regional_relay.rs b/src/regional_relay.rs
+index 0b709aa..884726f 100644
+--- a/src/regional_relay.rs
++++ b/src/regional_relay.rs
+@@ -5,14 +5,16 @@ use hbb_common::{
+         Engine as _,
+     },
+     deskrealm_protocol::{
+-        encode, RelayProbePermit, RELAY_PROBE_HOLDER, SESSION_PROBE_FRAME_SIZE, SESSION_PROBE_PREFIX,
++        encode, RelayCredential, RelayProbePermit, RELAY_PROBE_HOLDER, RELAY_TICKET_PROOF,
++        SESSION_PROBE_FRAME_SIZE, SESSION_PROBE_PREFIX, SESSION_TICKET_FRAME_SIZE,
++        SESSION_TICKET_PREFIX,
+     },
+     tcp::listen_any,
+     tokio::{
+         self,
+-        io::{AsyncReadExt, AsyncWriteExt},
++        io::{copy_bidirectional, AsyncReadExt, AsyncWriteExt},
+         net::TcpStream,
+-        sync::{Mutex, Semaphore},
++        sync::{oneshot, Mutex, OwnedSemaphorePermit, Semaphore},
+         time::{timeout, Duration},
+     },
+     ResultType,
+@@ -24,7 +26,10 @@ use std::{
+     fs::File,
+     io::Read,
+     path::{Path, PathBuf},
+-    sync::Arc,
++    sync::{
++        atomic::{AtomicU32, Ordering},
++        Arc,
++    },
+     time::{SystemTime, UNIX_EPOCH},
+ };
+ use uuid::Uuid;
+@@ -47,6 +52,7 @@ struct RelayIdentity {
+ struct RelayConfiguration {
+     endpoint: String,
+     config_version: u64,
++    capacity: u32,
+ }
+ 
+ struct RegionalRelay {
+@@ -55,6 +61,29 @@ struct RegionalRelay {
+     key: sign::SecretKey,
+     center: Option<sign::PublicKey>,
+     samples: Mutex<HashMap<[u8; 32], (u64, u8)>>,
++    pairs: Mutex<HashMap<[u8; 32], PairEntry>>,
++    active: AtomicU32,
++}
++
++struct Ticket {
++    receipt: Vec<u8>,
++    role: u8,
++    expires: u64,
++    version: u64,
++    endpoint: sha256::Digest,
++}
++
++struct PairEntry {
++    expires: u64,
++    waiting: Option<(u8, oneshot::Sender<TcpStream>)>,
++}
++
++struct ActivePair<'a>(&'a AtomicU32);
++
++impl Drop for ActivePair<'_> {
++    fn drop(&mut self) {
++        self.0.fetch_sub(1, Ordering::Relaxed);
++    }
+ }
+ 
+ fn load_identity(state: &Path) -> ResultType<RelayIdentity> {
+@@ -104,6 +133,8 @@ pub(crate) async fn run(port: u16, state: PathBuf) -> ResultType<()> {
+         key,
+         center,
+         samples: Mutex::new(HashMap::new()),
++        pairs: Mutex::new(HashMap::new()),
++        active: AtomicU32::new(0),
+     });
+     let listener = listen_any(port).await?;
+     let slots = Arc::new(Semaphore::new(64));
+@@ -115,8 +146,7 @@ pub(crate) async fn run(port: u16, state: PathBuf) -> ResultType<()> {
+             };
+             let relay = Arc::clone(&relay);
+             tokio::spawn(async move {
+-                let _permit = permit;
+-                let _ = timeout(FRAME_TIMEOUT, relay.probe(stream)).await;
++                let _ = relay.serve(stream, permit).await;
+             });
+         }
+     };
+@@ -131,21 +161,33 @@ fn unix_ms() -> ResultType<u64> {
+ }
+ 
+ impl RegionalRelay {
+-    async fn probe(&self, mut stream: TcpStream) -> ResultType<()> {
++    async fn serve(&self, mut stream: TcpStream, pending: OwnedSemaphorePermit) -> ResultType<()> {
+         let mut prefix = [0; PREFIX.len()];
+-        stream.read_exact(&mut prefix).await?;
+-        let (purpose, proof) = match prefix.as_slice() {
++        timeout(FRAME_TIMEOUT, stream.read_exact(&mut prefix)).await??;
++        if prefix.as_slice() == SESSION_TICKET_PREFIX {
++            let ticket = timeout(FRAME_TIMEOUT, self.authenticate_ticket(&mut stream)).await??;
++            self.pair(stream, ticket, pending).await
++        } else {
++            timeout(FRAME_TIMEOUT, self.probe(stream, &prefix)).await?
++        }
++    }
++
++    async fn probe(&self, mut stream: TcpStream, prefix: &[u8]) -> ResultType<()> {
++        let (purpose, proof) = match prefix {
+             PREFIX => {
+                 let mut challenge = [0; 32];
+                 stream.read_exact(&mut challenge).await?;
+                 (PREFIX, challenge.to_vec())
+             }
+-            SESSION_PROBE_PREFIX => (SESSION_PROBE_PREFIX, self.authorize_probe(&mut stream).await?),
++            SESSION_PROBE_PREFIX => (
++                SESSION_PROBE_PREFIX,
++                self.authorize_probe(&mut stream).await?,
++            ),
+             _ => return Ok(()),
+         };
+         let mut data = [0; BODY_SIZE];
+         data[..BUILD.len()].copy_from_slice(BUILD);
+-        // Regional session pairing is enabled with node-bound tickets.
++        data[BUILD_SIZE..].copy_from_slice(&self.active.load(Ordering::Relaxed).to_be_bytes());
+         let mut message = purpose.to_vec();
+         message.extend_from_slice(&proof);
+         message.extend_from_slice(&data);
+@@ -210,4 +252,115 @@ impl RegionalRelay {
+         *seen |= bit;
+         Ok(proof)
+     }
++
++    async fn authenticate_ticket(&self, stream: &mut TcpStream) -> ResultType<Ticket> {
++        let Some(center) = &self.center else {
++            bail!("relay tickets require a center verification key");
++        };
++        let mut entry = [0; SESSION_TICKET_FRAME_SIZE + sign::SIGNATUREBYTES];
++        stream.read_exact(&mut entry).await?;
++        let (frame, signature) = entry.split_at(SESSION_TICKET_FRAME_SIZE);
++        let Some(ticket) = RelayCredential::verify_ticket(frame, signature, center) else {
++            bail!("invalid regional relay ticket");
++        };
++        if ticket.node != *self.node.as_bytes() || !ticket.active(unix_ms()?) {
++            bail!("inactive ticket or wrong relay");
++        }
++        self.ticket_capacity(ticket.version, ticket.endpoint)?;
++
++        let nonce = crate::managed_transport::nonce();
++        stream.write_all(&nonce).await?;
++        let mut answer = [0; sign::SIGNATUREBYTES];
++        stream.read_exact(&mut answer).await?;
++        let digest = sha256::hash(frame);
++        let Some(proof) = encode(RELAY_TICKET_PROOF, &[digest.as_ref(), &nonce]) else {
++            bail!("invalid relay ticket binding");
++        };
++        let Ok(signature) = sign::Signature::from_bytes(&answer) else {
++            bail!("invalid relay ticket holder signature");
++        };
++        if !sign::verify_detached(&signature, &proof, &ticket.holder) {
++            bail!("invalid relay ticket holder");
++        }
++        let Some(receipt) = ticket.pair_receipt_frame() else {
++            bail!("invalid relay pairing binding");
++        };
++        Ok(Ticket {
++            receipt,
++            role: ticket.role,
++            expires: ticket.expires,
++            version: ticket.version,
++            endpoint: ticket.endpoint,
++        })
++    }
++
++    fn ticket_capacity(&self, version: u64, endpoint: sha256::Digest) -> ResultType<u32> {
++        let config = load_identity(&self.state)?.configuration;
++        if config.config_version != version || sha256::hash(config.endpoint.as_bytes()) != endpoint
++        {
++            bail!("relay ticket is for another configuration");
++        }
++        Ok(config.capacity)
++    }
++
++    async fn pair(
++        &self,
++        mut stream: TcpStream,
++        ticket: Ticket,
++        pending: OwnedSemaphorePermit,
++    ) -> ResultType<()> {
++        let key = sha256::hash(&ticket.receipt).0;
++        let (other, remaining) = {
++            let mut pairs = self.pairs.lock().await;
++            let now = unix_ms()?;
++            if now >= ticket.expires {
++                bail!("relay ticket expired");
++            }
++            pairs.retain(|_, entry| entry.expires > now);
++            if let Some(entry) = pairs.get_mut(&key) {
++                if entry.expires != ticket.expires
++                    || entry.waiting.as_ref().map(|(role, _)| *role) != Some(3 - ticket.role)
++                {
++                    bail!("relay ticket already used or wrong role");
++                }
++                let (_, first) = entry.waiting.take().expect("opposite role is waiting");
++                first
++                    .send(stream)
++                    .map_err(|_| hbb_common::anyhow::anyhow!("relay peer disconnected"))?;
++                return Ok(());
++            }
++            if pairs.len() >= 4096 {
++                bail!("regional relay pairing table is full");
++            }
++            let (first, other) = oneshot::channel();
++            pairs.insert(
++                key,
++                PairEntry {
++                    expires: ticket.expires,
++                    waiting: Some((ticket.role, first)),
++                },
++            );
++            (other, Duration::from_millis(ticket.expires - now))
++        };
++        let mut peer = timeout(remaining, other).await??;
++        let capacity = self.ticket_capacity(ticket.version, ticket.endpoint)?;
++        let now = unix_ms()?;
++        if now >= ticket.expires {
++            bail!("relay tickets expired before pairing");
++        }
++        self.active
++            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |active| {
++                (active < capacity).then_some(active + 1)
++            })
++            .map_err(|_| hbb_common::anyhow::anyhow!("regional relay is at capacity"))?;
++        let _active = ActivePair(&self.active);
++        let receipt = sign::sign_detached(&ticket.receipt, &self.key).to_bytes();
++        timeout(Duration::from_millis(ticket.expires - now), async {
++            tokio::try_join!(stream.write_all(&receipt), peer.write_all(&receipt))
++        })
++        .await??;
++        drop(pending);
++        copy_bidirectional(&mut stream, &mut peer).await?;
++        Ok(())
++    }
+ }
