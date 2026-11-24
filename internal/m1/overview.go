@@ -14,6 +14,7 @@ type overviewMetrics struct {
 	PendingApprovals *int64 `json:"pending_approvals,omitempty"`
 	AddressBooks     int64  `json:"address_books"`
 	RetryableTargets *int64 `json:"retryable_targets,omitempty"`
+	AvailableRelays  *int64 `json:"available_relays,omitempty"`
 }
 
 type overviewEvent struct {
@@ -87,6 +88,10 @@ func (a *API) overview(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if who.PlatformAdmin {
+			if err := tx.QueryRow(ctx, `SELECT count(*) FROM relay_nodes WHERE organization_id=$1 AND (`+
+				relayStateSQL+`)='available'`, who.Organization).Scan(&result.Metrics.AvailableRelays); err != nil {
+				return err
+			}
 			err = tx.QueryRow(ctx, `SELECT count(*) FROM task_targets tt JOIN tasks t ON t.id=tt.task_id
 				WHERE t.organization_id=$1 AND (t.kind='user_import' OR ($3 AND t.kind='delivery')) AND tt.retryable AND tt.attempt_count<$2`,
 				who.Organization, maxTaskAttempts, a.store.Delivery != nil).Scan(&result.Metrics.RetryableTargets)

@@ -63,6 +63,10 @@ const messages: Record<string, string> = {
   invalid_task_request: '请检查任务与重试对象。',
   task_not_found: '任务不存在或当前账号无权查看。',
   task_target_conflict: '所选对象的状态已变更。请关闭确认窗口并刷新任务。',
+  invalid_relay_change: '请检查操作及公布地址。',
+  relay_lifecycle_conflict: '节点状态已变更。请关闭窗口、刷新节点后重试。',
+  relay_endpoint_conflict: '该公布地址已由其他中继使用。',
+  relay_not_found: '中继不存在或当前账号无权查看。',
 }
 
 export class RequestError extends Error {

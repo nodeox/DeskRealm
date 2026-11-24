@@ -1,7 +1,7 @@
 export type TaskState = 'waiting' | 'queued' | 'running' | 'succeeded' | 'failed' | 'canceled'
 export type TaskSummary = Record<TaskState, number> & {
   id: string
-  kind: 'user_import' | 'device_enrollment' | 'center_install' | 'delivery' | 'relay_enrollment'
+  kind: 'user_import' | 'device_enrollment' | 'center_install' | 'delivery' | 'relay_enrollment' | 'relay_lifecycle'
   created_at: string
   device_id?: string
   group?: string
@@ -12,7 +12,7 @@ export const taskStates: Record<TaskState, string> = {
 }
 export const taskKinds = {
   user_import: '账号导入', device_enrollment: '设备入网', center_install: '中心安装',
-  delivery: '交付任务', relay_enrollment: '中继登记',
+  delivery: '交付任务', relay_enrollment: '中继登记', relay_lifecycle: '中继操作',
 }
 
 export function taskProgress(item: TaskSummary) {
@@ -36,6 +36,7 @@ export type Overview = {
     pending_approvals?: number
     address_books: number
     retryable_targets?: number
+    available_relays?: number
   }
   recent_tasks: TaskSummary[]
   recent_audit: { id: string; action: string; occurred_at: string; receipt_state: 'confirmed' | 'pending' }[]

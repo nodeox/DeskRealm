@@ -24,7 +24,7 @@ type Task = TaskSummary & {
   installation?: { deployment_id: string; revision: number; steps: InstallStep[] }
 }
 
-const props = defineProps<{ csrf: string }>()
+const props = defineProps<{ csrf: string; admin: boolean }>()
 const emit = defineEmits<{ expired: [] }>()
 const results: Record<string, string> = {
   pending: '账号待激活', exists: '账号已存在', import_failed: '账号写入失败', pending_approval: '等待设备审批',
@@ -32,6 +32,9 @@ const results: Record<string, string> = {
   lease_expired: '执行租约已过期', authorization_changed: '重试申请人的管理员权限已变更',
   delivery_succeeded: '外部执行成功', delivery_failed: '外部执行失败', canceled: '执行前已取消',
   relay_pending_enrollment: '等待中继登记', relay_pending_probe: '已登记，等待验活',
+  relay_available: '中继已入池', relay_draining: '中继已排空新会话', relay_disabled: '中继已停用',
+  relay_resumed: '中继已恢复', relay_endpoint_changed: '公布地址已验证并更新',
+  relay_probe_failed: '公布地址探测未通过', relay_health_required: '等待当前配置的签名健康回执',
 }
 const steps = { images: '准备镜像', database: '检查数据库', services: '启动服务', health: '验证服务健康' }
 const installStates = { pending: '待执行', running: '执行中', completed: '成功', failed: '失败', interrupted: '已中断' }
@@ -145,7 +148,10 @@ onMounted(async () => {
   <section class="users-surface" aria-labelledby="tasks-heading">
     <div class="section-heading">
       <h2 id="tasks-heading">任务列表</h2>
-      <button class="secondary" :disabled="busy" @click="refresh()">刷新</button>
+      <div class="control-actions">
+        <a v-if="admin" href="/relays?add=1">接入区域中继</a>
+        <button class="secondary" :disabled="busy" @click="refresh()">刷新</button>
+      </div>
     </div>
     <p v-if="retryOnly" class="muted active-filter">仅显示含可重试失败对象的任务。<a href="/tasks">显示全部任务</a></p>
     <p v-if="error" class="error" role="alert">{{ error }}</p>
@@ -197,6 +203,7 @@ onMounted(async () => {
           <tr v-for="target in task.targets" :key="target.id">
             <td>
               <label v-if="target.can_retry || target.can_cancel" class="control-actions"><input v-model="selected" type="checkbox" :value="target.id" :disabled="busy"> {{ target.object_key }}</label>
+              <a v-else-if="task.kind === 'relay_enrollment' || task.kind === 'relay_lifecycle'" :href="'/relays?node=' + target.object_key">{{ target.object_key }}</a>
               <span v-else>{{ target.object_key }}</span>
               <div v-if="target.operation_id" class="muted">操作 ID <code>{{ target.operation_id }}</code></div>
             </td>

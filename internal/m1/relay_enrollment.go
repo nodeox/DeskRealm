@@ -317,7 +317,7 @@ func (a *API) relayHealth(w http.ResponseWriter, r *http.Request) {
 			return errTaskConflict
 		}
 		_, err = tx.Exec(ctx, `UPDATE relay_nodes SET health_sequence=$2,health_at=$3,
-			active_sessions=$4,protocol_ready=$5 WHERE id=$1`,
+			active_sessions=$4,protocol_ready=$5,health_config_version=config_version WHERE id=$1`,
 			in.NodeID, in.Sequence, now, in.ActiveSessions, in.ProtocolReady)
 		return err
 	})
@@ -369,6 +369,19 @@ type relayNodeSummary struct {
 	State          string     `json:"state"`
 	HealthAt       *time.Time `json:"health_at,omitempty"`
 	ActiveSessions *int       `json:"active_sessions,omitempty"`
+	Mode           string     `json:"mode"`
+	Revision       int64      `json:"revision"`
+	OperationTask  string     `json:"operation_task_id,omitempty"`
+}
+
+const relaySummaryFields = `id,endpoint,site,region,build,config_version,capacity,name,task_id,` +
+	relayStateSQL + `,health_at,active_sessions,mode,revision,COALESCE(last_operation_task_id::text,'')`
+
+func readRelaySummary(row pgx.Row) (relayNodeSummary, error) {
+	var node relayNodeSummary
+	err := row.Scan(&node.NodeID, &node.Endpoint, &node.Site, &node.Region, &node.Build, &node.Version, &node.Capacity,
+		&node.Name, &node.TaskID, &node.State, &node.HealthAt, &node.ActiveSessions, &node.Mode, &node.Revision, &node.OperationTask)
+	return node, err
 }
 
 func (a *API) listRelayNodes(w http.ResponseWriter, r *http.Request) {
@@ -378,23 +391,15 @@ func (a *API) listRelayNodes(w http.ResponseWriter, r *http.Request) {
 		if !who.PlatformAdmin {
 			return errForbidden
 		}
-		rows, err := tx.Query(ctx, `SELECT id,endpoint,site,region,build,config_version,capacity,name,task_id,
-			`+relayStateSQL+`,health_at,active_sessions
+		rows, err := tx.Query(ctx, `SELECT `+relaySummaryFields+`
 			FROM relay_nodes WHERE organization_id=$1 ORDER BY name,id`, who.Organization)
 		if err != nil {
 			return err
 		}
-		defer rows.Close()
-		for rows.Next() {
-			var node relayNodeSummary
-			err := rows.Scan(&node.NodeID, &node.Endpoint, &node.Site, &node.Region, &node.Build, &node.Version, &node.Capacity,
-				&node.Name, &node.TaskID, &node.State, &node.HealthAt, &node.ActiveSessions)
-			if err != nil {
-				return err
-			}
-			nodes = append(nodes, node)
-		}
-		return rows.Err()
+		nodes, err = pgx.AppendRows(nodes, rows, func(row pgx.CollectableRow) (relayNodeSummary, error) {
+			return readRelaySummary(row)
+		})
+		return err
 	})
 	if err != nil {
 		failure(w, "list relay nodes", err)

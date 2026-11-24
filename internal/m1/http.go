@@ -158,6 +158,8 @@ func NewHandler(store Store, origin *url.URL, web fs.FS, config ...AuthConfig) h
 	mux.HandleFunc("POST /v1/internal/managed/rendezvous/authorize", api.authorizeSessionRoute)
 	mux.HandleFunc("POST /v1/internal/managed/relay/paired", api.authorizeSessionRoute)
 	mux.HandleFunc("GET /v1/admin/relays", api.listRelayNodes)
+	mux.HandleFunc("GET /v1/admin/relays/{id}", api.relayNodeDetail)
+	mux.HandleFunc("POST /v1/admin/relays/{id}/lifecycle", api.changeRelayLifecycle)
 	mux.HandleFunc("POST /v1/admin/relays", api.issueRelayEnrollment)
 	mux.HandleFunc("POST /v1/admin/relays/{id}/credential", api.issueRelayEnrollment)
 	mux.HandleFunc("POST /v1/relays/enrollment/challenge", api.relayEnroll)
@@ -240,7 +242,7 @@ func (a *API) frontend(w http.ResponseWriter, r *http.Request) {
 	}
 	p := strings.TrimPrefix(r.URL.Path, "/")
 	switch p {
-	case "", "initialize", "login", "overview", "users", "groups", "devices", "policies", "sessions", "address-books", "audit", "tasks", "api-tokens", "security", "accept-invitation", "recover":
+	case "", "initialize", "login", "overview", "users", "groups", "devices", "policies", "sessions", "address-books", "audit", "tasks", "relays", "api-tokens", "security", "accept-invitation", "recover":
 		w.Header().Set("Cache-Control", "no-store")
 		http.ServeFileFS(w, r, a.web, "index.html")
 	default:
@@ -311,11 +313,13 @@ func failure(w http.ResponseWriter, operation string, err error) {
 		writeError(w, http.StatusNotFound, err.Error())
 	case errors.Is(err, errConnectionStale), errors.Is(err, errPolicyStale):
 		writeError(w, http.StatusConflict, err.Error())
-	case errors.Is(err, errAuditInvalid), errors.Is(err, errTaskInvalid):
+	case errors.Is(err, errAuditInvalid), errors.Is(err, errTaskInvalid), errors.Is(err, errRelayInput):
 		writeError(w, http.StatusBadRequest, err.Error())
-	case errors.Is(err, errAuditExportLimit), errors.Is(err, errAuditConflict), errors.Is(err, errTaskConflict):
+	case errors.Is(err, errAuditExportLimit), errors.Is(err, errAuditConflict), errors.Is(err, errTaskConflict),
+		errors.Is(err, errRelayConflict), errors.Is(err, errRelayEndpointConflict):
 		writeError(w, http.StatusConflict, err.Error())
-	case errors.Is(err, errDeviceMissing), errors.Is(err, errDeviceGroupMissing), errors.Is(err, errAuditMissing), errors.Is(err, errTaskMissing):
+	case errors.Is(err, errDeviceMissing), errors.Is(err, errDeviceGroupMissing), errors.Is(err, errAuditMissing),
+		errors.Is(err, errTaskMissing), errors.Is(err, errRelayMissing):
 		writeError(w, http.StatusNotFound, err.Error())
 	case errors.Is(err, errBookMissing), errors.Is(err, errEntryMissing), errors.Is(err, errGrantMissing):
 		writeError(w, http.StatusNotFound, err.Error())

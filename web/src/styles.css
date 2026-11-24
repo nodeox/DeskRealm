@@ -134,6 +134,9 @@ dialog { width: min(calc(100% - 28px), 420px); border: 1px solid var(--line); bo
 dialog::backdrop { background: rgb(25 32 51 / .35); }
 .dialog-copy { margin: 12px 0 16px; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.relay-fields { min-width: 0; margin: 0; padding: 0; border: 0; }
+#relay-credential { resize: vertical; }
+.relay-commands { white-space: pre-wrap; overflow-wrap: anywhere; }
 .device-identifier { overflow-wrap: anywhere; font-family: ui-monospace, monospace; }
 .device-detail-actions { margin: 14px 0; }
 .address-book-detail { margin-top: 16px; min-width: 0; }

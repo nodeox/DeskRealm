@@ -12,9 +12,10 @@ import TasksPanel from './TasksPanel.vue'
 import PoliciesPanel from './PoliciesPanel.vue'
 import SessionsPanel from './SessionsPanel.vue'
 import OverviewPanel from './OverviewPanel.vue'
+import RelaysPanel from './RelaysPanel.vue'
 import type { Overview } from './overview'
 
-type WorkspacePage = 'overview' | 'users' | 'groups' | 'devices' | 'policies' | 'sessions' | 'address-books' | 'audit' | 'tasks' | 'api-tokens' | 'security'
+type WorkspacePage = 'overview' | 'users' | 'groups' | 'devices' | 'policies' | 'sessions' | 'address-books' | 'audit' | 'tasks' | 'relays' | 'api-tokens' | 'security'
 type Screen = WorkspacePage | 'loading' | 'initialize' | 'login' | 'accept-invitation' | 'recover' | 'unavailable'
 type Session = { username: string; csrf_token: string }
 type Capability = 'can_manage' | 'can_read_users' | 'can_read_devices' | 'can_read_audit' | 'can_read_tasks'
@@ -25,6 +26,7 @@ const navigation: { page: WorkspacePage; title: string; capability?: Capability 
   { page: 'address-books', title: '通讯录' },
   { page: 'policies', title: '访问策略', capability: 'can_manage' },
   { page: 'sessions', title: '会话管理' },
+  { page: 'relays', title: '区域中继', capability: 'can_manage' },
   { page: 'audit', title: '审计事件', capability: 'can_read_audit' },
   { page: 'tasks', title: '任务中心', capability: 'can_read_tasks' },
   { page: 'users', title: '用户与权限', capability: 'can_read_users' },
@@ -222,7 +224,8 @@ onMounted(load)
       <PoliciesPanel v-else-if="screen === 'policies'" :csrf="session.csrf_token" @expired="load" />
       <SessionsPanel v-else-if="screen === 'sessions'" :csrf="session.csrf_token" :can-audit="overview.can_read_audit" :can-read-devices="overview.can_read_devices" @expired="load" />
       <AuditPanel v-else-if="screen === 'audit'" :csrf="session.csrf_token" :admin="overview.can_manage" @expired="load" />
-      <TasksPanel v-else-if="screen === 'tasks'" :csrf="session.csrf_token" @expired="load" />
+      <TasksPanel v-else-if="screen === 'tasks'" :csrf="session.csrf_token" :admin="overview.can_manage" @expired="load" />
+      <RelaysPanel v-else-if="screen === 'relays'" :csrf="session.csrf_token" @expired="load" />
       <GroupsPanel v-else-if="screen === 'groups'" :csrf="session.csrf_token" @expired="load" />
       <TokensPanel v-else-if="screen === 'api-tokens'" :csrf="session.csrf_token" @expired="load" />
       <SecurityPanel v-else-if="screen === 'security'" :csrf="session.csrf_token" @expired="load" />

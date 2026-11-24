@@ -1,0 +1,92 @@
+import { expect, test, type Page } from '@playwright/test'
+
+async function login(page: Page, user: string) {
+  await page.goto('/login')
+  await page.getByLabel('账号').fill(user)
+  await page.getByLabel('密码', { exact: true }).fill('deskrealm test passphrase')
+  await page.getByRole('button', { name: '登录', exact: true }).click()
+  await expect(page.getByRole('navigation', { name: '工作台导航' })).toBeVisible()
+}
+
+test('区域中继处理接入、排空、停用、恢复及地址切换', async ({ page, browser }) => {
+  const node = process.env.DESKREALM_BROWSER_RELAY_NODE
+  const bad = process.env.DESKREALM_BROWSER_RELAY_BAD
+  const good = process.env.DESKREALM_BROWSER_RELAY_GOOD
+  const occupied = process.env.DESKREALM_BROWSER_RELAY_OCCUPIED
+  const session = process.env.DESKREALM_BROWSER_RELAY_SESSION
+  if (!node || !bad || !good || !occupied || !session) throw new Error('Run scripts/deskrealm-m3-test relay-lifecycle')
+  await login(page, 'admin')
+  await expect(page.getByRole('link', { name: '可用中继 2' })).toBeVisible()
+  await page.getByRole('link', { name: '可用中继 2' }).click()
+  await expect(page.getByRole('row').filter({ hasText: 'site-full' })).toContainText('已满载')
+  await expect(page.getByRole('row').filter({ hasText: 'site-faulty' })).toContainText('探测故障')
+  await expect(page.getByRole('row').filter({ hasText: 'site-expired' })).toContainText('待签名健康')
+  await page.goto('/tasks')
+  await page.getByRole('link', { name: '接入区域中继' }).click()
+  let dialog = page.getByRole('dialog', { name: '接入区域中继' })
+  await dialog.getByLabel('节点名称').fill('gamma')
+  await dialog.getByLabel('站点').fill('site-gamma')
+  await dialog.getByLabel('区域').fill('north')
+  await dialog.getByLabel('公布地址').fill('relay-gamma.example.test:21117')
+  await dialog.getByRole('button', { name: '确认接入区域中继' }).click()
+  const field = page.getByLabel('登记凭据', { exact: true })
+  await expect(field).toHaveValue(/^dre_/)
+  const original = await field.inputValue()
+  await page.getByText('主机登记命令', { exact: true }).click()
+  const command = page.getByText(/deskrealm-relay prepare/)
+  await expect(command).toContainText('--credential-file')
+  await expect(command).not.toContainText(original)
+  await page.getByRole('button', { name: '关闭凭据' }).click()
+  await page.getByRole('button', { name: '补发登记凭据' }).click()
+  await page.getByRole('dialog', { name: '补发登记凭据' }).getByRole('button', { name: '确认补发登记凭据' }).click()
+  await expect(field).toHaveValue(/^dre_/)
+  await expect(field).not.toHaveValue(original)
+  await page.getByRole('button', { name: '关闭凭据' }).click()
+  await page.getByLabel('筛选区域').selectOption('north')
+  await expect(page.getByRole('button', { name: 'beta', exact: true })).toHaveCount(0)
+  await page.getByRole('button', { name: 'alpha', exact: true }).click()
+
+  const row = page.getByRole('row').filter({ has: page.getByRole('button', { name: 'alpha', exact: true }) })
+  async function operate(label: string, address?: string) {
+    await page.getByRole('button', { name: label, exact: true }).click()
+    dialog = page.getByRole('dialog', { name: label })
+    if (address) await dialog.getByLabel('新公布地址').fill(address)
+    await dialog.getByRole('button', { name: '确认' + label, exact: true }).click()
+    await expect(dialog).toBeHidden()
+  }
+  await operate('排空')
+  await expect(row).toContainText('排空中')
+  await expect(page.getByRole('link', { name: session }).locator('..')).toContainText('活动中')
+  await page.goto('/overview')
+  await expect(page.getByRole('link', { name: '可用中继 1' })).toBeVisible()
+  await page.goto('/relays?node=' + node)
+  await operate('停用')
+  await expect(row).toContainText('已停用')
+  await operate('恢复')
+  await expect(row.getByRole('cell', { name: '可用', exact: true })).toBeVisible()
+  await page.getByRole('button', { name: '切换公布地址', exact: true }).click()
+  dialog = page.getByRole('dialog', { name: '切换公布地址' })
+  await dialog.getByLabel('新公布地址').fill(occupied)
+  await dialog.getByRole('button', { name: '确认切换公布地址' }).click()
+  await expect(dialog.getByRole('alert')).toContainText('该公布地址已由其他中继使用')
+  await dialog.getByRole('button', { name: '取消', exact: true }).click()
+  await operate('切换公布地址', bad)
+  await expect(page.getByRole('status')).toContainText('公布地址探测未通过')
+  await expect(page.getByRole('row').filter({ hasText: bad })).toContainText('身份或协议不匹配')
+  await expect(row).not.toContainText(bad)
+  await operate('切换公布地址', good)
+  await expect(row).toContainText(good)
+  await page.getByRole('link', { name: '查看操作任务' }).click()
+  await expect(page.getByRole('heading', { name: '中继操作详情' })).toBeVisible()
+  await expect(page.getByText('公布地址已验证并更新', { exact: true })).toBeVisible()
+
+  const member = await browser.newContext({ baseURL: process.env.DESKREALM_BROWSER_BASE })
+  try {
+    const memberPage = await member.newPage()
+    await login(memberPage, 'member')
+    await expect(memberPage.getByRole('link', { name: /区域中继|可用中继/ })).toHaveCount(0)
+    expect((await memberPage.request.get('/v1/admin/relays')).status()).toBe(403)
+  } finally {
+    await member.close()
+  }
+})

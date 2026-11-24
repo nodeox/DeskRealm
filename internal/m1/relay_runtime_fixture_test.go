@@ -154,7 +154,7 @@ func TestRegionalRelayRuntimePostgres(t *testing.T) {
 		for time.Now().Before(until) {
 			var sequence int64
 			var ready bool
-			if err := store.DB.QueryRow(ctx, `SELECT health_sequence,coalesce(protocol_ready,false)
+			if err := store.DB.QueryRow(ctx, `SELECT health_sequence,coalesce(protocol_ready AND health_config_version=config_version,false)
 				FROM relay_nodes WHERE id=$1`, node.NodeID).Scan(&sequence, &ready); err != nil {
 				t.Fatal(err)
 			}
@@ -217,12 +217,20 @@ func TestRegionalRelayRuntimePostgres(t *testing.T) {
 	taskSQL(t, ctx, store, "UPDATE relay_nodes SET health_at=statement_timestamp()-interval '16 seconds' WHERE id=$1", a.NodeID)
 	checkStates("awaiting_health", "available")
 	start(a)
+	sequence = waitHealth(a, sequence)
+	sweep()
+	checkStates("available", "available")
+	newEndpoint, newPublished := relayFixturePublish(t)
+	newPublished.Store(&a.local)
+	change := request(h, "POST", "/v1/admin/relays/"+a.NodeID+"/lifecycle", testOrigin,
+		relayChange{"change_endpoint", 1, newEndpoint}, admin, csrf)
+	checkCode(t, change, 200, "relay_endpoint_changed")
 	waitHealth(a, sequence)
 	sweep()
 	checkStates("available", "available")
 	out := command("status", "--state", a.state)
-	if !strings.Contains(string(out), a.public) {
-		t.Fatal("runtime restart changed relay public key")
+	if !strings.Contains(string(out), a.public) || !strings.Contains(string(out), newEndpoint) {
+		t.Fatal("runtime restart or address change lost the relay identity or approved configuration")
 	}
 	var registrations, admissions int
 	err := store.DB.QueryRow(ctx, `SELECT count(*) FILTER (WHERE action='relay.registered'),

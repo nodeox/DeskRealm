@@ -7,6 +7,7 @@ const props = defineProps<{ overview: Overview; refreshing: boolean }>()
 const emit = defineEmits<{ refresh: [] }>()
 const cards = [
   { key: 'active_sessions', label: '活动会话', path: '/sessions' },
+  { key: 'available_relays', label: '可用中继', path: '/relays' },
   { key: 'online_devices', label: '在线设备', path: '/devices' },
   { key: 'pending_approvals', label: '待审批设备', path: '/devices?review=pending' },
   { key: 'users', label: '可查看账号', path: '/users' },
@@ -69,5 +70,4 @@ function localTime(value: string) {
       <p v-else class="muted">暂无可查看的审计事件。</p>
     </section>
   </div>
-  <p v-if="overview.can_manage" class="muted overview-integrations">中继健康指标待接入。</p>
 </template>

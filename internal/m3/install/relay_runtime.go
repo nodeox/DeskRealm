@@ -110,6 +110,15 @@ func runRelayHost(ctx context.Context, client *http.Client, directory, binary, p
 	defer tick.Stop()
 	for childCtx.Err() == nil {
 		err := reportRelayHealth(childCtx, client, directory, endpoint, state, key)
+		if errors.Is(err, relayHTTPStatus(http.StatusConflict)) {
+			updated, refreshErr := enrollRelayHost(childCtx, client, directory, "", state)
+			if refreshErr != nil {
+				err = errors.Join(err, refreshErr)
+			} else if updated.Config.Version != state.Config.Version {
+				state = updated
+				err = reportRelayHealth(childCtx, client, directory, endpoint, state, key)
+			}
+		}
 		if err != nil && childCtx.Err() == nil {
 			fmt.Fprintln(stderr, "relay health:", err)
 		}

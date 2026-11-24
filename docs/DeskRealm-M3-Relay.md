@@ -18,6 +18,14 @@
 
 `GET /v1/admin/relays` 返回节点状态。中心每五秒从自己的网络连接公布的 TCP 端点，发送随机挑战，并用登记公钥核对端点对构建版本与会话数的签名。首次通过探测并具有 15 秒内的签名健康回执和可用容量时，节点进入 `available`，登记任务写入 `relay_available` 和审计记录。探测结果 15 秒后过期，连续三次失败时节点进入 `probe_unreachable`，下一次有效探测可恢复。节点达到容量时显示为 `at_capacity`。
 
+## 控制台与生命周期
+
+平台管理员从「任务中心」选择「接入区域中继」可生成节点的登记命令和一次性凭据。「区域中继」按区域筛选，节点详情展示登记任务、最近操作、最近 12 次探测和已建立会话。概览中的「可用中继」统计当前具有签名健康、有效探测和剩余容量的可选节点。
+
+`POST /v1/admin/relays/{id}/lifecycle` 接受节点详情中的 `revision` 及 `action`。支持 `drain`、`disable`、`resume` 和 `change_endpoint`。地址切换还需提交 `endpoint`。每次执行返回 `task_id` 和 `result_code`，从任务详情可关联审计。对同一修订的并发变更只有一个能完成。
+
+排空和停用会把节点移出新会话候选。已建立的会话以自身租约为准。恢复需通过独立探测和当前配置的签名健康检查。更新公布地址前，应将新端点连到同一节点进程，使用端口映射时保持本机端口可用。中心核对新地址上的节点身份后才提交地址和配置版本。节点进程同步配置并上报新版本的健康回执后，才能用新地址入池。
+
 ## 中继主机登记
 
 从仓库根目录执行 `go build -o deskrealm-relay ./cmd/deskrealm-relay`。使用中心签发的节点 ID，并将一次性凭据放在仅服务账户可读的文件中，权限设为 `0600`。以下命令使用已经存在的状态父目录 `/var/lib/deskrealm`。
@@ -41,6 +49,7 @@
 
 ```sh
 bash scripts/deskrealm-m3-test relay-enrollment
+bash scripts/deskrealm-m3-test relay-lifecycle
 ```
 
-该检查构建受管 `hbbr` 并运行两个隔离的 Linux 实例。目标环境的 Linux 中心、中继和双 Windows 验收安排在 M0–M3 开发完成后。
+登记检查构建受管 `hbbr` 并运行两个隔离的 Linux 实例。生命周期检查使用临时 PostgreSQL、受控端点和 Chromium。目标环境的 Linux 中心、中继和双 Windows 验收安排在 M0–M3 开发完成后。

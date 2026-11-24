@@ -3,6 +3,7 @@ package m1
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -12,9 +13,11 @@ import (
 )
 
 const relayProbeInterval = 5 * time.Second
-const relayHealthySQL = `health_at>statement_timestamp()-interval '15 seconds' AND protocol_ready`
+const relayHealthySQL = `health_config_version=config_version AND health_at>statement_timestamp()-interval '15 seconds' AND protocol_ready`
 const relayStateSQL = `CASE
 	WHEN registered_at IS NULL THEN 'pending_enrollment'
+	WHEN mode='disabled' THEN 'disabled'
+	WHEN mode='draining' THEN 'draining'
 	WHEN NOT COALESCE(` + relayHealthySQL + `,false) THEN 'awaiting_health'
 	WHEN probe_failures>=3 THEN 'probe_unreachable'
 	WHEN probe_config_version IS DISTINCT FROM config_version
@@ -28,6 +31,20 @@ type relayProbeTarget struct {
 	version                 int64
 	capacity                int
 	checked                 time.Time
+}
+
+func observeRelay(ctx context.Context, target relayProbeTarget) (int, string) {
+	active, err := relayprotocol.Probe(ctx, target.endpoint, target.key, target.build)
+	switch {
+	case errors.Is(err, relayprotocol.ErrProbeProtocol):
+		return 0, "protocol_mismatch"
+	case err != nil:
+		return 0, "unreachable"
+	case active > target.capacity:
+		return 0, "invalid_capacity"
+	default:
+		return active, "verified"
+	}
 }
 
 // RunRelayProbes checks independently from the center's own network. Postgres
@@ -50,7 +67,7 @@ func (s Store) RunRelayProbes(ctx context.Context) {
 
 func (s Store) probeDueRelays(ctx context.Context) error {
 	rows, err := s.DB.Query(ctx, `WITH due AS (
-		SELECT id FROM relay_nodes WHERE registered_at IS NOT NULL AND `+relayHealthySQL+`
+		SELECT id FROM relay_nodes WHERE registered_at IS NOT NULL AND mode<>'disabled' AND `+relayHealthySQL+`
 			AND (probe_checked_at IS NULL OR probe_checked_at<=statement_timestamp()-interval '4 seconds')
 		ORDER BY probe_checked_at NULLS FIRST,id LIMIT 32 FOR UPDATE SKIP LOCKED
 	)
@@ -72,11 +89,11 @@ func (s Store) probeDueRelays(ctx context.Context) error {
 	results := make(chan error, len(targets))
 	for _, target := range targets {
 		tasks.Go(func() {
-			active, err := relayprotocol.Probe(ctx, target.endpoint, target.key, target.build)
+			active, result := observeRelay(ctx, target)
 			if ctx.Err() != nil {
 				return
 			}
-			results <- s.recordRelayProbe(ctx, target, active, err == nil && active <= target.capacity)
+			results <- s.recordRelayProbe(ctx, target, active, result)
 		})
 	}
 	tasks.Wait()
@@ -89,19 +106,40 @@ func (s Store) probeDueRelays(ctx context.Context) error {
 	return ctx.Err()
 }
 
-func (s Store) recordRelayProbe(ctx context.Context, target relayProbeTarget, active int, success bool) error {
+func (s Store) recordRelayProbe(ctx context.Context, target relayProbeTarget, active int, result string) error {
 	return pgx.BeginFunc(ctx, s.DB, func(tx pgx.Tx) error {
 		var task, org, state string
-		err := tx.QueryRow(ctx, `UPDATE relay_nodes SET
+		var previous, failures int
+		success := result == "verified"
+		err := tx.QueryRow(ctx, `WITH before AS (
+			SELECT id,probe_failures AS previous FROM relay_nodes
+			WHERE id=$1 AND config_version=$2 AND probe_checked_at=$3 AND mode<>'disabled' FOR UPDATE
+		)
+		UPDATE relay_nodes SET
 			probe_succeeded_at=CASE WHEN $4 THEN statement_timestamp() ELSE probe_succeeded_at END,
 			probe_config_version=CASE WHEN $4 THEN config_version ELSE probe_config_version END,
 			probe_active_sessions=CASE WHEN $4 THEN $5 ELSE probe_active_sessions END,
 			probe_failures=CASE WHEN $4 THEN 0 ELSE least(probe_failures+1,3) END
-			WHERE id=$1 AND config_version=$2 AND probe_checked_at=$3
-			RETURNING task_id,organization_id,`+relayStateSQL, target.nodeID, target.version, target.checked, success, active).
-			Scan(&task, &org, &state)
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil
+			FROM before WHERE relay_nodes.id=before.id
+			RETURNING task_id,organization_id,`+relayStateSQL+`,before.previous,probe_failures`,
+			target.nodeID, target.version, target.checked, success, active).Scan(&task, &org, &state, &previous, &failures)
+		current := err == nil
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return err
+		}
+		var history int64
+		err = tx.QueryRow(ctx, `INSERT INTO relay_probe_history(node_id,endpoint,config_version,checked_at,result)
+			VALUES($1,$2,$3,$4,$5) RETURNING id`, target.nodeID, target.endpoint, target.version, target.checked, result).Scan(&history)
+		if err != nil || !current {
+			return err
+		}
+		if (previous == 3) != (failures == 3) {
+			action := "relay.probe_recovered"
+			if failures == 3 {
+				action = "relay.probe_lost"
+			}
+			_, err = addAuditEvent(ctx, tx, auditEvent{OrganizationID: org, ResourceID: target.nodeID, TaskID: task,
+				Action: action, Result: result, Source: "relay_probe", SourceKey: fmt.Sprintf("history:%d", history)})
 		}
 		if err != nil || !success || state != "available" {
 			return err
