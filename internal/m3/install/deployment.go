@@ -42,6 +42,8 @@ type publicDeployment struct {
 	SigningKeySHA256    string          `json:"signing_public_key_sha256"`
 	Offline             offlineIdentity `json:"offline,omitzero"`
 	DefaultRelay        publicRelay     `json:"default_relay,omitzero"`
+	centerImage         string
+	centerImageFile     string
 }
 
 var requiredFiles = []string{
@@ -197,6 +199,24 @@ func describeDeployment(c config, id string, route, signing ed25519.PublicKey) p
 }
 
 func readPrepared(c config) (publicDeployment, error) {
+	center, err := readPreparedBase(c)
+	if err != nil {
+		return publicDeployment{}, err
+	}
+	upgrade, err := readCenterUpgrade(c.Directory, center.ID)
+	if err != nil || upgrade == nil {
+		return center, err
+	}
+	if upgrade.State == upgradeRecovery {
+		return publicDeployment{}, errors.New("center upgrade requires verified backup recovery; see upgrade-status")
+	}
+	if !upgrade.finished() {
+		return publicDeployment{}, errors.New("center upgrade is unresolved; use upgrade-status and resume the recorded upgrade")
+	}
+	return centerWithImage(c, center, upgrade.activeImage(), false)
+}
+
+func readPreparedBase(c config) (publicDeployment, error) {
 	var d deployment
 	failed := func(name string) (publicDeployment, error) {
 		return publicDeployment{}, fmt.Errorf("deployment is incomplete or altered at %s; restore the original files", name)

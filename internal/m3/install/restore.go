@@ -30,6 +30,7 @@ type restoreResult struct {
 	Config     string         `json:"config"`
 	VerifiedAt time.Time      `json:"verified_at"`
 	Database   restoredCounts `json:"database"`
+	Schema     upgradeSchema  `json:"schema"`
 }
 
 func restoreCenterBackup(ctx context.Context, backup, expectedSHA, output string) (restoreResult, error) {
@@ -95,6 +96,17 @@ func restoreCenterBackup(ctx context.Context, backup, expectedSHA, output string
 	if err := rebuildRecoveryConfig(stage.work, directory, original); err != nil {
 		return restoreResult{}, err
 	}
+	stagedConfig := original.Config
+	stagedConfig.Directory = stage.work
+	upgrade, err := readCenterUpgrade(stage.work, original.Center.ID)
+	if err != nil {
+		return restoreResult{}, err
+	}
+	if upgrade != nil {
+		if _, err := centerWithImage(stagedConfig, original.Center, upgrade.activeImage(), false); err != nil {
+			return restoreResult{}, err
+		}
+	}
 	pgRoot := filepath.Join(stage.work, "postgres")
 	pgData := filepath.Join(pgRoot, "18", "docker")
 	if err := os.MkdirAll(pgData, 0700); err != nil {
@@ -107,12 +119,12 @@ func restoreCenterBackup(ctx context.Context, backup, expectedSHA, output string
 	if _, _, err := checkRuntime(ctx, docker); err != nil {
 		return restoreResult{}, err
 	}
-	counts, err := verifyRestoredPostgres(ctx, pgRoot, manifest.Cluster, original.Center.runtimeImages(original.Config.Images).PostgreSQL, docker)
+	counts, schema, err := verifyRestoredPostgres(ctx, pgRoot, manifest.Cluster, original.Center.runtimeImages(original.Config.Images).PostgreSQL, docker)
 	if err != nil {
 		return restoreResult{}, err
 	}
 	result := restoreResult{backupResult: manifest.result(directory, expectedSHA), VerifiedAt: time.Now().UTC(),
-		Config: filepath.Join(directory, recoveryConfig), Database: counts}
+		Config: filepath.Join(directory, recoveryConfig), Database: counts, Schema: schema}
 	report, err := json.MarshalIndent(result, "", "  ")
 	if err != nil {
 		return restoreResult{}, err
@@ -142,6 +154,19 @@ func readCenterBackup(directory, expectedSHA string) (backupManifest, deployment
 		return m, d, errors.New("backup deployment metadata is invalid")
 	}
 	wanted := backupMetadata(d.Config)
+	if _, exists := m.Files[upgradeName]; exists {
+		raw, err := readSmallRegular(filepath.Join(directory, upgradeName), true)
+		if err != nil {
+			return m, d, errors.New("backup upgrade record is missing")
+		}
+		record, err := parseCenterUpgrade(raw, d.Center.ID)
+		if err != nil || !record.finished() || record.Schema.Cluster != m.Cluster {
+			return m, d, errors.New("backup contains an unresolved or incompatible upgrade record")
+		}
+		for _, name := range upgradeBackupNames(d.Config, record) {
+			wanted[name] = ""
+		}
+	}
 	if len(m.Files) != len(wanted)+1 {
 		return m, d, errors.New("backup does not contain the expected file inventory")
 	}
@@ -161,6 +186,17 @@ func readCenterBackup(directory, expectedSHA string) (backupManifest, deployment
 		}
 	}
 	return m, d, nil
+}
+
+func upgradeBackupNames(c config, upgrade *centerUpgrade) []string {
+	if upgrade == nil {
+		return nil
+	}
+	names := []string{upgradeName}
+	if active := upgrade.activeImage(); active != c.Images.Center {
+		names = append(names, centerImageName(active))
+	}
+	return names
 }
 
 func rebuildRecoveryConfig(work, directory string, d deployment) error {
@@ -209,17 +245,17 @@ func rebuildRecoveryConfig(work, directory string, d deployment) error {
 	return writeSynced(filepath.Join(work, recoveryConfig), configJSON, 0600)
 }
 
-func verifyRestoredPostgres(ctx context.Context, root, expectedCluster, image string, run dockerRunner) (restoredCounts, error) {
+func verifyRestoredPostgres(ctx context.Context, root, expectedCluster, image string, run dockerRunner) (restoredCounts, upgradeSchema, error) {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 	var buf strings.Builder
 	csvWriter := csv.NewWriter(&buf)
 	if err := csvWriter.Write([]string{"type=bind", "source=" + root, "target=/var/lib/postgresql"}); err != nil {
-		return restoredCounts{}, err
+		return restoredCounts{}, upgradeSchema{}, err
 	}
 	csvWriter.Flush()
 	if err := csvWriter.Error(); err != nil {
-		return restoredCounts{}, err
+		return restoredCounts{}, upgradeSchema{}, err
 	}
 	name := "deskrealm-restore-" + strings.ToLower(rand.Text())
 	cleanup := func() error {
@@ -237,22 +273,27 @@ func verifyRestoredPostgres(ctx context.Context, root, expectedCluster, image st
 	out, err := run(ctx, "run", "--rm", "--name", name, "--pull", "never", "--network", "none", "--read-only",
 		"--tmpfs", "/tmp:rw,nosuid,nodev,noexec", "--user", "0:0",
 		"--entrypoint", "/bin/sh", "--mount", strings.TrimSuffix(buf.String(), "\n"), image,
-		"-ec", isolatedPostgresCheck, "deskrealm-restore", expectedCluster)
+		"-ec", isolatedPostgresCheck, "deskrealm-restore", expectedCluster, upgradeSchemaQuery, schemaDumpRestrict)
 	if err != nil {
 		if failure, ok := errors.AsType[*exec.ExitError](err); ok {
-			for _, phase := range []string{"manifest and WAL", "startup", "application records", "shutdown"} {
+			for _, phase := range []string{"manifest and WAL", "startup", "application records", "database schema", "shutdown"} {
 				if bytes.Contains(failure.Stderr, []byte("DeskRealm restore step: "+phase+"\n")) {
-					return restoredCounts{}, fmt.Errorf("isolated PostgreSQL verification failed at %s", phase)
+					return restoredCounts{}, upgradeSchema{}, fmt.Errorf("isolated PostgreSQL verification failed at %s", phase)
 				}
 			}
 		}
-		return restoredCounts{}, errors.New("isolated PostgreSQL startup, content verification or clean shutdown failed")
+		return restoredCounts{}, upgradeSchema{}, errors.New("isolated PostgreSQL startup, content verification or clean shutdown failed")
 	}
 	var report restoredCounts
-	if err := json.Unmarshal(bytes.TrimSpace(out), &report); err != nil {
-		return restoredCounts{}, errors.New("isolated PostgreSQL returned invalid verification evidence")
+	fields := bytes.Split(bytes.TrimSpace(out), []byte("\n"))
+	if len(fields) != 3 || json.Unmarshal(fields[0], &report) != nil {
+		return restoredCounts{}, upgradeSchema{}, errors.New("isolated PostgreSQL returned invalid verification evidence")
 	}
-	return report, nil
+	schema, err := identifyUpgradeSchema(string(fields[1]), string(fields[2]))
+	if err != nil || schema.Cluster != expectedCluster {
+		return restoredCounts{}, upgradeSchema{}, errors.New("isolated PostgreSQL schema evidence does not match the backup cluster")
+	}
+	return report, schema, nil
 }
 
 const isolatedPostgresCheck = `
@@ -318,6 +359,11 @@ SELECT json_build_object(
   'audit_events', (SELECT count(*) FROM public.audit_events)
 );
 SQL
+step='database schema'
+gosu postgres psql -h "$socket" -U postgres -d deskrealm -XAt --no-password -c "$2"
+gosu postgres pg_dump -h "$socket" -U postgres -d deskrealm --schema-only --no-password "$3" > "$socket/schema.sql"
+checksum="$(sha256sum < "$socket/schema.sql")"
+printf '%s\n' "${checksum%% *}"
 step=shutdown
 gosu postgres pg_ctl -D "$data" -m fast -w -t 60 stop >/dev/null
 started=0

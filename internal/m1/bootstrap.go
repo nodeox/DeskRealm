@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io/fs"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -61,6 +62,26 @@ func Migrate(ctx context.Context, dsn string) error {
 		return err
 	}
 	return migrateFrom(ctx, db, files)
+}
+
+func EmbeddedSchemaVersion() (int64, error) {
+	files, err := migrationFiles.ReadDir("migrations")
+	if err != nil {
+		return 0, err
+	}
+	var version int64
+	for _, file := range files {
+		prefix, _, found := strings.Cut(file.Name(), "_")
+		number, err := strconv.ParseInt(prefix, 10, 64)
+		if err != nil || !found || number < 1 {
+			return 0, errors.New("invalid embedded migration version")
+		}
+		version = max(version, number)
+	}
+	if version == 0 {
+		return 0, errors.New("embedded migrations are missing")
+	}
+	return version, nil
 }
 
 func migrateFrom(ctx context.Context, db *sql.DB, files fs.FS) error {

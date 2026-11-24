@@ -27,6 +27,9 @@ func composeCommand(ctx context.Context, run dockerRunner, center publicDeployme
 
 func composeArgs(center publicDeployment, args ...string) []string {
 	command := []string{"compose", "--env-file", "/dev/null", "--project-name", center.Project, "--file", center.ComposeFile}
+	if center.centerImageFile != "" {
+		command = append(command, "--file", center.centerImageFile)
+	}
 	return append(command, args...)
 }
 
@@ -183,17 +186,13 @@ func ensureImages(ctx context.Context, c config, center publicDeployment, platfo
 	for _, image := range []struct{ service, ref string }{
 		{"database", images.PostgreSQL}, {"center", images.Center}, {"rendezvous", images.Rendezvous},
 	} {
-		inspect := []string{"image", "inspect", "--format", "{{.Os}}/{{.Architecture}}", image.ref}
-		actual, err := run(ctx, inspect...)
-		if err == nil && strings.TrimSpace(string(actual)) == platform {
-			continue
+		if err := ensurePlatformImage(ctx, image.ref, platform, run); err != nil {
+			return fmt.Errorf("%s image: %w", image.service, err)
 		}
-		if _, err := run(ctx, "pull", "--platform", platform, image.ref); err != nil {
-			return fmt.Errorf("%s image: cannot pull the configured digest for %s", image.service, platform)
-		}
-		actual, err = run(ctx, inspect...)
-		if err != nil || strings.TrimSpace(string(actual)) != platform {
-			return fmt.Errorf("%s image: configured digest is unavailable for %s", image.service, platform)
+	}
+	if center.centerImage != "" {
+		if err := ensurePlatformImage(ctx, center.centerImage, platform, run); err != nil {
+			return fmt.Errorf("active center image: %w", err)
 		}
 	}
 	return nil

@@ -27,7 +27,7 @@ func main() {
 }
 
 func run(ctx context.Context, args []string) error {
-	const usage = "deskrealm migrate | bootstrap-ticket | oidc-bind USERNAME SUBJECT | import-install-record USERNAME | serve"
+	const usage = "deskrealm migrate | schema-version | bootstrap-ticket | oidc-bind USERNAME SUBJECT | import-install-record USERNAME | serve"
 	if len(args) == 1 && args[0] == "--help" {
 		fmt.Println(usage)
 		return nil
@@ -35,6 +35,14 @@ func run(ctx context.Context, args []string) error {
 	if len(args) != 1 && !(len(args) == 3 && args[0] == "oidc-bind") &&
 		!(len(args) == 2 && args[0] == "import-install-record") {
 		return errors.New(usage)
+	}
+	if args[0] == "schema-version" {
+		version, err := m1.EmbeddedSchemaVersion()
+		if err != nil {
+			return err
+		}
+		_, err = fmt.Fprintln(os.Stdout, version)
+		return err
 	}
 	dsn := os.Getenv("DESKREALM_DATABASE_URL")
 	if args[0] == "migrate" {

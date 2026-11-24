@@ -105,6 +105,10 @@ UPDATE bootstrap_state SET initialized_at=now() WHERE singleton;
 	const recordIDs = `SELECT json_build_array((SELECT id FROM users),(SELECT id FROM devices),
 		(SELECT version FROM managed_policy_versions),(SELECT id FROM tasks),(SELECT id FROM audit_events WHERE action='backup.fixture'))`
 	expectedIDs := query(center, recordIDs)
+	schema, err := inspectUpgradeSchema(ctx, center, docker)
+	if err != nil || schema.Cluster != cluster {
+		t.Fatalf("capture source database schema: %+v %v", schema, err)
+	}
 	configFile := filepath.Join(parent, "center.json")
 	configJSON, err := json.Marshal(c)
 	if err != nil {
@@ -138,7 +142,7 @@ UPDATE bootstrap_state SET initialized_at=now() WHERE singleton;
 		t.Fatal(err)
 	}
 	expected := restoredCounts{Initialized: true, Users: 1, Devices: 1, Policies: 1, Tasks: 1, AuditEvents: 1}
-	if restored.Database != expected || restored.Cluster != cluster || restored.RendezvousSHA != result.RendezvousSHA ||
+	if restored.Database != expected || restored.Schema != schema || restored.Cluster != cluster || restored.RendezvousSHA != result.RendezvousSHA ||
 		restored.SigningSHA != result.SigningSHA || restored.DeploymentID != result.DeploymentID {
 		t.Fatalf("isolated restore differs: %+v", restored)
 	}
@@ -152,6 +156,17 @@ UPDATE bootstrap_state SET initialized_at=now() WHERE singleton;
 	}
 	if live := query(center, "SELECT count(*) FROM audit_events"); live != "2" {
 		t.Fatalf("restore modified source: %s", live)
+	}
+	if _, err := verifyUpgradeRecovery(ctx, c, center, schema, c.Images.Center, destination, docker); err != nil {
+		t.Fatalf("matching restored schema did not qualify for upgrade: %v", err)
+	}
+	query(center, "ALTER TABLE public.organizations ADD COLUMN schema_test_column text")
+	changed, err := inspectUpgradeSchema(ctx, center, docker)
+	if err != nil || changed.Cluster != cluster || changed.Version != schema.Version || changed.SHA == schema.SHA {
+		t.Fatalf("unrecorded schema change was not detected: %+v %v", changed, err)
+	}
+	if _, err := verifyUpgradeRecovery(ctx, c, center, changed, c.Images.Center, destination, docker); err == nil {
+		t.Fatal("recovery with an old schema qualified for upgrade")
 	}
 	report, err := readSmallRegular(filepath.Join(destination, recoveryReport), true)
 	if err != nil || !json.Valid(report) || !bytes.Contains(report, []byte(result.BackupSHA)) {

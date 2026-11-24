@@ -28,6 +28,8 @@ const usage = `DeskRealm center installer
   deskrealm-install bootstrap-ticket --config FILE
   deskrealm-install backup --config FILE --output NEW_DIRECTORY
   deskrealm-install restore-check --backup DIRECTORY --sha256 SHA256 --output NEW_DIRECTORY
+  deskrealm-install upgrade --config FILE --image NAME@sha256:DIGEST --recovery DIRECTORY [--retry]
+  deskrealm-install upgrade-status --config FILE
 
 Preflight checks configuration, TLS materials, local Docker and host ports.
 Prepare-runtime reuses local Docker or prepares pinned Docker packages on supported Linux hosts.
@@ -39,6 +41,8 @@ Import-record submits the local task snapshot to the running center.
 Bootstrap-ticket prints a one-time initialization link for a ready center.
 Backup captures the center identity and PostgreSQL cluster to a private directory.
 Restore-check starts the recovered database in an isolated container and preserves the verified directory.
+Upgrade switches the center application image on the same schema and verifies compatible rollback.
+Upgrade-status prints the durable result and any unresolved upgrade state.
 `
 
 type portBinding struct {
@@ -203,14 +207,16 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		return encoder.Encode(result)
 	}
 	switch args[0] {
-	case "preflight", "prepare", "install", "status", "bootstrap-ticket", "install-record", "import-record", "backup", "restore-check":
+	case "preflight", "prepare", "install", "status", "bootstrap-ticket", "install-record", "import-record",
+		"backup", "restore-check", "upgrade", "upgrade-status":
 	default:
 		return errors.New("unknown installer command; see --help")
 	}
 	flags := flag.NewFlagSet(args[0], flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	path := flags.String("config", "", "path to the center installation JSON")
-	var actor, output, backup, sha string
+	var actor, output, backup, sha, image, recovery string
+	var retry bool
 	if args[0] == "import-record" {
 		flags.StringVar(&actor, "actor", "", "active platform administrator to attribute in the audit log")
 	}
@@ -220,6 +226,11 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	if args[0] == "restore-check" {
 		flags.StringVar(&backup, "backup", "", "private center backup directory")
 		flags.StringVar(&sha, "sha256", "", "SHA-256 recorded when the backup was created")
+	}
+	if args[0] == "upgrade" {
+		flags.StringVar(&image, "image", "", "digest-pinned candidate center image")
+		flags.StringVar(&recovery, "recovery", "", "directory returned by restore-check")
+		flags.BoolVar(&retry, "retry", false, "start a new attempt after an automatic rollback")
 	}
 	if err := flags.Parse(args[1:]); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -247,6 +258,18 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	switch args[0] {
+	case "upgrade":
+		result, err := upgradeCenter(ctx, c, image, recovery, retry, docker)
+		if result != nil {
+			err = errors.Join(err, encoder.Encode(result))
+		}
+		return err
+	case "upgrade-status":
+		result, err := centerUpgradeStatus(c)
+		if err != nil {
+			return err
+		}
+		return encoder.Encode(result)
 	case "backup":
 		result, err := centerBackup(ctx, c, output)
 		if err != nil {

@@ -110,9 +110,30 @@ deskrealm-install restore-check --backup /srv/deskrealm-backups/center-001 \
   --sha256 "$backup_sha256" --output /srv/deskrealm-backups/center-001-restored
 ```
 
-恢复检查先校验清单、文件摘要、私钥与记录公钥，再在无网络、无对外端口的临时容器里验证 PostgreSQL 文件及 WAL，启动数据库并用应用角色检查初始化状态、用户、设备、策略、任务和审计。数据库干净停机后才输出恢复目录、`center-config.json` 和 `restore-verification.json`。恢复目录保留原部署 ID、Compose 项目、公开地址和数据库系统标识。执行计划性切换时，应先停止原 Compose 项目，再按恢复配置进行部署。隔离恢复检查只启动数据库。
+恢复检查先校验清单、文件摘要、私钥与记录公钥，再在无网络、无对外端口的临时容器里验证 PostgreSQL 文件及 WAL，启动数据库并用应用角色检查初始化状态、用户、设备、策略、任务和审计，同时记录迁移版本和数据库结构摘要。数据库干净停机后才输出恢复目录、`center-config.json` 和 `restore-verification.json`。恢复目录保留原部署 ID、Compose 项目、公开地址和数据库系统标识。执行计划性切换时，应先停止原 Compose 项目，再按恢复配置进行部署。隔离恢复检查只启动数据库。
 
 当前恢复覆盖标准安装器生成的中心和 PostgreSQL 主存储。外部反向代理配置、Compose 额外挂载的 Windows 发布目录、OIDC 外部配置及离线镜像载体由各自部署流程保留。会合缓存由设备重新注册填充。当前备份使用带 WAL 的 PostgreSQL TAR 格式，部署额外表空间时须使用相应备份方案。 [PostgreSQL 18 物理备份](https://www.postgresql.org/docs/18/app-pgbasebackup.html) · [备份校验](https://www.postgresql.org/docs/18/app-pgverifybackup.html)
+
+## 中心 API 升级和兼容回滚
+
+在维护窗口内，由有权操作中心主机的人员执行。此流程适用于在线、同架构、沿用当前数据库结构的中心 API 镜像。候选镜像使用已核验的发布摘要，并应兼容现有业务数据和配置。升级前创建近期备份并用当前安装器运行 `restore-check`。指定备份恢复目录，安装器将核对其中的中心身份、活动镜像、PostgreSQL 系统标识、迁移版本和结构摘要。
+
+```bash
+deskrealm-install upgrade --config /srv/deskrealm/center.json \
+  --image 'registry.example.com/deskrealm/center@sha256:<发布摘要>' \
+  --recovery /srv/deskrealm-backups/center-001-restored
+deskrealm-install upgrade-status --config /srv/deskrealm/center.json
+```
+
+安装器先检查候选镜像架构和声明的迁移版本，再重建中心 API 容器。数据库、迁移和会合容器继续沿用原配置。升级成功须通过现有的 HTTPS、中心签名身份及会合健康检查，并且数据库结构摘要一致。成功后，使用原配置的 `install`、`status` 和 `backup` 会采用新镜像。此流程不运行数据库迁移。
+
+- `switching` 或 `rolling_back` 时，使用原候选摘要重新执行 `upgrade` 继续。完成后重复提交同一成功候选会返回原记录。
+- `rolled_back` 表示已恢复原镜像并通过健康及兼容检查。升级命令返回失败退出码并输出回滚记录。排查原因后，如需重试同一摘要，可指定 `--retry` 和已验证的恢复目录。
+- `recovery_required` 表示数据库兼容性或原镜像健康状态无法确认。检查中心 API 已停止，保留日志和当前数据，再按隔离恢复结果安排人工切换。恢复到物理备份会回到该备份的数据时间点，须先处理备份后的业务变更。
+
+手工执行 Compose 管理命令时，需要带上部署目录中对应活动镜像的附加文件。日常启动、状态检查和备份可以直接使用安装器。
+
+## 安装任务记录
 
 ```sh
 deskrealm-install install-record --config /absolute/path/to/center.json

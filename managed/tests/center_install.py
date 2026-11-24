@@ -211,7 +211,7 @@ def start_default_relay(scratch, resources, origin, ca, prepared, token_file, po
     return container
 
 
-def exercise(scratch, images, resources, offline=None, default_relay=False, install_task=False):
+def exercise(scratch, images, resources, offline=None, default_relay=False, install_task=False, center_upgrade=False):
     api_port, check_port, route_port, *extra_ports = available_ports(default_relay)
     origin = f"https://{HOST}:{api_port}"
     ca, _ = tls_context(scratch, f"DNS:{HOST}")
@@ -245,6 +245,7 @@ def exercise(scratch, images, resources, offline=None, default_relay=False, inst
         assert_image_failure(scratch, installer, configuration)
     prepared = json.loads(output(installer, "prepare", *flags))
     compose = ("docker", "compose", "--env-file", "/dev/null", "-f", prepared["compose_file"])
+    upgrade_candidates = publish_upgrade_candidates(scratch, images["center"], resources) if center_upgrade else None
     resources.callback(cleanup, *compose, "down", "--volumes", "--remove-orphans")
     if json.loads(output(installer, "status", *flags))["phase"] != "prepared":
         raise RuntimeError("status did not identify a prepared deployment")
@@ -299,6 +300,10 @@ def exercise(scratch, images, resources, offline=None, default_relay=False, inst
                  {"DESKREALM_BROWSER_TICKET": ticket})
     wait_for_center(origin, api_port, ca, initialized=True)
     print("Chromium first-administrator initialization and login passed.", flush=True)
+
+    if center_upgrade:
+        exercise_center_upgrade(scratch, installer, flags, compose, prepared, images["center"], upgrade_candidates)
+        return
 
     container_ids = output(*compose, "ps", "--all", "--quiet")
     assert_initialized(installer, flags, prepared)
@@ -384,6 +389,126 @@ def exercise(scratch, images, resources, offline=None, default_relay=False, inst
     print("Missing journal, missing database record and mismatched PostgreSQL state were rejected before startup.", flush=True)
 
 
+def publish_upgrade_candidates(scratch, original, resources):
+    workspace = scratch / "upgrade"
+    workspace.mkdir()
+    arch = output("docker", "version", "--format", "{{.Server.Arch}}")
+    (workspace / "broken.go").write_text("""package main
+import ("fmt"; "os"; "syscall")
+func main() {
+    if len(os.Args) == 2 && os.Args[1] == "schema-version" {
+        if incompatible := os.Getenv("DESKREALM_TEST_SCHEMA_VERSION"); incompatible != "" {
+            fmt.Println(incompatible)
+            return
+        }
+        if err := syscall.Exec("/original-deskrealm", os.Args, os.Environ()); err != nil {
+            panic(err)
+        }
+    }
+    os.Exit(1)
+}
+""")
+    run("go", "build", "-trimpath", "-o", workspace / "broken", workspace / "broken.go",
+        env={**os.environ, "GOOS": "linux", "GOARCH": arch, "CGO_ENABLED": "0"})
+
+    def publish(label, recipe):
+        repository = original.split("@", 1)[0]
+        tag = f"{repository}:{label}"
+        resources.callback(cleanup, "docker", "image", "rm", tag)
+        recipe_file = workspace / "Dockerfile"
+        recipe_file.write_text(recipe)
+        run("docker", "build", "--quiet", "--platform", f"linux/{arch}", "-f", recipe_file, "-t", tag, workspace)
+        push = output("docker", "push", tag)
+        digest = re.search(rf"^{label}: digest: (sha256:[a-f0-9]{{64}}) size:", push, re.MULTILINE)
+        if not digest:
+            raise RuntimeError(f"local registry did not report a digest for {label}")
+        reference = f"{repository}@{digest[1]}"
+        resources.callback(cleanup, "docker", "image", "rm", reference)
+        return reference
+
+    good = publish("upgrade-good", f'FROM {original}\nLABEL org.deskrealm.test.variant="candidate"\n')
+    bad = publish("upgrade-bad", f"""FROM {original} AS original
+FROM original
+COPY --from=original /usr/local/bin/deskrealm /original-deskrealm
+COPY broken /usr/local/bin/deskrealm
+""")
+    incompatible = publish("upgrade-incompatible", f"FROM {bad}\nENV DESKREALM_TEST_SCHEMA_VERSION=0\n")
+    return good, bad, incompatible, arch
+
+
+def exercise_center_upgrade(scratch, installer, flags, compose, prepared, original, candidates):
+    good, bad, incompatible, arch = candidates
+    workspace = scratch / "upgrade"
+
+    def restore(label):
+        backup = workspace / f"backup-{label}"
+        destination = workspace / f"recover-{label}"
+        result = json.loads(output(installer, "backup", *flags, "--output", backup))
+        verified = json.loads(output(installer, "restore-check", "--backup", backup,
+                                     "--sha256", result["backup_sha256"], "--output", destination))
+        if verified["database"]["users"] != 1 or not verified["database"]["initialized"]:
+            raise RuntimeError(f"restored copy lost administrator state: {label}")
+        return destination, verified
+
+    def service_id(service):
+        container = output(*compose, "ps", "--all", "--quiet", service)
+        if not container:
+            raise RuntimeError(f"cannot find {service} container")
+        return container
+
+    def current_image():
+        return output("docker", "inspect", "--format", "{{.Config.Image}}", service_id("center"))
+
+    def assert_identity():
+        status = json.loads(output(installer, "status", *flags))
+        if status["phase"] != "ready" or not status["initialized"]:
+            raise RuntimeError("center did not come back initialized and ready")
+        if any(status.get(key) != value for key, value in prepared.items()):
+            raise RuntimeError("center upgrade changed the base identity")
+
+    stable_services = ("database", "rendezvous", "migrate")
+    stable = {service: service_id(service) for service in stable_services}
+    destination, recovered = restore("original")
+    missing = subprocess.run([installer, "upgrade", *flags, "--image", good, "--recovery", workspace / "missing"],
+                             capture_output=True, text=True)
+    if not missing.returncode or current_image() != original:
+        raise RuntimeError("center upgrade accepted a missing restore verification")
+    incompatible_result = subprocess.run(
+        [installer, "upgrade", *flags, "--image", incompatible, "--recovery", destination],
+        capture_output=True, text=True,
+    )
+    if (not incompatible_result.returncode or "running schema version" not in incompatible_result.stderr
+            or incompatible_result.stdout or current_image() != original):
+        raise RuntimeError(f"center upgrade accepted a mismatched candidate schema: {incompatible_result.stderr}")
+    failure = subprocess.run([installer, "upgrade", *flags, "--image", bad, "--recovery", destination],
+                             capture_output=True, text=True)
+    rolled_back = json.loads(failure.stdout) if failure.stdout else {}
+    if not failure.returncode or rolled_back.get("state") != "rolled_back" or current_image() != original:
+        raise RuntimeError(f"failed center did not restore the original image: {failure.stdout} {failure.stderr}")
+    assert_identity()
+    repeated = subprocess.run([installer, "upgrade", *flags, "--image", bad], capture_output=True, text=True)
+    if not repeated.returncode or json.loads(repeated.stdout) != rolled_back:
+        raise RuntimeError("repeating a failed operation replaced its rollback record")
+    print("Failed center candidate rolled back to the original digest and both public keys.", flush=True)
+
+    upgraded = json.loads(output(installer, "upgrade", *flags, "--image", good, "--recovery", destination))
+    if (upgraded["state"] != "succeeded" or current_image() != good or upgraded["database"] != rolled_back["database"]
+            or upgraded["backup_sha256"] != recovered["backup_sha256"]):
+        raise RuntimeError(f"center upgrade did not retain the verified database: {upgraded}")
+    assert_identity()
+    instance = service_id("center")
+    if json.loads(output(installer, "upgrade", *flags, "--image", good)) != upgraded:
+        raise RuntimeError("repeating a successful operation changed its verification record")
+    if json.loads(output(installer, "install", *flags))["phase"] != "ready" or service_id("center") != instance:
+        raise RuntimeError("normal install changed the center override")
+    if {service: service_id(service) for service in stable_services} != stable:
+        raise RuntimeError("upgrade changed a database, migration, or rendezvous container")
+    _, updated = restore("upgraded")
+    if json.loads(output(installer, "upgrade-status", "--config", updated["config"])) != upgraded:
+        raise RuntimeError("restoring the upgraded center lost its image record")
+    print(f"Healthy center upgrade and isolated recovery passed without replacing untouched services: {arch}.", flush=True)
+
+
 def assert_install_refusal(installer, flags, compose, reason):
     failed = subprocess.run([installer, "install", *flags], capture_output=True, text=True)
     if (not failed.returncode or failed.stdout or reason not in failed.stderr or
@@ -458,12 +583,13 @@ def main():
     modes.add_argument("--offline", action="store_true")
     modes.add_argument("--default-relay", action="store_true")
     modes.add_argument("--install-task", action="store_true")
+    modes.add_argument("--center-upgrade", action="store_true")
     options = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix="deskrealm-center-", dir="/tmp") as directory, ExitStack() as resources:
         scratch = Path(directory).resolve()
         images, registry = publish_images(scratch, resources, options.offline, options.default_relay)
         offline = prepare_offline_bundle(scratch, images, registry, resources) if options.offline else None
-        exercise(scratch, images, resources, offline, options.default_relay, options.install_task)
+        exercise(scratch, images, resources, offline, options.default_relay, options.install_task, options.center_upgrade)
 
 
 if __name__ == "__main__":

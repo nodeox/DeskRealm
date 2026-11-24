@@ -69,6 +69,9 @@ func runningServices(ctx context.Context, c config, center publicDeployment, run
 	expected := map[string]string{
 		"database": images.PostgreSQL, "migrate": images.Center, "center": images.Center, "rendezvous": images.Rendezvous,
 	}
+	if center.centerImage != "" {
+		expected["center"] = center.centerImage
+	}
 	result := make(map[string]containerStatus, len(containers))
 	for _, row := range containers {
 		image, exists := expected[row.Service]

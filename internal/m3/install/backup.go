@@ -103,7 +103,15 @@ func centerBackup(ctx context.Context, c config, output string) (backupResult, e
 	}
 	defer stage.Close()
 	m := backupManifest{Version: 1, CreatedAt: time.Now().UTC(), Center: center, Cluster: cluster, Files: make(map[string]backupFile)}
-	for name, source := range backupMetadata(c) {
+	files := backupMetadata(c)
+	upgrade, err := readCenterUpgrade(c.Directory, center.ID)
+	if err != nil {
+		return backupResult{}, err
+	}
+	for _, name := range upgradeBackupNames(c, upgrade) {
+		files[name] = filepath.Join(c.Directory, name)
+	}
+	for name, source := range files {
 		data, err := readBackupMetadata(source)
 		if err != nil {
 			return backupResult{}, fmt.Errorf("cannot back up %s: %w", name, err)

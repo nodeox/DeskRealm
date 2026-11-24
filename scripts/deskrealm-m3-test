@@ -3,6 +3,11 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 case "${1:-}" in
+  restore-upgrade)
+    bash scripts/deskrealm-m3-test center-restore
+    go test -race -count=1 -v ./internal/m3/install -run '^TestCenterUpgradeStateTransitions$'
+    exec python3 -B managed/tests/center_install.py --center-upgrade
+    ;;
   center-restore)
     DESKREALM_TEST_CENTER_BACKUP=1 go test -race -count=1 -v ./internal/m3/install -run '^(TestCenterBackupRestoresOriginalCluster|TestRecoveryRejectsDifferentManifestDigest|TestRecoveryRejectsArchiveChanges)$'
     exit
@@ -99,7 +104,7 @@ case "${1:-}" in
     )
     ;;
   *)
-    echo "usage: $0 install-preflight|install-prepare|install-bootstrap|install-offline|install-resume|install-relay|install-task|delivery-tasks|relay-identity|relay-host|relay-enrollment|relay-lifecycle|relay-probes|relay-selection|multi-relay|signed-build|managed-release|windows-installer|center-restore" >&2
+    echo "usage: $0 install-preflight|install-prepare|install-bootstrap|install-offline|install-resume|install-relay|install-task|delivery-tasks|relay-identity|relay-host|relay-enrollment|relay-lifecycle|relay-probes|relay-selection|multi-relay|signed-build|managed-release|windows-installer|center-restore|restore-upgrade" >&2
     exit 2
     ;;
 esac
