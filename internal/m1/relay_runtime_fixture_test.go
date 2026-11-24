@@ -3,8 +3,11 @@ package m1
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"io"
@@ -84,12 +87,27 @@ func TestRegionalRelayRuntimePostgres(t *testing.T) {
 		t.Fatal(err)
 	}
 	server.Config.Handler = NewHandler(store, origin, nil, AuthConfig{ManagedKey: f.signing})
+	tlsDir := os.Getenv("DESKREALM_TEST_RELAY_TLS_DIR")
+	if tlsDir != "" {
+		cert, err := tls.LoadX509KeyPair(filepath.Join(tlsDir, "server.pem"), filepath.Join(tlsDir, "server.key"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		server.TLS = &tls.Config{Certificates: []tls.Certificate{cert}}
+	}
 	server.StartTLS()
 	center := server
 	defer center.Close()
 	scratch := t.TempDir()
 	ca := filepath.Join(scratch, "center-ca.pem")
-	if err := os.WriteFile(ca, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: center.Certificate().Raw}), 0600); err != nil {
+	trust := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: center.Certificate().Raw})
+	if tlsDir != "" {
+		trust, err = os.ReadFile(filepath.Join(tlsDir, "ca.pem"))
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(ca, trust, 0600); err != nil {
 		t.Fatal(err)
 	}
 	command := func(args ...string) []byte {
@@ -211,6 +229,9 @@ func TestRegionalRelayRuntimePostgres(t *testing.T) {
 	sweep()
 	checkStates("available", "available")
 	sampleRegionalRelays(t, f, a.NodeID, b.NodeID)
+	if runner := os.Getenv("DESKREALM_TEST_RUST_RELAY_RUNNER"); runner != "" {
+		sampleRegionalRelaysFromRust(t, f, center.URL, ca, scratch, runner)
+	}
 	for _, n := range []node{a, b} {
 		checkCode(t, request(h, "GET", tasksPath+"/"+n.TaskID, "", nil, admin, ""), 200, "relay_available")
 	}
@@ -374,4 +395,36 @@ func alteredProbePermit(t *testing.T, f sessionFixture, permit relayprotocol.Ses
 	return relayprotocol.SessionProbePermit{
 		Frame: base64.RawURLEncoding.EncodeToString(frame), Signature: signRelay(f.signing.key, frame),
 	}
+}
+
+func sampleRegionalRelaysFromRust(t *testing.T, f sessionFixture, center, ca, scratch, runner string) {
+	t.Helper()
+	encode := base64.RawURLEncoding.EncodeToString
+	peer := func(id, credential string, key ed25519.PrivateKey) map[string]string {
+		return map[string]string{"device": id, "credential": credential, "seed": encode(key.Seed())}
+	}
+	input, err := json.Marshal(map[string]any{
+		"center": center, "kid": f.signing.id, "center_key": encode(f.signing.key.Public().(ed25519.PublicKey)),
+		"controller": peer(f.controller, f.userToken, f.controllerKey),
+		"target":     peer(f.target, f.targetToken, f.targetKey),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(scratch, "native-probe-fixture.json")
+	if err := os.WriteFile(path, input, 0600); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(path)
+	command := exec.CommandContext(f.ctx, runner, path, ca)
+	// Check the native harness actually ran its named test.
+	output, err := command.CombinedOutput()
+	if err != nil || !bytes.Contains(output, []byte("managed_native_endpoints_report_both_regional_relays ... ok")) {
+		t.Fatalf("native relay endpoint check failed: %v\n%s", err, output)
+	}
+	f.count(t, 12, `SELECT count(*) FROM session_relay_reports reports
+		JOIN session_relay_rounds r ON r.id=reports.round_id
+		CROSS JOIN LATERAL jsonb_array_elements(reports.samples) s
+		WHERE r.session_id=(SELECT id FROM managed_sessions ORDER BY issued_at DESC LIMIT 1)
+			AND s->>'result'='ok' AND (s->>'rtt_us')::integer BETWEEN 0 AND 2000000`)
 }

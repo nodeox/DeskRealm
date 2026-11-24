@@ -1,0 +1,560 @@
+diff --git a/libs/base/src/deskrealm_endpoint.rs b/libs/base/src/deskrealm_endpoint.rs
+index e7b7846..e4b4a2f 100644
+--- a/libs/base/src/deskrealm_endpoint.rs
++++ b/libs/base/src/deskrealm_endpoint.rs
+@@ -38,6 +38,7 @@ const MAX_HTTP_BODY: usize = 8192;
+ const MAX_HANDSHAKE_FRAME: usize = 1024;
+ 
+ mod lease;
++mod relay_probes;
+ mod runtime;
+ use lease::{LeaseClock, LeaseWindow};
+ pub use lease::{
+diff --git a/libs/base/src/deskrealm_endpoint/relay_probes.rs b/libs/base/src/deskrealm_endpoint/relay_probes.rs
+new file mode 100644
+index 0000000..fd8ba8f
+--- /dev/null
++++ b/libs/base/src/deskrealm_endpoint/relay_probes.rs
+@@ -0,0 +1,365 @@
++//! Role-bound measurements for the current managed relay connection.
++
++use super::{now_ms, uuid_bytes, Authority, DeviceIdentity};
++use hbb_common::{
++    anyhow::{anyhow, bail},
++    base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _},
++    deskrealm_protocol::{
++        encode, PeerRole, RelayProbePermit, VerifiedGrant, RELAY_PROBE, RELAY_PROBE_HOLDER,
++        RELAY_ROUND_JOIN, SESSION_PROBE_FRAME_SIZE, SESSION_PROBE_PREFIX,
++    },
++    futures_util::{stream, StreamExt},
++    rendezvous_proto::DeskRealmRoute,
++    sodiumoxide::crypto::{hash::sha256, sign},
++    uuid::Uuid,
++    ResultType,
++};
++use serde_derive::Deserialize;
++use std::{convert::TryFrom, io, time::Duration};
++use tokio::{
++    io::{AsyncReadExt, AsyncWriteExt},
++    net::TcpStream,
++    time::{sleep, timeout, Instant},
++};
++
++const ROUND: Duration = Duration::from_secs(2);
++const REPORT_MARGIN: Duration = Duration::from_millis(150);
++const MAX_ROUND_RESPONSE: usize = 128 * 1024;
++
++#[derive(Deserialize)]
++struct Round {
++    round_id: String,
++    connection_id: String,
++    state: String,
++    candidates: Vec<Candidate>,
++}
++
++#[derive(Deserialize)]
++struct Candidate {
++    relay_id: String,
++    endpoint: String,
++    build: String,
++    public_key: String,
++    config_version: u64,
++    eligible: bool,
++    probe_permit: Option<Permit>,
++}
++
++#[derive(Deserialize)]
++struct Permit {
++    frame: String,
++    signature: String,
++}
++
++struct ProbeBinding<'a> {
++    grant: &'a VerifiedGrant<'a>,
++    connection: Uuid,
++    round: Uuid,
++    role: PeerRole,
++    device: &'a DeviceIdentity,
++}
++
++#[derive(Clone, Copy)]
++enum Sample {
++    Measured(u32),
++    Unreachable,
++    Timeout,
++    ProtocolMismatch,
++    Missing,
++}
++
++impl Sample {
++    fn fields(self) -> (u8, &'static str, Option<u32>) {
++        match self {
++            Self::Measured(rtt) => (1, "ok", Some(rtt)),
++            Self::Unreachable => (2, "unreachable", None),
++            Self::Timeout => (3, "timeout", None),
++            Self::ProtocolMismatch => (4, "protocol_mismatch", None),
++            Self::Missing => (5, "missing", None),
++        }
++    }
++}
++
++impl Authority {
++    pub async fn begin_relay_probes(
++        &self,
++        route: &DeskRealmRoute,
++        device: &DeviceIdentity,
++        bearer: &str,
++    ) -> ResultType<()> {
++        self.join_relay_probes(route, device, bearer, PeerRole::Controller)
++            .await?;
++        Ok(())
++    }
++
++    async fn read_probe_round(&self, request: reqwest::RequestBuilder) -> ResultType<Round> {
++        let mut response = request
++            .send()
++            .await
++            .map_err(|_| anyhow!("cannot read relay probe round"))?;
++        if response.status() != reqwest::StatusCode::OK {
++            bail!("center denied relay probe round");
++        }
++        let mut body = Vec::new();
++        while let Some(chunk) = response
++            .chunk()
++            .await
++            .map_err(|_| anyhow!("incomplete relay probe round"))?
++        {
++            if chunk.len() > MAX_ROUND_RESPONSE - body.len() {
++                bail!("relay probe round exceeds response limit");
++            }
++            body.extend_from_slice(&chunk);
++        }
++        Ok(serde_json::from_slice(&body)?)
++    }
++
++    async fn join_relay_probes(
++        &self,
++        route: &DeskRealmRoute,
++        device: &DeviceIdentity,
++        bearer: &str,
++        role: PeerRole,
++    ) -> ResultType<Round> {
++        let grant = self.verify(route, device, role)?;
++        let connection = Uuid::from_slice(&route.connection_uuid)?;
++        let session = Uuid::from_slice(grant.session_id())?;
++        let frame = encode(
++            RELAY_ROUND_JOIN,
++            &[
++                &[role as u8],
++                grant.session_id(),
++                grant.grant_id(),
++                connection.as_bytes(),
++            ],
++        )
++        .ok_or_else(|| anyhow!("invalid relay probe join"))?;
++        let url = self
++            .center
++            .join(&format!("/v1/sessions/{session}/relay-candidates"))?;
++        self.read_probe_round(
++            self.client
++                .post(url)
++                .bearer_auth(bearer)
++                .json(&serde_json::json!({
++                    "connection_id": connection.to_string(),
++                    "signature": URL_SAFE_NO_PAD.encode(device.sign(&frame)),
++                })),
++        )
++        .await
++    }
++
++    /// Called on the two ends of an authenticated relay offer. Results are
++    /// recorded independently of the transport chosen for the session.
++    pub async fn collect_relay_probes(
++        &self,
++        route: &DeskRealmRoute,
++        device: &DeviceIdentity,
++        bearer: &str,
++        role: PeerRole,
++    ) -> ResultType<usize> {
++        let grant = self.verify(route, device, role)?;
++        let connection = Uuid::from_slice(&route.connection_uuid)?;
++        let session = Uuid::from_slice(grant.session_id())?;
++        let round = if role == PeerRole::Target {
++            self.join_relay_probes(route, device, bearer, role).await?
++        } else {
++            let mut url = self
++                .center
++                .join(&format!("/v1/sessions/{session}/relay-candidates"))?;
++            url.query_pairs_mut()
++                .append_pair("connection_id", &connection.to_string());
++            timeout(ROUND, async {
++                loop {
++                    let round = self
++                        .read_probe_round(self.client.get(url.clone()).bearer_auth(bearer))
++                        .await?;
++                    if round.state != "waiting_for_target" {
++                        return Ok::<_, hbb_common::anyhow::Error>(round);
++                    }
++                    sleep(Duration::from_millis(40)).await;
++                }
++            })
++            .await??
++        };
++        let round_id = uuid_bytes(&round.round_id)?;
++        if uuid_bytes(&round.connection_id)? != connection {
++            bail!("center returned a different relay connection");
++        }
++        if round.state != "collecting" {
++            return Ok(0);
++        }
++        let binding = ProbeBinding {
++            grant: &grant,
++            connection,
++            round: round_id,
++            role,
++            device,
++        };
++        let result = stream::iter(round.candidates.into_iter().filter(|node| node.eligible))
++            .map(|node| self.measure_candidate(&binding, bearer, session, node))
++            .buffer_unordered(8)
++            .collect::<Vec<_>>()
++            .await;
++        let mut sent = 0;
++        let mut first_error = None;
++        for result in result {
++            match result {
++                Ok(true) => sent += 1,
++                Ok(false) => (),
++                Err(err) => {
++                    first_error.get_or_insert(err);
++                }
++            }
++        }
++        match first_error {
++            Some(err) => Err(err),
++            None => Ok(sent),
++        }
++    }
++
++    async fn measure_candidate(
++        &self,
++        binding: &ProbeBinding<'_>,
++        bearer: &str,
++        session: Uuid,
++        node: Candidate,
++    ) -> ResultType<bool> {
++        let relay = uuid_bytes(&node.relay_id)?;
++        let public_key = URL_SAFE_NO_PAD.decode(&node.public_key)?;
++        let relay_key = sign::PublicKey::from_slice(&public_key)
++            .ok_or_else(|| anyhow!("invalid probe response key"))?;
++        let permit = node
++            .probe_permit
++            .as_ref()
++            .ok_or_else(|| anyhow!("missing relay probe permit"))?;
++        let frame = URL_SAFE_NO_PAD.decode(&permit.frame)?;
++        let signature = URL_SAFE_NO_PAD.decode(&permit.signature)?;
++        let signed = RelayProbePermit::verify(&frame, &signature, &self.center_key)
++            .ok_or_else(|| anyhow!("invalid center probe permit"))?;
++        let endpoint_hash = sha256::hash(node.endpoint.as_bytes());
++        if frame.len() != SESSION_PROBE_FRAME_SIZE
++            || signed.role != binding.role as u8
++            || signed.session != binding.grant.session_id()
++            || signed.grant != binding.grant.grant_id()
++            || signed.connection != binding.connection.as_bytes()
++            || signed.round != binding.round.as_bytes()
++            || signed.node != *relay.as_bytes()
++            || signed.version != node.config_version
++            || signed.endpoint != endpoint_hash
++            || signed.holder != binding.device.public_key
++        {
++            bail!("probe permit does not bind the current candidate and endpoint");
++        }
++        let now = now_ms()?;
++        if now >= signed.expires {
++            return Ok(false);
++        }
++        if now < signed.opens && signed.opens - now > 2000 {
++            bail!("relay probe window has not opened");
++        }
++        // Relative deadline is bounded even when the endpoint clock is behind.
++        let remaining = Duration::from_millis(signed.expires - now).min(ROUND);
++        let deadline = Instant::now() + remaining;
++        let request = [SESSION_PROBE_PREFIX, &frame, &signature].concat();
++        let holder = sha256::hash(&frame);
++        let samples = if let Some(budget) = remaining.checked_sub(REPORT_MARGIN) {
++            let probe = |slot| {
++                timeout(
++                    budget,
++                    sample_relay(&node, &relay_key, binding.device, &request, &holder, slot),
++                )
++            };
++            let (first, second, third) = tokio::join!(probe(0), probe(1), probe(2));
++            [first, second, third].map(|result| result.unwrap_or(Sample::Timeout))
++        } else {
++            [Sample::Missing; 3]
++        };
++        let mut wire = [0u8; 15];
++        let samples = samples
++            .iter()
++            .enumerate()
++            .map(|(index, sample)| {
++                let (code, result, rtt) = sample.fields();
++                wire[index * 5] = code;
++                wire[index * 5 + 1..index * 5 + 5].copy_from_slice(&rtt.unwrap_or(0).to_be_bytes());
++                match rtt {
++                    Some(value) => serde_json::json!({ "result": result, "rtt_us": value }),
++                    None => serde_json::json!({ "result": result }),
++                }
++            })
++            .collect::<Vec<_>>();
++        let report = encode(
++            RELAY_PROBE,
++            &[
++                &[binding.role as u8],
++                binding.grant.session_id(),
++                binding.grant.grant_id(),
++                binding.connection.as_bytes(),
++                binding.round.as_bytes(),
++                relay.as_bytes(),
++                &node.config_version.to_be_bytes(),
++                endpoint_hash.as_ref(),
++                &wire,
++            ],
++        )
++        .ok_or_else(|| anyhow!("invalid relay sample report"))?;
++        timeout(deadline.saturating_duration_since(Instant::now()), self.post(
++            &format!("/v1/sessions/{session}/relay-probes"),
++            bearer,
++            serde_json::json!({
++                "connection_id": binding.connection.to_string(),
++                "round_id": binding.round.to_string(),
++                "relay_id": relay.to_string(),
++                "samples": samples, "signature": URL_SAFE_NO_PAD.encode(binding.device.sign(&report)),
++            }),
++            &[204],
++        )).await??;
++        Ok(true)
++    }
++}
++
++async fn sample_relay(
++    node: &Candidate,
++    key: &sign::PublicKey,
++    device: &DeviceIdentity,
++    request: &[u8],
++    holder: &sha256::Digest,
++    slot: u8,
++) -> Sample {
++    let Ok(mut socket) = TcpStream::connect(node.endpoint.as_str()).await else {
++        return Sample::Unreachable;
++    };
++    let _ = socket.set_nodelay(true);
++    let exchange = async {
++        socket.write_all(request).await?;
++        let mut nonce = [0; 32];
++        socket.read_exact(&mut nonce).await?;
++        let proof = encode(RELAY_PROBE_HOLDER, &[holder.as_ref(), &[slot], &nonce])
++            .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))?;
++        let answer = [&[slot][..], &device.sign(&proof)].concat();
++        let start = Instant::now();
++        socket.write_all(&answer).await?;
++        let mut response = [0; 68 + 64];
++        socket.read_exact(&mut response).await?;
++        let rtt = start.elapsed().as_micros();
++        let (data, signature) = response.split_at(68);
++        let expected = [SESSION_PROBE_PREFIX, &proof, data].concat();
++        let valid_signature = sign::Signature::from_bytes(signature)
++            .ok()
++            .map(|sig| sign::verify_detached(&sig, &expected, key))
++            .unwrap_or(false);
++        let build = &data[..64];
++        let length = build
++            .iter()
++            .rposition(|value| *value != 0)
++            .map_or(0, |i| i + 1);
++        if !valid_signature || build[..length] != *node.build.as_bytes() {
++            return Ok::<_, io::Error>(Sample::ProtocolMismatch);
++        }
++        Ok(Sample::Measured(
++            u32::try_from(rtt.min(2_000_000)).unwrap_or(2_000_000),
++        ))
++    };
++    exchange.await.unwrap_or(Sample::ProtocolMismatch)
++}
+diff --git a/libs/base/tests/deskrealm_relay_probes.rs b/libs/base/tests/deskrealm_relay_probes.rs
+new file mode 100644
+index 0000000..97d2323
+--- /dev/null
++++ b/libs/base/tests/deskrealm_relay_probes.rs
+@@ -0,0 +1,74 @@
++use base::deskrealm_endpoint::{Authority, DeviceIdentity, SessionTarget};
++use hbb_common::{
++    anyhow::{anyhow, ensure},
++    base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _},
++    deskrealm_protocol::PeerRole,
++    sodiumoxide::crypto::sign,
++    uuid::Uuid,
++    ResultType,
++};
++use serde_derive::Deserialize;
++
++#[derive(Deserialize)]
++struct Peer {
++    device: String,
++    seed: String,
++    credential: String,
++}
++
++impl Peer {
++    fn identity(&self) -> ResultType<DeviceIdentity> {
++        let seed = URL_SAFE_NO_PAD.decode(&self.seed)?;
++        let seed = sign::Seed::from_slice(&seed).ok_or_else(|| anyhow!("invalid fixture seed"))?;
++        DeviceIdentity::from_seed(self.device.parse()?, &seed)
++    }
++}
++
++#[derive(Deserialize)]
++struct Fixture {
++    center: String,
++    center_key: String,
++    kid: String,
++    controller: Peer,
++    target: Peer,
++}
++
++#[tokio::test]
++async fn managed_native_endpoints_report_both_regional_relays() -> ResultType<()> {
++    let path = std::env::var("DESKREALM_RELAY_PROBE_FIXTURE")?;
++    let input: Fixture = serde_json::from_slice(&std::fs::read(path)?)?;
++    let ca = std::fs::read(std::env::var("DESKREALM_RELAY_PROBE_CA")?)?;
++    let controller = input.controller.identity()?;
++    let target = input.target.identity()?;
++    let center_key = URL_SAFE_NO_PAD.decode(&input.center_key)?;
++    let center_key = sign::PublicKey::from_slice(&center_key)
++        .ok_or_else(|| anyhow!("invalid fixture center verification key"))?;
++    let authority = Authority::new(&input.center, input.kid, center_key, Some(&ca))?;
++    let route = authority
++        .issue(
++            &controller,
++            &input.controller.credential,
++            SessionTarget::RustDeskId("10700002"),
++            Uuid::new_v4(),
++            "helpdesk",
++            1,
++            true,
++        )
++        .await?;
++    authority
++        .begin_relay_probes(&route, &controller, &input.controller.credential)
++        .await?;
++    let (first, second) = tokio::join!(
++        authority.collect_relay_probes(
++            &route,
++            &controller,
++            &input.controller.credential,
++            PeerRole::Controller,
++        ),
++        authority
++            .collect_relay_probes(&route, &target, &input.target.credential, PeerRole::Target,),
++    );
++    ensure!(first? == 2, "controller missed a regional relay");
++    ensure!(second? == 2, "target missed a regional relay");
++    Ok(())
++}
+diff --git a/src/deskrealm_desktop.rs b/src/deskrealm_desktop.rs
+index 029e0ad..f7009d1 100644
+--- a/src/deskrealm_desktop.rs
++++ b/src/deskrealm_desktop.rs
+@@ -240,6 +240,7 @@ pub(crate) async fn connect(
+         &required("DESKREALM_MANAGED_CONTROLLER_CREDENTIAL_FILE")?,
+         128,
+     )?;
++    let bearer = std::str::from_utf8(&bearer)?.trim();
+     let purpose = optional("DESKREALM_MANAGED_PURPOSE")?.unwrap_or_else(|| "helpdesk".to_owned());
+     let path = if force_relay {
+         Path::Relay
+@@ -260,7 +261,7 @@ pub(crate) async fn connect(
+         .authority
+         .issue(
+             &desktop.device,
+-            std::str::from_utf8(&bearer)?.trim(),
++            bearer,
+             target,
+             Uuid::new_v4(),
+             &purpose,
+@@ -274,10 +275,28 @@ pub(crate) async fn connect(
+     if grant.organization_id() != desktop.organization.as_bytes() {
+         bail!("managed grant belongs to a different organization");
+     }
+-    let mut stream = desktop
+-        .network()
+-        .connect_controller(&desktop.authority, &desktop.device, &route, path)
+-        .await?;
++    let probe_round = path == Path::Relay
++        && desktop
++            .authority
++            .begin_relay_probes(&route, &desktop.device, bearer)
++            .await
++            .is_ok();
++    let network = desktop.network();
++    let (stream, ()) = tokio::join!(
++        network.connect_controller(&desktop.authority, &desktop.device, &route, path),
++        async {
++            if probe_round
++                && desktop
++                    .authority
++                    .collect_relay_probes(&route, &desktop.device, bearer, PeerRole::Controller)
++                    .await
++                    .is_err()
++            {
++                hbb_common::log::debug!("Managed controller relay measurements unavailable");
++            }
++        }
++    );
++    let mut stream = stream?;
+     let admitted = desktop
+         .authority
+         .connect_controller(&mut stream, &route, &desktop.device, path)
+@@ -469,15 +488,33 @@ pub(crate) async fn authorize_target(
+             .map_err(|_| anyhow!("managed display is busy"))?;
+         (None, Some(capture))
+     };
+-    let (mut stream, route, path) = desktop
+-        .network()
+-        .accept_target(
+-            &desktop.authority,
+-            &desktop.device,
+-            &desktop.rustdesk_id,
+-            signal,
+-        )
+-        .await?;
++    let probe_route = matches!(
++        signal.operation.as_ref(),
++        Some(hbb_common::rendezvous_proto::desk_realm_signal::Operation::RelayRequest(_))
++    )
++    .then(|| route.clone());
++    let network = desktop.network();
++    let (transport, ()) = tokio::join!(
++        network.accept_target(&desktop.authority, &desktop.device, &desktop.rustdesk_id, signal),
++        async {
++            if let Some(route) = probe_route {
++                if desktop
++                    .authority
++                    .collect_relay_probes(
++                        &route,
++                        &desktop.device,
++                        state.credential.bearer(),
++                        PeerRole::Target,
++                    )
++                    .await
++                    .is_err()
++                {
++                    hbb_common::log::debug!("Managed target relay measurements unavailable");
++                }
++            }
++        }
++    );
++    let (mut stream, route, path) = transport?;
+     let unattended = policy
+         .unattended_purposes()
+         .iter()

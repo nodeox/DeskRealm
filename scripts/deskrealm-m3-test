@@ -7,7 +7,7 @@ case "${1:-}" in
     go test -race -count=1 ./internal/m3/install -run '^TestRenderComposeForRelayIngress$'
     GOFLAGS="${GOFLAGS:-} -race" bash scripts/deskrealm-m1-test relay-probes
     bash scripts/deskrealm-m2-test vectors
-    exec python3 -B managed/tests/relay_enrollment.py
+    exec python3 -B managed/tests/relay_enrollment.py --client-probes
     ;;
   relay-lifecycle)
     npm --prefix web run build

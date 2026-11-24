@@ -102,7 +102,12 @@ fn widths(kind: u8) -> Option<&'static [usize]> {
 pub const SESSION_PROBE_FRAME_SIZE: usize = 199;
 pub const SESSION_PROBE_PREFIX: &[u8] = b"DeskRealm/relay/v1/rtt-1\0";
 
-pub struct RelayProbePermit {
+pub struct RelayProbePermit<'a> {
+    pub role: u8,
+    pub session: &'a [u8],
+    pub grant: &'a [u8],
+    pub connection: &'a [u8],
+    pub round: &'a [u8],
     pub node: [u8; 16],
     pub version: u64,
     pub endpoint: sha256::Digest,
@@ -111,14 +116,19 @@ pub struct RelayProbePermit {
     pub expires: u64,
 }
 
-impl RelayProbePermit {
-    pub fn verify(frame: &[u8], signature: &[u8], key: &sign::PublicKey) -> Option<Self> {
+impl<'a> RelayProbePermit<'a> {
+    pub fn verify(frame: &'a [u8], signature: &[u8], key: &sign::PublicKey) -> Option<Self> {
         let fields = decode(RELAY_PROBE_PERMIT, frame)?;
         let signature = sign::Signature::from_bytes(signature).ok()?;
         if !sign::verify_detached(&signature, frame, key) {
             return None;
         }
         Some(Self {
+            role: fields[0][0],
+            session: fields[1],
+            grant: fields[2],
+            connection: fields[3],
+            round: fields[4],
             node: fields[5].try_into().ok()?,
             version: number(fields[6]),
             endpoint: sha256::Digest::from_slice(fields[7])?,

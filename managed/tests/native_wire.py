@@ -100,16 +100,16 @@ def cargo(repo, cache, image, *args, required=None):
     return in_source(repo, cache, image, ["cargo", *args], required=required)
 
 
-def interoperability_binary(client, cache):
+def interoperability_binary(client, cache, test_name="deskrealm_interop"):
     output = cargo(client, cache, CLIENT_IMAGE, "test", "--locked", "-p", "base", "--test",
-                   "deskrealm_interop", "--no-run", "--message-format=json")
+                   test_name, "--no-run", "--message-format=json")
     executables = []
     for line in output.splitlines():
         if not line.startswith("{"):
             continue
         record = json.loads(line)
         if (record.get("reason") == "compiler-artifact"
-                and record.get("target", {}).get("name") == "deskrealm_interop"
+                and record.get("target", {}).get("name") == test_name
                 and record.get("executable")):
             executable = Path(record["executable"]).relative_to("/source/target")
             executables.append(target_directory(client) / executable)
