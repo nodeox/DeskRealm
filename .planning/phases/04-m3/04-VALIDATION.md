@@ -363,3 +363,18 @@ Task 2 接续已建立会话断线后的新授权重选、会话页明细和跨�
 本轮通过 API 和 PostgreSQL 模拟两种 Windows 架构的端点登记。Windows 安装器、终端读取公开配置及免填登记继续开发。实际 Windows 部署和 Linux 中心重建验收留在 Phase 5。
 
 当前原生 CI 提交 `6acfe3f62c3da5bd9d2021865fb3db8ab780da99` 的完整 Windows 构建输入与候选 `3311e12` 一致。x64 原生构建和测试通过，已下载归档并复核 PE 架构、工件摘要及具名测试日志。`manifest.json` SHA-256 为 `f86c691c6e3d8a2c5f6d370005aaffbc4b861ec223b0098d472f603a85bf1a5d`，`client.zip` SHA-256 为 `9a0132cc24695dcf8ea92478e5a4c2560ef4024a2db529be8c91f135dac8a8cb`。核验日志保存在 Git 证据目录 `deskrealm-evidence/windows/6acfe3f62c3da5bd9d2021865fb3db8ab780da99/verify-x64.log`。ARM64 桥接已通过，原生编译仍在运行。[Windows 原生构建](https://github.com/nodeox/DeskRealm/actions/runs/45368970255)
+
+## 04-05 Windows 首次启动程序
+
+2026-11-24，候选 `737454d480be763754aeb9db2262dd36e28d5be8` 将 `DeskRealm.exe` 纳入双架构原生归档验证。启动程序从同目录读取公开配置，通过 Windows 信任的 HTTPS 核对中心签名身份。设备密钥保留在当前用户的本机目录，部署工具写入单台设备凭据。程序完成持钥登记后保存回执，清理部署文件，再用已配置的中心、会合、中继和设备身份启动现有受管客户端。
+
+| 检查 | 结果 |
+| --- | --- |
+| 启动与恢复 | Go 测试覆盖保留原密钥、拒绝不同架构和中心签名身份、中心已完成登记但响应中断时复用已保存挑战、下次启动沿用登记回执，以及清理继承的中心环境变量。 |
+| 中心与交付 | PostgreSQL 发布、登记、审批和策略回执通过。公开配置解析拒绝凭据字段及非规范中心地址。双架构证据和签名打包的 14 个 Python 测试与中心签名验证专项通过。全 Go 检查和 actionlint 通过。 |
+| 双架构开发构建 | macOS 交叉编译产生 x64 和 ARM64 启动程序并复验 PE 架构。新 CI 源提交 `71079b6e5d24cea6f018eb41cab0c5b121ab55a6` 的 Windows 构建输入与本地候选一致。[新 Windows 原生构建](https://github.com/nodeox/DeskRealm/actions/runs/45380636466) |
+| 上一轮原生归档 | `6acfe3f` 的双架构 CI 与本地工件核验均通过。证据为加入启动程序前的原生客户端。[上一轮 Windows 原生构建](https://github.com/nodeox/DeskRealm/actions/runs/45368970255) |
+
+证据保存在 Git 目录 `deskrealm-evidence/m3/737454d480be763754aeb9db2262dd36e28d5be8/`。双架构交叉编译日志 `launcher-cross-build.log` 的 SHA-256 为 `20184bcf8964f597dee44280f2a292d9aea6f6de6a0865911db3cb10fbb1f8ee`，`launcher-go.log` 为 `a9708e382f8dcaf29e63f96e58375c52c48f27da873aaac08d7e61dff70f5d00`，`managed-release.log` 为 `db9773b3a7b6460adccb5d3e61cdd0840e3e76fab17beed304c26f7fa98718b0`，`signed-build.log` 为 `a3a4ca8db559dd3ea89ae476afaef0ed2ae6343b97032b216fdba5edf072eb1d`。
+
+开发包的启动入口已约定从已验证归档手动解压布置。签名安装器、含启动程序的原生 CI 工件验签和目标环境的首次启动、直连及强制中继验证继续推进。
