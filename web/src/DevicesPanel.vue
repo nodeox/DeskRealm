@@ -240,10 +240,12 @@ onMounted(async () => {
     <div class="section-heading">
       <div><h2 id="device-title">设备台账</h2><p class="muted">查看登记、连接及策略回执。</p></div>
       <div class="user-tools">
-        <button v-if="admin" class="secondary" type="button" :aria-expanded="mode === 'group'" @click="toggle('group')">新建设备组</button>
-        <button v-if="admin && groups.length" class="secondary" type="button" :aria-expanded="mode === 'grant'" @click="toggle('grant')">管理设备组委派</button>
+        <button v-if="admin" class="secondary" type="button" :disabled="busy"
+          :aria-expanded="mode === 'group'" @click="toggle('group')">新建设备组</button>
+        <button v-if="admin && groups.length" class="secondary" type="button" :disabled="busy"
+          :aria-expanded="mode === 'grant'" @click="toggle('grant')">管理设备组委派</button>
         <button v-if="groups.some(group => group.can_approve)" class="primary" type="button"
-          :aria-expanded="mode === 'credential'" @click="toggle('credential')">发放入网凭据</button>
+          :disabled="busy" :aria-expanded="mode === 'credential'" @click="toggle('credential')">发放入网凭据</button>
       </div>
     </div>
 
