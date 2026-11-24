@@ -45,8 +45,8 @@ type windowsEnrollmentStatus struct {
 }
 
 const windowsDeploymentState = `CASE WHEN e.consumed_at IS NOT NULL THEN 'consumed'
-	WHEN b.revoked_at IS NOT NULL OR r.revoked_at IS NOT NULL THEN 'revoked'
-	WHEN e.expires_at<=clock_timestamp() THEN 'expired' ELSE 'issued' END`
+	WHEN b.revoked_at IS NOT NULL OR r.revoked_at IS NOT NULL OR t.revoked_at IS NOT NULL THEN 'revoked'
+	WHEN e.expires_at<=clock_timestamp() OR t.expires_at<=clock_timestamp() THEN 'expired' ELSE 'issued' END`
 
 // Reconstruct the original credential for authorized retries while storing only its digest.
 func windowsEnrollmentSecret(key *ManagedSigningKey, organization, release, deployment string) string {
@@ -68,8 +68,10 @@ func windowsEnrollmentAllowed(ctx context.Context, tx pgx.Tx, who actor, release
 }
 
 func (a *API) issueWindowsEnrollment(w http.ResponseWriter, r *http.Request) {
-	if _, ok := a.sessionWrite(w, r); !ok {
-		return
+	if !automationDeployment(r) {
+		if _, ok := a.sessionWrite(w, r); !ok {
+			return
+		}
 	}
 	ctx, release := r.Context(), r.PathValue("id")
 	var in windowsEnrollmentInput
@@ -87,14 +89,17 @@ func (a *API) issueWindowsEnrollment(w http.ResponseWriter, r *http.Request) {
 	}
 	result := windowsEnrollmentReceipt{Deployment: in.Deployment, Release: release, Group: in.Group, Platform: platform}
 	status := http.StatusOK
-	err := a.withActor(r, true, func(tx pgx.Tx, who actor) error {
+	err := a.withWindowsDeploymentActor(r, true, func(tx pgx.Tx, who actor, token windowsDeploymentToken) error {
 		if a.managedKey == nil || a.store.WindowsReleases == nil {
 			return errWindowsDeliveryUnavailable
 		}
-		if in.AutoApprove && !who.PlatformAdmin {
+		if in.AutoApprove && (!who.PlatformAdmin || token.ID != "") {
 			return errForbidden
 		}
-		record, err := findWindowsRelease(ctx, tx, who, release)
+		if token.ID != "" && token.Group != in.Group {
+			return errWindowsReleaseMissing
+		}
+		record, err := findDeploymentRelease(ctx, tx, who, token, release)
 		if err != nil {
 			return err
 		}
@@ -102,26 +107,27 @@ func (a *API) issueWindowsEnrollment(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return err
 		}
-		if record.Revoked != nil || record.Packages[in.Arch].File == "" || !allowed {
+		if record.Packages[in.Arch].File == "" || !allowed ||
+			(token.ID != "" && (record.Installer == nil || record.Installer.Installers[in.Arch].File == "")) {
 			return errWindowsReleaseMissing
 		}
 		secret := windowsEnrollmentSecret(a.managedKey, who.Organization, release, in.Deployment)
 		hash := digest(secret)
 		var stored, priorKey []byte
-		var priorRelease, priorGroup, priorPlatform, priorRustDesk, priorPurpose, priorIssuer string
+		var priorRelease, priorGroup, priorPlatform, priorRustDesk, priorPurpose, priorIssuer, priorToken string
 		var priorMinutes int
 		var priorAuto bool
 		err = tx.QueryRow(ctx, `SELECT e.id,e.expires_at,e.issued_by,e.digest,b.release_id,e.group_id,e.platform,
-			b.public_key,b.rustdesk_id,e.purpose,b.lifetime_minutes,b.auto_approve,`+windowsDeploymentState+`
+			b.public_key,b.rustdesk_id,e.purpose,b.lifetime_minutes,b.auto_approve,COALESCE(b.api_token_id::text,''),`+windowsDeploymentState+`
 			FROM windows_enrollment_bindings b JOIN enrollment_credentials e ON e.id=b.credential_id
-			JOIN windows_releases r ON r.id=b.release_id
+			JOIN windows_releases r ON r.id=b.release_id LEFT JOIN api_tokens t ON t.id=b.api_token_id
 			WHERE b.organization_id=$1 AND b.deployment_id=$2`, who.Organization, in.Deployment).
 			Scan(&result.ID, &result.Expires, &priorIssuer, &stored, &priorRelease, &priorGroup, &priorPlatform,
-				&priorKey, &priorRustDesk, &priorPurpose, &priorMinutes, &priorAuto, &result.State)
+				&priorKey, &priorRustDesk, &priorPurpose, &priorMinutes, &priorAuto, &priorToken, &result.State)
 		if err == nil {
 			if priorIssuer != who.ID || priorRelease != release || priorGroup != in.Group || priorPlatform != platform ||
 				!bytes.Equal(priorKey, key) || priorRustDesk != in.RustDeskID || priorPurpose != in.Purpose ||
-				priorMinutes != in.Minutes || priorAuto != in.AutoApprove {
+				priorMinutes != in.Minutes || priorAuto != in.AutoApprove || priorToken != token.ID {
 				return errEnrollmentConflict
 			}
 			if result.State == "issued" {
@@ -136,19 +142,19 @@ func (a *API) issueWindowsEnrollment(w http.ResponseWriter, r *http.Request) {
 			return err
 		}
 		if err := tx.QueryRow(ctx, `INSERT INTO enrollment_credentials(organization_id,group_id,platform,purpose,digest,issued_by,expires_at)
-			VALUES($1,$2,$3,$4,$5,$6,clock_timestamp()+make_interval(mins=>$7)) RETURNING id,expires_at`,
-			who.Organization, in.Group, platform, in.Purpose, hash, who.ID, in.Minutes).
+			VALUES($1,$2,$3,$4,$5,$6,LEAST(clock_timestamp()+make_interval(mins=>$7),$8::timestamptz)) RETURNING id,expires_at`,
+			who.Organization, in.Group, platform, in.Purpose, hash, who.ID, in.Minutes, token.Expires).
 			Scan(&result.ID, &result.Expires); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(ctx, `INSERT INTO windows_enrollment_bindings(credential_id,organization_id,deployment_id,
-			release_id,group_id,public_key,rustdesk_id,lifetime_minutes,auto_approve)
-			VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`, result.ID, who.Organization, in.Deployment, release,
-			in.Group, key, in.RustDeskID, in.Minutes, in.AutoApprove); err != nil {
+			release_id,group_id,public_key,rustdesk_id,lifetime_minutes,auto_approve,api_token_id)
+			VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,NULLIF($10,'')::uuid)`, result.ID, who.Organization, in.Deployment, release,
+			in.Group, key, in.RustDeskID, in.Minutes, in.AutoApprove, token.ID); err != nil {
 			return err
 		}
 		result.State, result.Credential, status = "issued", secret, http.StatusCreated
-		return auditWindowsEnrollment(ctx, tx, who, record.task, in.Group, in.Deployment, "windows_enrollment.issued")
+		return auditWindowsEnrollment(ctx, tx, who, record.task, in.Group, in.Deployment, "windows_enrollment.issued", token.ID)
 	})
 	if err != nil {
 		failure(w, "issue Windows enrollment", err)
@@ -165,14 +171,16 @@ func (a *API) getWindowsEnrollment(w http.ResponseWriter, r *http.Request) {
 	}
 	var result windowsEnrollmentStatus
 	result.Release, result.Deployment = release, deployment
-	err := a.withActor(r, false, func(tx pgx.Tx, who actor) error {
+	err := a.withWindowsDeploymentActor(r, false, func(tx pgx.Tx, who actor, token windowsDeploymentToken) error {
 		err := tx.QueryRow(ctx, `SELECT e.id,e.group_id,e.platform,e.expires_at,`+windowsDeploymentState+`,
 			COALESCE(d.id::text,''),COALESCE(d.registration_state,''),d.expected_policy_version,d.applied_policy_version
 			FROM windows_enrollment_bindings b JOIN enrollment_credentials e ON e.id=b.credential_id
 			JOIN windows_releases r ON r.id=b.release_id JOIN device_groups dg ON dg.id=b.group_id
+			LEFT JOIN api_tokens t ON t.id=b.api_token_id
 			LEFT JOIN enrollment_attempts ea ON ea.credential_id=e.id LEFT JOIN devices d ON d.id=ea.device_id
-			WHERE b.organization_id=$1 AND b.release_id=$4 AND b.deployment_id=$5 AND `+deviceGroupApprove,
-			who.Organization, who.ID, who.PlatformAdmin, release, deployment).
+			WHERE b.organization_id=$1 AND b.release_id=$4 AND b.deployment_id=$5 AND `+deviceGroupApprove+`
+			AND ($6='' OR b.api_token_id=NULLIF($6,'')::uuid)`,
+			who.Organization, who.ID, who.PlatformAdmin, release, deployment, token.ID).
 			Scan(&result.ID, &result.Group, &result.Platform, &result.Expires, &result.State, &result.Device,
 				&result.Registration, &result.ExpectedVersion, &result.AppliedVersion)
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -188,8 +196,10 @@ func (a *API) getWindowsEnrollment(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) revokeWindowsEnrollment(w http.ResponseWriter, r *http.Request) {
-	if _, ok := a.sessionWrite(w, r); !ok {
-		return
+	if !automationDeployment(r) {
+		if _, ok := a.sessionWrite(w, r); !ok {
+			return
+		}
 	}
 	ctx, release, deployment := r.Context(), r.PathValue("id"), r.PathValue("deployment")
 	if !userIDPattern.MatchString(release) || !userIDPattern.MatchString(deployment) {
@@ -199,13 +209,14 @@ func (a *API) revokeWindowsEnrollment(w http.ResponseWriter, r *http.Request) {
 	if !readJSON(w, r, &struct{}{}) {
 		return
 	}
-	err := a.withActor(r, true, func(tx pgx.Tx, who actor) error {
+	err := a.withWindowsDeploymentActor(r, true, func(tx pgx.Tx, who actor, token windowsDeploymentToken) error {
 		var task, group string
 		var consumed, revoked bool
 		err := tx.QueryRow(ctx, `SELECT b.group_id,r.task_id,e.consumed_at IS NOT NULL,b.revoked_at IS NOT NULL
 			FROM windows_enrollment_bindings b JOIN enrollment_credentials e ON e.id=b.credential_id
 			JOIN windows_releases r ON r.id=b.release_id WHERE b.organization_id=$1 AND b.release_id=$2 AND b.deployment_id=$3
-			FOR UPDATE OF b,e`, who.Organization, release, deployment).Scan(&group, &task, &consumed, &revoked)
+			AND ($4='' OR b.api_token_id=NULLIF($4,'')::uuid) FOR UPDATE OF b,e`,
+			who.Organization, release, deployment, token.ID).Scan(&group, &task, &consumed, &revoked)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return errWindowsReleaseMissing
 		}
@@ -229,7 +240,7 @@ func (a *API) revokeWindowsEnrollment(w http.ResponseWriter, r *http.Request) {
 			WHERE organization_id=$1 AND deployment_id=$2`, who.Organization, deployment); err != nil {
 			return err
 		}
-		return auditWindowsEnrollment(ctx, tx, who, task, group, deployment, "windows_enrollment.revoked")
+		return auditWindowsEnrollment(ctx, tx, who, task, group, deployment, "windows_enrollment.revoked", token.ID)
 	})
 	if err != nil {
 		failure(w, "revoke Windows enrollment", err)
@@ -238,15 +249,15 @@ func (a *API) revokeWindowsEnrollment(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func auditWindowsEnrollment(ctx context.Context, tx pgx.Tx, who actor, task, group, deployment, action string) error {
+func auditWindowsEnrollment(ctx context.Context, tx pgx.Tx, who actor, task, group, deployment, action, tokenID string) error {
 	_, err := addAuditEvent(ctx, tx, auditEvent{OrganizationID: who.Organization, ActorID: who.ID,
-		TaskID: task, DeviceGroupID: group, ResourceID: deployment, Action: action, Result: "success"})
+		TaskID: task, DeviceGroupID: group, ResourceID: deployment, Action: action, Result: "success", Reason: tokenID})
 	return err
 }
 
 func finishWindowsEnrollment(ctx context.Context, tx pgx.Tx, e lockedEnrollment, attempt string, out *enrollmentResult) error {
 	if err := auditWindowsEnrollment(ctx, tx, actor{Organization: e.Organization}, e.ReleaseTask, e.GroupID,
-		e.Deployment, "windows_enrollment.completed"); err != nil {
+		e.Deployment, "windows_enrollment.completed", ""); err != nil {
 		return err
 	}
 	if !e.AutoApprove {

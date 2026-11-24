@@ -14,40 +14,39 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-func install() error {
+func install() (string, error) {
 	arch := "x64"
 	switch runtime.GOARCH {
 	case "arm64":
 		arch = "arm64"
 	case "amd64":
 	default:
-		return errors.New("installation requires Windows x64 or ARM64")
+		return "", errors.New("installation requires Windows x64 or ARM64")
 	}
 	name, err := os.Executable()
 	if err != nil {
-		return err
+		return "", err
 	}
 	image, err := os.Open(name)
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer image.Close()
 	if err := verifySignature(image); err != nil {
-		return fmt.Errorf("installer Authenticode signature was rejected: %w", err)
+		return "", fmt.Errorf("installer Authenticode signature was rejected: %w", err)
 	}
 	base, err := windows.KnownFolderPath(windows.FOLDERID_LocalAppData, 0)
 	if err != nil {
-		return err
+		return "", err
 	}
 	directory, err := windowssetup.Install(image, arch, filepath.Join(base, "Programs", "DeskRealm", "releases"))
 	if err != nil {
-		return err
+		return "", err
 	}
 	if err := installShortcut(directory); err != nil {
-		return err
+		return "", err
 	}
-	fmt.Println("DeskRealm installed at", directory)
-	return nil
+	return directory, nil
 }
 
 func verifySignature(file *os.File) error {

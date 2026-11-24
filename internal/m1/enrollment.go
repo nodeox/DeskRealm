@@ -135,11 +135,13 @@ func (e lockedEnrollment) matches(in enrollmentRequest, key []byte) bool {
 func lockEnrollment(ctx context.Context, tx pgx.Tx, credential string) (lockedEnrollment, error) {
 	var e lockedEnrollment
 	err := tx.QueryRow(ctx, `SELECT e.id,e.organization_id,e.group_id,e.platform,e.expires_at,
-		e.expires_at>clock_timestamp() AND b.revoked_at IS NULL AND r.revoked_at IS NULL,
+		e.expires_at>clock_timestamp() AND b.revoked_at IS NULL AND r.revoked_at IS NULL
+			AND (b.api_token_id IS NULL OR (t.revoked_at IS NULL AND t.expires_at>clock_timestamp())),
 		e.consumed_at IS NOT NULL,e.issued_by,COALESCE(b.deployment_id::text,''),
 		COALESCE(r.task_id::text,''),COALESCE(b.rustdesk_id,''),b.public_key,COALESCE(b.auto_approve,false)
 		FROM enrollment_credentials e LEFT JOIN windows_enrollment_bindings b ON b.credential_id=e.id
-		LEFT JOIN windows_releases r ON r.id=b.release_id WHERE e.digest=$1 FOR UPDATE OF e`, digest(credential)).
+		LEFT JOIN windows_releases r ON r.id=b.release_id LEFT JOIN api_tokens t ON t.id=b.api_token_id
+		WHERE e.digest=$1 FOR UPDATE OF e`, digest(credential)).
 		Scan(&e.ID, &e.Organization, &e.GroupID, &e.Platform, &e.Expires, &e.Live, &e.Consumed, &e.Issuer,
 			&e.Deployment, &e.ReleaseTask, &e.RustDeskID, &e.PublicKey, &e.AutoApprove)
 	if errors.Is(err, pgx.ErrNoRows) {

@@ -207,6 +207,18 @@ test('首次管理员初始化、成员停用、刷新和退出', async ({ page,
   await page.reload()
   await expect(renamed).toContainText('已批准')
 
+  await page.getByRole('link', { name: 'API 令牌' }).click()
+  await page.getByLabel('权限', { exact: true }).selectOption('windows.deploy')
+  await page.getByLabel('设备组', { exact: true }).selectOption(deviceGroup.id)
+  await page.getByLabel('用途').fill('终端部署测试')
+  await page.getByRole('button', { name: '生成令牌' }).click()
+  await expect(page.getByLabel('新令牌')).toHaveValue(/^[A-Za-z0-9_-]{43}$/)
+  const deployToken = page.getByRole('row').filter({ hasText: '终端部署测试' })
+  await expect(deployToken).toContainText('Windows 部署 · 试点终端组')
+  await deployToken.getByRole('button', { name: '撤销令牌' }).click()
+  await page.getByRole('dialog', { name: '撤销 API 令牌' }).getByRole('button', { name: '确认撤销' }).click()
+  await expect(deployToken).toContainText('已撤销')
+
   await page.getByRole('link', { name: '概览', exact: true }).click()
   await page.setViewportSize({ width: 375, height: 800 })
   await page.reload()

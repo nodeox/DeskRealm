@@ -4,6 +4,6 @@ package main
 
 import "errors"
 
-func install() error {
-	return errors.New("installation requires Windows")
+func install() (string, error) {
+	return "", errors.New("installation requires Windows")
 }

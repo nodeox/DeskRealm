@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -16,8 +17,16 @@ func main() {
 }
 
 func run(args []string) error {
-	if len(args) == 0 {
-		return install()
+	if len(args) == 0 || (len(args) == 1 && args[0] == "--json") {
+		directory, err := install()
+		if err != nil {
+			return err
+		}
+		if len(args) == 1 {
+			return json.NewEncoder(os.Stdout).Encode(map[string]string{"install_directory": directory})
+		}
+		fmt.Println("DeskRealm installed at", directory)
+		return nil
 	}
 	if len(args) == 6 && args[0] == "assemble" {
 		return windowssetup.Assemble(args[1], args[2], args[3], args[4], args[5])

@@ -143,6 +143,50 @@ python3 -B managed/windows_installer.py verify \
 
 开发验证使用临时开发 CA。正式签名及目标 Windows 的证书信任按组织交付策略配置。
 
+## 组织部署工具
+
+管理员可在「API 令牌」选择「部署 Windows 终端」并指定设备组。自动化运行环境使用此限时令牌，目标 Windows 只收到单设备的入网凭据。每次中心操作都会核对令牌、发放人当前审批权限和发布组。部署 API 可下载该组的签名安装器，发放、查询及撤销本令牌创建的部署。设备登记后进入待审批，审批可在设备管理页完成。部署凭据到期时间受令牌的到期时间约束，撤销令牌会立即阻止其待用凭据完成登记。
+
+在自动化主机构建工具，将 API 令牌存入仅运行账号可读的文件。以下命令中的发布 UUID、组 UUID 和部署 UUID 由组织侧保存。同一台设备重试时使用相同部署 UUID。
+
+```bash
+go build -o deskrealm-deploy ./cmd/deskrealm-deploy
+
+./deskrealm-deploy fetch --center "$center" --token-file "$token_file" \
+  --release "$release" --arch arm64 --output DeskRealm-Setup-arm64.exe
+```
+
+将安装器交给组织已有部署通道，在目标 Windows 用户身份下运行。安装器的 `--json` 输出安装目录。以下 PowerShell 生成组织侧发放凭据所需的端点公钥和写入路径。
+
+```powershell
+$installed = & .\DeskRealm-Setup-arm64.exe --json
+if ($LASTEXITCODE -ne 0) { throw 'DeskRealm installation failed' }
+$setup = $installed | ConvertFrom-Json
+$launcher = Join-Path $setup.install_directory 'DeskRealm.exe'
+$public = & $launcher prepare $rustDeskID
+if ($LASTEXITCODE -ne 0) { throw 'DeskRealm identity preparation failed' }
+$target = $public | ConvertFrom-Json
+```
+
+将 `$public` 作为 `target.json` 交回组织侧工具。信任设备管理通道提供的公钥与 RustDesk ID。以下命令将设备凭据写入私有输出文件，标准输出包含部署 ID 和到期时间。
+
+```bash
+./deskrealm-deploy issue --center "$center" --token-file "$token_file" \
+  --release "$release" --group "$group" --deployment "$deployment" \
+  --target target.json --purpose "受管终端部署" --minutes 30 --output deployment.json
+```
+
+通过同一组织通道把凭据交到对应目标机。目标用户先把文件写到 `$target.deployment_file` 同目录的临时文件，再原子移到 `$target.deployment_file`。随后运行 `& $launcher start` 或使用开始菜单入口完成登记。端点成功保存登记回执后清理部署文件。组织可按自身保留策略清理用于传输的临时副本。
+
+```bash
+./deskrealm-deploy status --center "$center" --token-file "$token_file" \
+  --release "$release" --deployment "$deployment"
+./deskrealm-deploy revoke --center "$center" --token-file "$token_file" \
+  --release "$release" --deployment "$deployment"
+```
+
+状态接口返回部署状态和登记、策略回执。已消费凭据对应的设备通过设备管理执行停用或退役。需要补发过期或撤销的凭据时使用新的部署 UUID。控制台现有浏览器发放和自动审批流程继续按各自权限执行。
+
 ```bash
 bash scripts/deskrealm-m3-test signed-build
 bash scripts/deskrealm-m3-test delivery-tasks

@@ -282,15 +282,12 @@ func (a *API) downloadWindowsArtifact(w http.ResponseWriter, r *http.Request, in
 	}
 	ctx := r.Context()
 	var release windowsRelease
-	err := a.withActor(r, false, func(tx pgx.Tx, who actor) error {
+	err := a.withWindowsDeploymentActor(r, false, func(tx pgx.Tx, who actor, token windowsDeploymentToken) error {
 		if a.store.WindowsReleases == nil {
 			return errWindowsDeliveryUnavailable
 		}
 		var err error
-		release, err = findWindowsRelease(ctx, tx, who, id)
-		if release.Revoked != nil {
-			return errWindowsReleaseMissing
-		}
+		release, err = findDeploymentRelease(ctx, tx, who, token, id)
 		return err
 	})
 	if err != nil {
@@ -318,8 +315,8 @@ func (a *API) downloadWindowsArtifact(w http.ResponseWriter, r *http.Request, in
 
 	// Renew the access check after hashing. Group membership and revocation
 	// can change while the complete archive is being read.
-	err = a.withActor(r, r.Method == http.MethodGet, func(tx pgx.Tx, who actor) error {
-		current, err := findWindowsRelease(ctx, tx, who, id)
+	err = a.withWindowsDeploymentActor(r, r.Method == http.MethodGet, func(tx pgx.Tx, who actor, token windowsDeploymentToken) error {
+		current, err := findDeploymentRelease(ctx, tx, who, token, id)
 		if err != nil {
 			return err
 		}

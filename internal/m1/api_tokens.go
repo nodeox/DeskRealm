@@ -13,13 +13,14 @@ import (
 var errAPIToken = errors.New("invalid_api_token")
 
 type apiTokenRecord struct {
-	ID        string     `json:"id"`
-	Purpose   string     `json:"purpose"`
-	Action    string     `json:"action"`
-	Scope     string     `json:"scope"`
-	GroupID   string     `json:"group_id,omitempty"`
-	ExpiresAt time.Time  `json:"expires_at"`
-	RevokedAt *time.Time `json:"revoked_at,omitempty"`
+	ID            string     `json:"id"`
+	Purpose       string     `json:"purpose"`
+	Action        string     `json:"action"`
+	Scope         string     `json:"scope"`
+	GroupID       string     `json:"group_id,omitempty"`
+	DeviceGroupID string     `json:"device_group_id,omitempty"`
+	ExpiresAt     time.Time  `json:"expires_at"`
+	RevokedAt     *time.Time `json:"revoked_at,omitempty"`
 }
 
 type apiTokenInput struct {
@@ -27,6 +28,7 @@ type apiTokenInput struct {
 	Action          string `json:"action"`
 	Scope           string `json:"scope"`
 	GroupID         string `json:"group_id"`
+	DeviceGroupID   string `json:"device_group_id"`
 	LifetimeMinutes int    `json:"lifetime_minutes"`
 }
 
@@ -96,9 +98,7 @@ func (a *API) issueToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	in.Purpose = strings.TrimSpace(in.Purpose)
-	if !validOrganization(in.Purpose) || in.Action != "users.read" || in.LifetimeMinutes < 1 || in.LifetimeMinutes > 10080 ||
-		(in.Scope != "organization" && in.Scope != "group" && in.Scope != "self") ||
-		(in.Scope == "group" && !userIDPattern.MatchString(in.GroupID)) || (in.Scope != "group" && in.GroupID != "") {
+	if !validOrganization(in.Purpose) || in.LifetimeMinutes < 1 || in.LifetimeMinutes > 10080 || !in.validScope() {
 		writeError(w, 400, "invalid_api_token_request")
 		return
 	}
@@ -107,7 +107,8 @@ func (a *API) issueToken(w http.ResponseWriter, r *http.Request) {
 		failure(w, "issue API token", err)
 		return
 	}
-	result := apiTokenRecord{Purpose: in.Purpose, Action: in.Action, Scope: in.Scope, GroupID: in.GroupID}
+	result := apiTokenRecord{Purpose: in.Purpose, Action: in.Action, Scope: in.Scope, GroupID: in.GroupID,
+		DeviceGroupID: in.DeviceGroupID}
 	ctx := r.Context()
 	err = pgx.BeginFunc(ctx, a.store.DB, func(tx pgx.Tx) error {
 		current, err := actorSession(ctx, tx, a.cookieValue(r), true)
@@ -119,16 +120,22 @@ func (a *API) issueToken(w http.ResponseWriter, r *http.Request) {
 				return err
 			}
 		}
-		allowed, err := canIssueToken(ctx, tx, current, in.Scope, in.GroupID)
+		var allowed bool
+		if in.Action == "windows.deploy" {
+			allowed, err = canUseWindowsDeploymentGroup(ctx, tx, current, in.DeviceGroupID)
+		} else {
+			allowed, err = canIssueToken(ctx, tx, current, in.Scope, in.GroupID)
+		}
 		if err != nil {
 			return err
 		}
 		if !allowed {
 			return errForbidden
 		}
-		err = tx.QueryRow(ctx, `INSERT INTO api_tokens(digest,organization_id,user_id,purpose,action,scope,group_id,expires_at)
-			VALUES ($1,$2,$3,$4,$5,$6,NULLIF($7,'')::uuid,clock_timestamp()+make_interval(mins=>$8))
-			RETURNING id,expires_at`, digest(value), current.Organization, current.ID, in.Purpose, in.Action, in.Scope, in.GroupID, in.LifetimeMinutes).
+		err = tx.QueryRow(ctx, `INSERT INTO api_tokens(digest,organization_id,user_id,purpose,action,scope,group_id,device_group_id,expires_at)
+			VALUES ($1,$2,$3,$4,$5,$6,NULLIF($7,'')::uuid,NULLIF($8,'')::uuid,clock_timestamp()+make_interval(mins=>$9))
+			RETURNING id,expires_at`, digest(value), current.Organization, current.ID, in.Purpose, in.Action, in.Scope,
+			in.GroupID, in.DeviceGroupID, in.LifetimeMinutes).
 			Scan(&result.ID, &result.ExpiresAt)
 		if err != nil {
 			return err
@@ -145,6 +152,23 @@ func (a *API) issueToken(w http.ResponseWriter, r *http.Request) {
 	}{result, value})
 }
 
+func (in apiTokenInput) validScope() bool {
+	switch in.Action {
+	case "windows.deploy":
+		return in.Scope == "device_group" && in.GroupID == "" && userIDPattern.MatchString(in.DeviceGroupID)
+	case "users.read":
+		if in.DeviceGroupID != "" {
+			return false
+		}
+		if in.Scope == "group" {
+			return userIDPattern.MatchString(in.GroupID)
+		}
+		return in.GroupID == "" && (in.Scope == "organization" || in.Scope == "self")
+	default:
+		return false
+	}
+}
+
 func (a *API) listTokens(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	var result []apiTokenRecord
@@ -153,7 +177,7 @@ func (a *API) listTokens(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return err
 		}
-		rows, err := tx.Query(ctx, `SELECT id,purpose,action,scope,COALESCE(group_id::text,''),expires_at,revoked_at
+		rows, err := tx.Query(ctx, `SELECT id,purpose,action,scope,COALESCE(group_id::text,''),COALESCE(device_group_id::text,''),expires_at,revoked_at
 			FROM api_tokens WHERE organization_id=$1 AND (user_id=$2 OR $3)
 			ORDER BY created_at DESC,id LIMIT 501`, current.Organization, current.ID, current.PlatformAdmin)
 		if err != nil {

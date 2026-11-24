@@ -211,6 +211,11 @@ func NewHandler(store Store, origin *url.URL, web fs.FS, config ...AuthConfig) h
 	mux.HandleFunc("POST /v1/windows-releases/{id}/deployments", api.issueWindowsEnrollment)
 	mux.HandleFunc("GET /v1/windows-releases/{id}/deployments/{deployment}", api.getWindowsEnrollment)
 	mux.HandleFunc("POST /v1/windows-releases/{id}/deployments/{deployment}/revoke", api.revokeWindowsEnrollment)
+	mux.HandleFunc("GET "+deploymentReleasePrefix+"{id}", api.getWindowsDeploymentRelease)
+	mux.HandleFunc("GET "+deploymentReleasePrefix+"{id}/installers/{arch}", api.downloadWindowsInstaller)
+	mux.HandleFunc("POST "+deploymentReleasePrefix+"{id}/deployments", api.issueWindowsEnrollment)
+	mux.HandleFunc("GET "+deploymentReleasePrefix+"{id}/deployments/{deployment}", api.getWindowsEnrollment)
+	mux.HandleFunc("POST "+deploymentReleasePrefix+"{id}/deployments/{deployment}/revoke", api.revokeWindowsEnrollment)
 	mux.HandleFunc("POST /v1/admin/tasks/{id}/retry", api.retryTask)
 	mux.HandleFunc("POST /v1/admin/tasks/{id}/cancel", api.cancelTask)
 	apiNotFound := func(w http.ResponseWriter, _ *http.Request) {
@@ -227,7 +232,7 @@ func NewHandler(store Store, origin *url.URL, web fs.FS, config ...AuthConfig) h
 			w.Header().Set("Cache-Control", "no-store")
 			if r.Method == http.MethodPost {
 				origin := r.Header.Get("Origin")
-				if isManagedNativePost(r.URL.Path) {
+				if isManagedNativePost(r.URL.Path) || isWindowsDeploymentPost(r.URL.Path) {
 					if len(r.Header.Values("Cookie")) != 0 || (origin != "" && origin != api.origin) {
 						writeError(w, http.StatusForbidden, "origin_denied")
 						return

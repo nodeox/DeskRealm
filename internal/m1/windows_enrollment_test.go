@@ -20,6 +20,9 @@ func TestWindowsEnrollmentPostgres(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	cert := strings.Repeat("b", 64)
+	installerVerifier, attester := configureInstallerFixture(t, verifier, cert)
+	store.WindowsInstallers = installerVerifier
 	_, admin, csrf, _ := adminSession(t, ctx, store)
 	keyPath, signer := managedTestKey(t)
 	h := managedHandler(t, store, signer)
@@ -217,6 +220,119 @@ func TestWindowsEnrollmentPostgres(t *testing.T) {
 	if replay := issue(expired, admin, 200); replay.State != "expired" || replay.Credential != "" {
 		t.Fatal("expired credential was disclosed")
 	}
+
+	type deploymentAPIKey struct {
+		apiTokenRecord
+		Token string `json:"token"`
+	}
+	const tokenPath = "/v1/admin/api-tokens"
+	issueAPIKey := func(group string, cookie *http.Cookie, code int) deploymentAPIKey {
+		t.Helper()
+		r := request(h, "POST", tokenPath, testOrigin, apiTokenInput{Purpose: "Windows 部署工具",
+			Action: "windows.deploy", Scope: "device_group", DeviceGroupID: group, LifetimeMinutes: 30},
+			cookie, csrfToken(cookie.Value))
+		checkCode(t, r, code, "")
+		return responseValue[deploymentAPIKey](t, r.Body.Bytes())
+	}
+	tool := issueAPIKey(groupID, memberCookie, 201)
+	otherGroupTool := issueAPIKey(outside, admin, 201)
+	otherSameGroupTool := issueAPIKey(groupID, memberCookie, 201)
+	grant(groupID, false)
+	issueAPIKey(groupID, memberCookie, 403)
+	toolRelease := deploymentReleasePrefix + release
+	checkCode(t, nativeRequest(h, "GET", toolRelease, tool.Token, nil), 401, errAPIToken.Error())
+	grant(groupID, true)
+	checkCode(t, request(h, "GET", toolRelease, "", nil, admin, ""), 401, errAPIToken.Error())
+	checkCode(t, nativeRequest(h, "GET", toolRelease, otherGroupTool.Token, nil), 404, errWindowsReleaseMissing.Error())
+	checkCode(t, nativeRequest(h, "GET", "/v1/admin/users", tool.Token, nil), 401, errAPIToken.Error())
+	readToken := request(h, "POST", tokenPath, testOrigin, apiTokenInput{Purpose: "只读", Action: "users.read",
+		Scope: "self", LifetimeMinutes: 30}, admin, csrf)
+	checkCode(t, readToken, 201, "")
+	checkCode(t, nativeRequest(h, "GET", toolRelease, responseValue[deploymentAPIKey](t, readToken.Body.Bytes()).Token, nil),
+		401, errAPIToken.Error())
+	automated, automatedKey := newInput("7", "arm64", false)
+	automated.Minutes = 60
+	checkCode(t, nativeRequest(h, "POST", toolRelease+"/deployments", tool.Token, automated), 404, errWindowsReleaseMissing.Error())
+	proofSHA, _, _ := windowsInstallerFixture(t, spool, sha, cert, attester, "automation")
+	checkCode(t, request(h, "POST", "/v1/admin/windows-releases/"+release+"/installers", testOrigin,
+		map[string]string{"evidence_sha256": proofSHA}, admin, csrf), 201, "")
+	checkCode(t, nativeRequest(h, "GET", toolRelease+"/installers/arm64", tool.Token, nil), 200, "arm64 automation")
+	checkCode(t, nativeRequest(h, "GET", toolRelease+"/installers/arm64", otherGroupTool.Token, nil), 404, errWindowsReleaseMissing.Error())
+	checkCode(t, nativeRequest(h, "POST", toolRelease+"/deployments", otherGroupTool.Token, automated), 404, errWindowsReleaseMissing.Error())
+	automated.AutoApprove = true
+	checkCode(t, nativeRequest(h, "POST", toolRelease+"/deployments", tool.Token, automated), 403, "forbidden")
+	automated.AutoApprove = false
+	credential := nativeRequest(h, "POST", toolRelease+"/deployments", tool.Token, automated)
+	checkCode(t, credential, 201, "")
+	automatedReceipt := responseValue[windowsEnrollmentReceipt](t, credential.Body.Bytes())
+	if !automatedReceipt.Expires.Equal(tool.ExpiresAt) || !validToken(automatedReceipt.Credential) {
+		t.Fatal("tool credential was not bounded by the API token")
+	}
+	replay := nativeRequest(h, "POST", toolRelease+"/deployments", tool.Token, automated)
+	checkCode(t, replay, 200, "")
+	if responseValue[windowsEnrollmentReceipt](t, replay.Body.Bytes()) != automatedReceipt {
+		t.Fatal("tool credential replay changed the receipt")
+	}
+	checkCode(t, nativeRequest(h, "POST", toolRelease+"/deployments", otherSameGroupTool.Token, automated), 409, errEnrollmentConflict.Error())
+	toolStatus := toolRelease + "/deployments/" + automated.Deployment
+	checkCode(t, nativeRequest(h, "GET", toolStatus, otherSameGroupTool.Token, nil), 404, errWindowsReleaseMissing.Error())
+	checkCode(t, nativeRequest(h, "POST", toolStatus+"/revoke", otherSameGroupTool.Token, struct{}{}), 404, errWindowsReleaseMissing.Error())
+	deviceInput := enroll(automated, automatedReceipt)
+	deviceReceipt := complete(prove(deviceInput, challenge(deviceInput, 200), automatedKey), 200)
+	if deviceReceipt.State != "pending" {
+		t.Fatal("automated enrollment must await approval")
+	}
+	status := nativeRequest(h, "GET", toolStatus, tool.Token, nil)
+	checkCode(t, status, 200, deviceReceipt.DeviceID)
+	if strings.Contains(status.Body.String(), "credential") {
+		t.Fatal("automation status exposed the credential")
+	}
+	checkCode(t, request(h, "POST", "/v1/admin/devices/"+deviceReceipt.DeviceID+"/approve", testOrigin, struct{}{}, admin, csrf), 200, "approved")
+	deviceToken := runtimeCredentialFixture(t, h, deviceReceipt.DeviceID, automatedKey)
+	devicePolicy := runtimePolicyFixture(t, h, deviceReceipt.DeviceID, deviceToken)
+	if devicePolicy == nil || devicePolicy.Version != policy.Version {
+		t.Fatal("approved automation device did not receive its group policy")
+	}
+	checkCode(t, nativeRequest(h, "POST", receiptsURL, deviceToken, signedPolicyFixture(t, devicePolicy, automatedKey, "applied")), 204, "")
+	status = nativeRequest(h, "GET", toolStatus, tool.Token, nil)
+	checkCode(t, status, 200, "approved")
+	applied := responseValue[windowsEnrollmentStatus](t, status.Body.Bytes())
+	if applied.ExpectedVersion == nil || applied.AppliedVersion == nil ||
+		*applied.ExpectedVersion != policy.Version || *applied.AppliedVersion != policy.Version {
+		t.Fatalf("automation status omitted policy receipt: %+v", applied)
+	}
+	checkCode(t, nativeRequest(h, "POST", toolStatus+"/revoke", tool.Token, struct{}{}), 409, errEnrollmentConflict.Error())
+
+	cancelInput, cancelKey := newInput("8", "x64", false)
+	cancel := nativeRequest(h, "POST", toolRelease+"/deployments", tool.Token, cancelInput)
+	checkCode(t, cancel, 201, "")
+	cancelRequest := enroll(cancelInput, responseValue[windowsEnrollmentReceipt](t, cancel.Body.Bytes()))
+	cancelProof := challenge(cancelRequest, 200)
+	checkCode(t, nativeRequest(h, "POST", toolRelease+"/deployments/"+cancelInput.Deployment+"/revoke", tool.Token, struct{}{}), 204, "")
+	complete(prove(cancelRequest, cancelProof, cancelKey), 401)
+
+	invalidate, invalidateKey := newInput("9", "x64", false)
+	invalidation := nativeRequest(h, "POST", toolRelease+"/deployments", tool.Token, invalidate)
+	checkCode(t, invalidation, 201, "")
+	revokeRequest := enroll(invalidate, responseValue[windowsEnrollmentReceipt](t, invalidation.Body.Bytes()))
+	revokeProof := challenge(revokeRequest, 200)
+	checkCode(t, request(h, "POST", tokenPath+"/"+tool.ID+"/revoke", testOrigin, struct{}{}, admin, csrf), 204, "")
+	checkCode(t, nativeRequest(h, "GET", toolRelease+"/installers/x64", tool.Token, nil), 401, errAPIToken.Error())
+	complete(prove(revokeRequest, revokeProof, invalidateKey), 401)
+	if status := get(invalidate, admin, 200); status.State != "revoked" {
+		t.Fatalf("token revocation was not reflected in deployment status: %+v", status)
+	}
+	expiringInput, expiringKey := newInput("a", "x64", false)
+	expiringTool := nativeRequest(h, "POST", toolRelease+"/deployments", otherSameGroupTool.Token, expiringInput)
+	checkCode(t, expiringTool, 201, "")
+	expiryRequest := enroll(expiringInput, responseValue[windowsEnrollmentReceipt](t, expiringTool.Body.Bytes()))
+	expiryProof := challenge(expiryRequest, 200)
+	if _, err := store.DB.Exec(ctx, "UPDATE api_tokens SET expires_at=clock_timestamp()-interval '1 second' WHERE id=$1",
+		otherSameGroupTool.ID); err != nil {
+		t.Fatal(err)
+	}
+	complete(prove(expiryRequest, expiryProof, expiringKey), 401)
+
 	withdrawn, withdrawnKey := newInput("5", "x64", false)
 	requestWithdrawn := enroll(withdrawn, issue(withdrawn, admin, 201))
 	withdrawnProof := challenge(requestWithdrawn, 200)
