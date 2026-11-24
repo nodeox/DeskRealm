@@ -408,3 +408,18 @@ Task 2 接续已建立会话断线后的新授权重选、会话页明细和跨�
 证据保存在 Git 目录 `deskrealm-evidence/m3/5d273db895a54365dd7319d2f275bca942089697/`。`managed-release.log` SHA-256 为 `db9773b3a7b6460adccb5d3e61cdd0840e3e76fab17beed304c26f7fa98718b0`，`delivery-tasks.log` 为 `8d3dabe18dd637c43e7363a4942d5477ccd10c076fda0443ba16d4461788e414`，`windows-native-installer.log` 为 `c356e0396251d95ada1609edff860579503212178190b88002397c9d5469178b`。`go vet`、Go 全量包测试和 Vue 类型检查通过。
 
 下一步接通组织部署工具的限时凭据交付。实际 Windows 安装、双端连接和 Linux 中心重建按 Phase 5 验收。
+
+## 04-05 组织部署工具
+
+2026-11-24，候选 `6833e931fc28c56625c211e6391d36b0b0fd5b01` 接通组织部署工具。控制台生成单设备组部署令牌。工具通过 HTTPS 用该令牌下载已发布安装器并验证摘要，使用目标机准备的公钥发放单设备限时凭据，将凭据写到私有文件。安装器支持机器可读的安装目录输出。
+
+| 检查 | 结果 |
+| --- | --- |
+| 中心与 PostgreSQL | 越组、读取账号令牌访问部署 API、同组不同令牌访问已有部署、无审批权限和要求自动审批均被拒绝。撤销部署、令牌撤销及到期能阻止完成登记。原部署 ID 及相同输入重试返回原凭据和到期时间。 |
+| 持钥登记及策略 | 组织工具凭据进入待审批。审批后设备领取预期组策略并签名提交回执，部署状态显示预期和已应用版本。 |
+| 工具及控制台 | HTTPS 测试通过摘要校验、私有凭据落盘、同文件重试、标准输出清除敏感字段、查询和撤销。Chromium 通过设备组令牌签发和撤销，既有账号读取令牌通过回归。 |
+| 工件 | 使用两套已经复验的原生客户端工件，对当前源码构建的安装器复跑 Authenticode 开发签名和 Python 到 Go 的证据持久化。 |
+
+证据保存在 Git 目录 `deskrealm-evidence/m3/6833e931fc28c56625c211e6391d36b0b0fd5b01/`。`managed-release.log` SHA-256 为 `db9773b3a7b6460adccb5d3e61cdd0840e3e76fab17beed304c26f7fa98718b0`，`bootstrap-browser.log` 为 `ac75ce903243e09a155d784d16381454153cf7662116d81e2fee76a50478a9e1`，`windows-native-installer.log` 为 `92a084ed5bc0a493e63d19ddf85424394966ff4d48298f1e996a9297aac2eff3`，`signed-build.log` 为 `9ec7da04c9016c55320ca0de94010ee13777b3816c53869312fe6f918da4ec48`。Go 全量包、授权专项、命令行竞态测试和 Vue 类型检查通过。
+
+04-05 两项开发验证完成。组织侧继续通过已有设备管理通道交付安装器和单设备凭据，目标 Windows 上的完整安装及连接过程在 Phase 5 验收。
