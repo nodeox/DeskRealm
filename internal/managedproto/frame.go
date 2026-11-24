@@ -21,6 +21,7 @@ const (
 	RelayProbe       Kind = 8
 	RelayProbePermit Kind = 9
 	RelayProbeHolder Kind = 10
+	RelaySelection   Kind = 11
 )
 
 const prefix = "DR-M2\x00\x01"
@@ -46,6 +47,7 @@ var fieldWidths = map[Kind][]int{
 	RelayProbe:       {1, uuid, uuid, uuid, uuid, uuid, word, digest, 15},
 	RelayProbePermit: {1, uuid, uuid, uuid, uuid, uuid, word, digest, digest, word, word},
 	RelayProbeHolder: {digest, 1, digest},
+	RelaySelection:   {1, uuid, uuid, uuid, uuid, uuid},
 }
 
 // Encode produces the exact signed bytes. Frame validation checks the wire
@@ -124,6 +126,8 @@ func validValues(kind Kind, f [][]byte) bool {
 			expires > start && expires-start <= 2000
 	case RelayProbeHolder:
 		return f[1][0] < 3
+	case RelaySelection:
+		return f[0][0] == 1 || f[0][0] == 2
 	default:
 		return false
 	}

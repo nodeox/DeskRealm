@@ -378,6 +378,23 @@ func sampleRegionalRelays(t *testing.T, f sessionFixture, alpha, beta string) {
 			t.Fatal("center issued a permit after the round closed")
 		}
 	}
+	// Confirm a selection using the measurements just taken from both native relays.
+	selectionPath := sessionsURL + "/" + grant.ID + "/relay-selection?connection_id=" + conn
+	response = nativeRequest(f.h, "GET", selectionPath, controller.bearer, nil)
+	checkCode(t, response, 200, "dual_rtt")
+	options := responseValue[relaySelectionResult](t, response.Body.Bytes())
+	if len(options.Options) != 2 || options.Options[0].CombinedRTT == nil || options.Options[1].CombinedRTT == nil ||
+		*options.Options[0].CombinedRTT > *options.Options[1].CombinedRTT {
+		t.Fatalf("unexpected ordering of actual relay samples: %+v", options)
+	}
+	response = controller.selectRelay(t, f.h, grant, round, options.Options[0].Relay, "select")
+	checkCode(t, response, 200, "confirmed")
+	response = nativeRequest(f.h, "GET", selectionPath, target.bearer, nil)
+	checkCode(t, response, 200, options.Options[0].Relay)
+	if selected := responseValue[relaySelectionResult](t, response.Body.Bytes()).Selected; selected == nil ||
+		selected.Relay != options.Options[0].Relay || selected.CombinedRTT == nil {
+		t.Fatalf("target did not receive the confirmed selection: %+v", selected)
+	}
 }
 
 func alteredProbePermit(t *testing.T, f sessionFixture, permit relayprotocol.SessionProbePermit, field int) relayprotocol.SessionProbePermit {

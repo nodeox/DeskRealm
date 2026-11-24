@@ -23,5 +23,6 @@ export const auditLabels: Record<string, string> = {
   'relay.enrollment_issued': '签发中继登记凭据', 'relay.registered': '登记中继',
   'relay.available': '中继入池', 'relay.probe_lost': '中继探测故障', 'relay.probe_recovered': '中继探测恢复',
   'relay.network_policy_updated': '更新中继网络规则',
+  'session.relay_selected': '确认会话中继', 'session.relay_selection_failed': '会话中继连接失败',
   'relay.drain': '排空中继', 'relay.disable': '停用中继', 'relay.resume': '恢复中继', 'relay.change_endpoint': '切换中继公布地址',
 }

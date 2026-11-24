@@ -3,6 +3,10 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 case "${1:-}" in
+  relay-selection)
+    GOFLAGS="${GOFLAGS:-} -race" bash scripts/deskrealm-m1-test relay-selection
+    exec bash scripts/deskrealm-m2-test vectors
+    ;;
   relay-probes)
     go test -race -count=1 ./internal/m3/install -run '^TestRenderComposeForRelayIngress$'
     GOFLAGS="${GOFLAGS:-} -race" bash scripts/deskrealm-m1-test relay-probes
@@ -75,7 +79,7 @@ case "${1:-}" in
     )
     ;;
   *)
-    echo "usage: $0 install-preflight|install-prepare|install-bootstrap|install-offline|install-resume|install-relay|install-task|delivery-tasks|relay-identity|relay-host|relay-enrollment|relay-lifecycle|relay-probes" >&2
+    echo "usage: $0 install-preflight|install-prepare|install-bootstrap|install-offline|install-resume|install-relay|install-task|delivery-tasks|relay-identity|relay-host|relay-enrollment|relay-lifecycle|relay-probes|relay-selection" >&2
     exit 2
     ;;
 esac

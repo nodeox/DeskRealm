@@ -13,6 +13,7 @@ pub const RELAY_ROUND_JOIN: u8 = 7;
 pub const RELAY_PROBE: u8 = 8;
 pub const RELAY_PROBE_PERMIT: u8 = 9;
 pub const RELAY_PROBE_HOLDER: u8 = 10;
+pub const RELAY_SELECTION: u8 = 11;
 
 const PREFIX: &[u8] = b"DR-M2\0\x01";
 
@@ -79,6 +80,7 @@ fn valid_values(kind: u8, f: &[&[u8]]) -> bool {
                 && expires - start <= 2000
         }
         RELAY_PROBE_HOLDER => f[1][0] < 3,
+        RELAY_SELECTION => (1..=2).contains(&f[0][0]),
         _ => false,
     }
 }
@@ -95,6 +97,7 @@ fn widths(kind: u8) -> Option<&'static [usize]> {
         RELAY_PROBE => &[1, 16, 16, 16, 16, 16, 8, 32, 15],
         RELAY_PROBE_PERMIT => &[1, 16, 16, 16, 16, 16, 8, 32, 32, 8, 8],
         RELAY_PROBE_HOLDER => &[32, 1, 32],
+        RELAY_SELECTION => &[1, 16, 16, 16, 16, 16],
         _ => return None,
     })
 }

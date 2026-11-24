@@ -153,6 +153,8 @@ func NewHandler(store Store, origin *url.URL, web fs.FS, config ...AuthConfig) h
 	mux.HandleFunc("GET /v1/sessions/{id}/relay-candidates", api.getSessionRelayRound)
 	mux.HandleFunc("POST /v1/sessions/{id}/relay-candidates", api.joinSessionRelayRound)
 	mux.HandleFunc("POST /v1/sessions/{id}/relay-probes", api.reportSessionRelayProbe)
+	mux.HandleFunc("GET /v1/sessions/{id}/relay-selection", api.relaySelection)
+	mux.HandleFunc("POST /v1/sessions/{id}/relay-selection", api.relaySelection)
 	mux.HandleFunc("POST /v1/sessions/{id}/redeem", api.redeemSessionGrant)
 	mux.HandleFunc("POST /v1/sessions/{id}/renew", api.renewSession)
 	mux.HandleFunc("GET /v1/sessions/{id}/status", api.sessionRuntimeStatus)
@@ -241,7 +243,7 @@ func isManagedNativePost(path string) bool {
 	id, action, found := strings.Cut(tail, "/")
 	return prefix && found && userIDPattern.MatchString(id) &&
 		(action == "redeem" || action == "renew" || action == "stopped" || action == "file-events" ||
-			action == "relay-candidates" || action == "relay-probes")
+			action == "relay-candidates" || action == "relay-probes" || action == "relay-selection")
 }
 
 func (a *API) frontend(w http.ResponseWriter, r *http.Request) {

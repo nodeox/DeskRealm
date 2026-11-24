@@ -59,16 +59,23 @@ func (ingress RelayIngress) clientIP(r *http.Request) (netip.Addr, bool) {
 }
 
 type relayNetworkPolicy struct {
-	Revision int64               `json:"revision"`
-	Mode     string              `json:"mode"`
-	Networks []relaySiteNetwork  `json:"networks"`
-	Pairs    []relaySitePair     `json:"site_pairs"`
-	Relays   []relayReachability `json:"relay_networks"`
+	Revision      int64                `json:"revision"`
+	Mode          string               `json:"mode"`
+	Networks      []relaySiteNetwork   `json:"networks"`
+	Pairs         []relaySitePair      `json:"site_pairs"`
+	Relays        []relayReachability  `json:"relay_networks"`
+	GeoRegions    []relayRegionNetwork `json:"geoip_regions,omitempty"`
+	DefaultRegion string               `json:"default_region,omitempty"`
 }
 
 type relaySiteNetwork struct {
 	Network netip.Prefix `json:"cidr"`
 	Site    string       `json:"site"`
+}
+
+type relayRegionNetwork struct {
+	Network netip.Prefix `json:"cidr"`
+	Region  string       `json:"region"`
 }
 
 type relaySitePair struct {
@@ -89,6 +96,16 @@ func validRelayNetworkPrefix(prefix netip.Prefix) bool {
 func (p relayNetworkPolicy) valid() bool {
 	if p.Revision < 0 || len(p.Networks) > 64 || len(p.Pairs) > 32 || len(p.Relays) > 32 {
 		return false
+	}
+	if len(p.GeoRegions) > 64 || (p.DefaultRegion != "" && !relayLabel.MatchString(p.DefaultRegion)) {
+		return false
+	}
+	regions := make(map[netip.Prefix]bool)
+	for _, item := range p.GeoRegions {
+		if !validRelayNetworkPrefix(item.Network) || !relayLabel.MatchString(item.Region) || regions[item.Network] {
+			return false
+		}
+		regions[item.Network] = true
 	}
 	if p.Mode == "organization" {
 		return len(p.Networks)+len(p.Pairs)+len(p.Relays) == 0
@@ -143,6 +160,16 @@ func (p relayNetworkPolicy) site(address netip.Addr) string {
 		}
 	}
 	return site
+}
+
+func (p relayNetworkPolicy) geoRegion(address netip.Addr) string {
+	region, bits := "", -1
+	for _, item := range p.GeoRegions {
+		if item.Network.Bits() > bits && item.Network.Contains(address) {
+			region, bits = item.Region, item.Network.Bits()
+		}
+	}
+	return region
 }
 
 type relayNetworkScope struct {

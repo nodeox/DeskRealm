@@ -36,17 +36,18 @@ type relayRound struct {
 }
 
 type relayRoundCandidate struct {
-	ID          string                            `json:"relay_id"`
-	Site        string                            `json:"site"`
-	Region      string                            `json:"region"`
-	Endpoint    string                            `json:"endpoint"`
-	Build       string                            `json:"build"`
-	PublicKey   string                            `json:"public_key"`
-	Version     int64                             `json:"config_version"`
-	Eligible    bool                              `json:"eligible"`
-	Controller  relayProbeSummary                 `json:"controller"`
-	Target      relayProbeSummary                 `json:"target"`
-	ProbePermit *relayprotocol.SessionProbePermit `json:"probe_permit,omitempty"`
+	ID               string                            `json:"relay_id"`
+	Site             string                            `json:"site"`
+	Region           string                            `json:"region"`
+	Endpoint         string                            `json:"endpoint"`
+	Build            string                            `json:"build"`
+	PublicKey        string                            `json:"public_key"`
+	Version          int64                             `json:"config_version"`
+	Eligible         bool                              `json:"eligible"`
+	Controller       relayProbeSummary                 `json:"controller"`
+	Target           relayProbeSummary                 `json:"target"`
+	ProbePermit      *relayprotocol.SessionProbePermit `json:"probe_permit,omitempty"`
+	active, capacity int64
 }
 
 type relayProbeSample struct {
@@ -229,7 +230,8 @@ func (a *API) loadRelayRoundCandidates(ctx context.Context, tx pgx.Tx, round *re
 		round.State = "complete"
 	}
 	rows, err := tx.Query(ctx, `SELECT c.relay_id,c.site,c.region,c.endpoint,c.build,c.identity_key,c.config_version,
-		(`+relaySnapshotEligible+`),left_report.samples,right_report.samples
+		(`+relaySnapshotEligible+`),left_report.samples,right_report.samples,
+		COALESCE(greatest(relay_nodes.active_sessions,relay_nodes.probe_active_sessions),0),relay_nodes.capacity
 		FROM session_relay_candidates c JOIN relay_nodes ON relay_nodes.id=c.relay_id
 		LEFT JOIN session_relay_reports left_report ON left_report.round_id=c.round_id AND left_report.relay_id=c.relay_id AND left_report.role=1
 		LEFT JOIN session_relay_reports right_report ON right_report.round_id=c.round_id AND right_report.relay_id=c.relay_id AND right_report.role=2
@@ -242,7 +244,7 @@ func (a *API) loadRelayRoundCandidates(ctx context.Context, tx pgx.Tx, round *re
 		var key []byte
 		var left, right []relayProbeSample
 		err := row.Scan(&candidate.ID, &candidate.Site, &candidate.Region, &candidate.Endpoint, &candidate.Build,
-			&key, &candidate.Version, &candidate.Eligible, &left, &right)
+			&key, &candidate.Version, &candidate.Eligible, &left, &right, &candidate.active, &candidate.capacity)
 		candidate.PublicKey = base64.RawURLEncoding.EncodeToString(key)
 		candidate.Controller, candidate.Target = summarizeRelaySamples(left, closed), summarizeRelaySamples(right, closed)
 		if err == nil && !closed && candidate.Eligible {
