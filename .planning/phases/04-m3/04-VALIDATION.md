@@ -330,3 +330,18 @@ Task 2 接续已建立会话断线后的新授权重选、会话页明细和跨�
 本地 Git 证据目录 `deskrealm-evidence/m3/b07570369924e88faf9759e18645fd0e1feb0f25/`。四份日志的 SHA-256 分别为 `signed-build.log` 的 `53bb72370ec4656cf8990175a41df2c03264c8d631e37e4b9e6168b7311bf2a8`、`delivery-tasks.log` 的 `b295c402f836337bfc8c4b8dff74105b2618e059b09ac6e1625be50f5924b3d6`、`python-native-bundles.log` 的 `463b8b697dac23646a5df8ff633f8482daa5f3097955be4f10bee29215632001` 和 `m1-all.log` 的 `e40dab798c14cc0fd640b9b7a05013db836a6dc46652f873b01c18aabef46959`。
 
 构建与签名仍由独立操作环境完成，中心负责已暂存的候选验证。本轮 x64 和 ARM64 的 CI 桥接均已通过，原生编译和测试仍在进行。正式安装器、分组发放与免填配置继续开发。[Windows 原生构建](https://github.com/nodeox/DeskRealm/actions/runs/45368970255)
+
+## 04-05 开发包分组发布
+
+2026-11-24，候选 `789a51eb463842ad833deabf29d03ec17d37ffa7` 通过分组发布 PostgreSQL、交付任务 Chromium、签名构建、M1 全量和历史原生工件持久化验证。中心在生成发布记录前重新验签，并将两个架构按清单摘要保存到独立持久目录。创建发布、授权下载和撤回均有审计事件。
+
+| 检查 | 结果 |
+| --- | --- |
+| 发布与替换 | 并发发布同一清单返回同一发布 ID，并只写一条发布审计。未验证任务和修改过签名的后续候选被拒绝，先前发布继续下载。暂存归档变化后，持久归档仍可通过中心新处理器下载。 |
+| 下载与撤回 | 当前设备组读取委派决定列表和直接链接的访问范围。未登录、组外、授权撤销、未知架构和已撤回的链接被拒绝。目标组的 x64、ARM64 全包及 Range 检查通过。 |
+| Chromium | 从任务详情确认发布，在 Windows 发布页下载 ARM64 ZIP，文件 SHA-256 与页面一致。撤回后下载入口消失。 |
+| 原生归档 | Go 重新验签并持久化源提交 `c37fde79c99c840cfc234b8e17e9fd15499665af` 的两套历史工件。本轮 CI 构建输入的提交 `6acfe3f62c3da5bd9d2021865fb3db8ab780da99` 的两架构桥接已通过，原生编译和测试仍在运行。 |
+
+本地 Git 证据目录 `deskrealm-evidence/m3/789a51eb463842ad833deabf29d03ec17d37ffa7/`。日志 SHA-256 为 `managed-release.log` 的 `638f63b5408cb69170442ec73d699fd4d949b502e6e082fc12fb1b996661d565`、`delivery-browser.log` 的 `f421b972b7ea446aecb380174df659526dec3465d233cf76739c495351d7144e`、`signed-build.log` 的 `44039f6b69d7dc9ddb6a4e648723c2818de6662044efd0459d7b04def1f4ea6d`、`historical-native-bundles.log` 的 `51c41d3382d386fac1e577022c0b984129f715e0c2b3127b0dea4242768bad1e` 和 `m1-all.log` 的 `87de1b3304a352e1dfd65c5cc628b00ce8a72db2d451dfac9b3aa356c34bb222`。
+
+本次验证的授权下载使用控制台会话，签名范围为开发 ZIP。原生 CI 工件核验、Windows Authenticode 安装器、部署工具限时凭据及免填登记继续开发。Linux 部署和双 Windows 真机验收仍安排在开发完成后。[Windows 原生构建](https://github.com/nodeox/DeskRealm/actions/runs/45368970255)
