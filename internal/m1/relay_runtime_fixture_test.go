@@ -367,8 +367,17 @@ func sampleRegionalRelays(t *testing.T, f sessionFixture, alpha, beta string) {
 		t.Fatalf("native hbbr accepted a spent sample: %v", err)
 	}
 	<-ctx.Done()
-	unusedExpired := alteredProbePermit(t, f, *left.ProbePermit, 4)
-	if _, err := probe(f.ctx, left, unusedExpired, controller, 0); !errors.Is(err, relayprotocol.ErrProbeProtocol) {
+	// A fresh signature over a past window tests expiration independently of replay
+	// and of clock differences between the fixture host and the relay container.
+	expiredRound := round
+	opened, deadline := round.Opened.Add(-time.Minute), round.Deadline.Add(-time.Minute)
+	expiredRound.Opened, expiredRound.Deadline = &opened, &deadline
+	centerAPI := API{managedKey: f.signing}
+	unusedExpired, err := centerAPI.relayProbePermit(grant, expiredRound, controller.role, controller.key.Public().(ed25519.PublicKey), left)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := probe(f.ctx, left, *unusedExpired, controller, 0); !errors.Is(err, relayprotocol.ErrProbeProtocol) {
 		t.Fatalf("native hbbr accepted an expired permit: %v", err)
 	}
 	response = controller.get(f.h, grant, conn)
