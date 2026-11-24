@@ -85,10 +85,10 @@ M4 包括浏览器主控、原生 LDAP、邮件验证和恢复、更多平台、
 | FR-14 | Phase 4 | Complete (登记、双节点验活、容量、生命周期和控制台开发验证通过) |
 | FR-15 | Phase 4 | Complete (04-04 开发验证，目标网络和 Windows 留待 Phase 5) |
 | FR-16 | Phase 4 | Partial (安装记录导入、可恢复执行及中心开发签名包验证通过，发布和升级场景接续后续计划) |
-| FR-17 | Phase 4 | Pending |
+| FR-17 | Phase 4 | Partial (中心物理备份和隔离恢复通过，升级、批次暂停及回滚待开发) |
 | FR-19 | Phase 4 | Pending |
 | NFR-02 | Phase 4 | Complete (开发验签、私钥分离、设备限时凭据及分组授权通过) |
-| NFR-04 | Phase 4 | Partial (中心恢复、任务去重与租约接管通过，中继恢复接续后续计划) |
+| NFR-04 | Phase 4 | Partial (中心原公钥、数据库和应用记录隔离恢复通过，任务去重与中继升级继续由 04-06 验证) |
 | NFR-05 | Phase 4 | Partial (会话工作台已展示实际路径、双端 RTT、选点和回退，首版联验见 04-06) |
 | NFR-03 | Phase 5 | Pending |
 | NFR-06 | Phase 5 | Pending |

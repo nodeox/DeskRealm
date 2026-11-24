@@ -423,3 +423,17 @@ Task 2 接续已建立会话断线后的新授权重选、会话页明细和跨�
 证据保存在 Git 目录 `deskrealm-evidence/m3/6833e931fc28c56625c211e6391d36b0b0fd5b01/`。`managed-release.log` SHA-256 为 `db9773b3a7b6460adccb5d3e61cdd0840e3e76fab17beed304c26f7fa98718b0`，`bootstrap-browser.log` 为 `ac75ce903243e09a155d784d16381454153cf7662116d81e2fee76a50478a9e1`，`windows-native-installer.log` 为 `92a084ed5bc0a493e63d19ddf85424394966ff4d48298f1e996a9297aac2eff3`，`signed-build.log` 为 `9ec7da04c9016c55320ca0de94010ee13777b3816c53869312fe6f918da4ec48`。Go 全量包、授权专项、命令行竞态测试和 Vue 类型检查通过。
 
 04-05 两项开发验证完成。组织侧继续通过已有设备管理通道交付安装器和单设备凭据，目标 Windows 上的完整安装及连接过程在 Phase 5 验收。
+
+## 04-06 中心备份和隔离恢复
+
+2026-11-24，候选 `46d294abc34964a2363099cc9e0f06648eca1a3c` 添加 `deskrealm-install backup` 和 `restore-check`。中心主机操作员通过已记录的 Compose 部署采集 PostgreSQL 18 物理备份、WAL、两套身份密钥、TOTP 加密材料及标准部署配置。恢复命令使用外部保存的清单摘要核对全部成员。临时容器无网络和公开端口，使用 PostgreSQL 原生校验、实际启动和应用角色查询检查恢复结果。恢复报告与目录一并保存。
+
+| 检查 | 结果 |
+| --- | --- |
+| PostgreSQL 恢复与重启 | 实际 Compose 容器中运行中心迁移并写入用户、设备、策略、任务及审计样本。恢复检查通过 WAL 校验和正常启动，保留两套公钥、原系统标识、业务记录 UUID 和策略版本。恢复目录可沿普通安装器数据库流程重启。 |
+| 故障注入 | 独立清单摘要不一致、同尺寸归档篡改、缺受管签名种子和试图覆盖原部署均被拒绝。失败目录未发布。备份后源库新增审计记录留在源库。 |
+| 安装器回归 | Go 全包测试、`go vet`、安装预检、私有材料与准备阶段的稳定身份检查通过。 |
+
+证据保存在 Git 目录 `deskrealm-evidence/m3/46d294abc34964a2363099cc9e0f06648eca1a3c/`。`center-restore.log` SHA-256 为 `163b82cf03fb1b447fb808f11cf22d19f4552a926b739c5b7c6a490a7d65d266`，`go-install-regression.log` 为 `d5701358e6692c861b398ec93a25d0a4b23b5051be7fc4ed2ee8c735951d80c6`。
+
+隔离开发检查覆盖标准中心部署及 PostgreSQL，外部代理和附加挂载按各自部署流程保留。升级、回切及发布批次仍在 04-06 开发范围内。
