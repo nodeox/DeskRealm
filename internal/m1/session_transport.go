@@ -49,6 +49,7 @@ type sessionRouteInput struct {
 	Connection     string `json:"connection_id"`
 	Path           string `json:"path"`
 	Relay          string `json:"relay_id"`
+	Regional       bool   `json:"regional"`
 }
 
 type sessionRoute struct {
@@ -70,7 +71,8 @@ func canonicalSignature(value string) ([]byte, bool) {
 }
 
 func validSessionPath(path, relayID string) bool {
-	return (path == "direct" && relayID == "") || (path == "relay" && signingKeyID.MatchString(relayID))
+	return (path == "direct" && relayID == "") ||
+		(path == "relay" && (signingKeyID.MatchString(relayID) || userIDPattern.MatchString(relayID)))
 }
 
 func (a *API) authorizeSessionRoute(w http.ResponseWriter, r *http.Request) {
@@ -95,7 +97,8 @@ func (a *API) authorizeSessionRoute(w http.ResponseWriter, r *http.Request) {
 	if !valid || !userIDPattern.MatchString(req.Session) || !userIDPattern.MatchString(req.Grant) ||
 		!userIDPattern.MatchString(req.Connection) || !userIDPattern.MatchString(req.Controller) ||
 		!userIDPattern.MatchString(req.Target) || !rustdeskIDPattern.MatchString(req.TargetRustDesk) ||
-		!validSessionPath(req.Path, req.Relay) ||
+		(!req.Regional && !validSessionPath(req.Path, req.Relay)) ||
+		(req.Regional && (pairing || req.Path != "relay" || req.Relay != "")) ||
 		(pairing && req.Path != "relay") {
 		failure(w, "authorize session route", errSessionInput)
 		return
@@ -134,8 +137,14 @@ func (a *API) authorizeSessionRoute(w http.ResponseWriter, r *http.Request) {
 		if !now.Before(g.Expires) {
 			reason = "grant_expired"
 		}
-		if req.Path == "relay" && req.Relay != a.transport.relayID {
-			reason = "relay_not_configured"
+		if req.Path == "relay" && reason == "" {
+			regional, err := regionalRelayEnabled(ctx, tx, g.Organization)
+			if err != nil {
+				return err
+			}
+			if req.Regional != regional || (!req.Regional && req.Relay != a.transport.relayID) {
+				reason = "relay_not_configured"
+			}
 		}
 		if reason != "" {
 			rejected = errSessionDenied
@@ -148,6 +157,13 @@ func (a *API) authorizeSessionRoute(w http.ResponseWriter, r *http.Request) {
 		if err == nil && redeemed.Connection != req.Connection {
 			rejected = errSessionConflict
 			return auditSession(ctx, tx, g, group, "session.route_denied", "denied", "already_redeemed")
+		}
+		if req.Regional {
+			_, err := readRelayRound(ctx, tx, g.ID, req.Connection)
+			if errors.Is(err, pgx.ErrNoRows) {
+				return errSessionConflict
+			}
+			return err
 		}
 		route, err := readSessionRoute(ctx, tx, g.ID, req.Connection)
 		if err == nil {

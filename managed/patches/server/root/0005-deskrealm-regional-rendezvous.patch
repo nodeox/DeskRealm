@@ -1,0 +1,212 @@
+diff --git a/src/managed_transport.rs b/src/managed_transport.rs
+index 7e09d19..70d2c5a 100644
+--- a/src/managed_transport.rs
++++ b/src/managed_transport.rs
+@@ -219,7 +219,12 @@ impl ManagedTransport {
+         Ok(key)
+     }
+ 
+-    pub(crate) async fn authorize(&self, route: &DeskRealmRoute, path: Path) -> ResultType<()> {
++    pub(crate) async fn authorize(
++        &self,
++        route: &DeskRealmRoute,
++        path: Path,
++        regional: bool,
++    ) -> ResultType<()> {
+         let grant = self.verify(route)?;
+         let endpoint = match self.service {
+             Service::Rendezvous => "/v1/internal/managed/rendezvous/authorize",
+@@ -227,12 +232,11 @@ impl ManagedTransport {
+         };
+         let (path, relay_id) = match path {
+             Path::Direct => ("direct", ""),
++            Path::Relay if regional => ("relay", ""),
+             Path::Relay if !self.relay_id.is_empty() => ("relay", &self.relay_id[..]),
+             Path::Relay => bail!("managed relay is not configured"),
+         };
+-        let response = self.client.post(self.center.join(endpoint)?)
+-            .bearer_auth(&self.bearer)
+-            .json(&serde_json::json!({
++        let mut input = serde_json::json!({
+                 "session_id": Uuid::from_slice(grant.session_id())?.to_string(),
+                 "grant_id": Uuid::from_slice(grant.grant_id())?.to_string(),
+                 "grant_signature": URL_SAFE_NO_PAD.encode(&route.grant_signature),
+@@ -242,7 +246,13 @@ impl ManagedTransport {
+                 "connection_id": Uuid::from_slice(&route.connection_uuid)?.to_string(),
+                 "path": path,
+                 "relay_id": relay_id,
+-            }))
++        });
++        if regional {
++            input["regional"] = serde_json::Value::Bool(true);
++        }
++        let response = self.client.post(self.center.join(endpoint)?)
++            .bearer_auth(&self.bearer)
++            .json(&input)
+             .send().await.map_err(|_| hbb_common::anyhow::anyhow!("managed center is unavailable"))?;
+         if response.status() != reqwest::StatusCode::NO_CONTENT {
+             bail!("managed center denied route");
+diff --git a/src/relay_server.rs b/src/relay_server.rs
+index c061f7d..b9724af 100644
+--- a/src/relay_server.rs
++++ b/src/relay_server.rs
+@@ -502,7 +502,7 @@ impl ManagedRelay {
+         let Some(mut peer) = peer else {
+             bail!("managed relay peer unavailable")
+         };
+-        self.service.authorize(&route, ManagedPath::Relay).await?;
++        self.service.authorize(&route, ManagedPath::Relay, false).await?;
+         let ready = managed::signal(route, offer, Operation::RelayReady(true));
+         managed::write(&mut stream, ready.clone()).await?;
+         managed::write(&mut peer, ready).await?;
+diff --git a/src/rendezvous_server.rs b/src/rendezvous_server.rs
+index ff51fee..a7e4607 100644
+--- a/src/rendezvous_server.rs
++++ b/src/rendezvous_server.rs
+@@ -86,6 +86,7 @@ struct ManagedOffer {
+     route: DeskRealmRoute,
+     nonce: [u8; 32],
+     path: ManagedPath,
++    regional: bool,
+     answer: oneshot::Sender<DeskRealmSignal>,
+ }
+ 
+@@ -1241,13 +1242,14 @@ impl RendezvousServer {
+             bail!("managed route missing")
+         };
+         let key = managed::route_key(&route)?;
++        let regional = signal.regional_relay;
+         match signal.operation {
+             Some(Operation::DirectRequest(req))
+-                if signal.offer_nonce.is_empty()
++                if !regional && signal.offer_nonce.is_empty()
+                     && req.id == route.target_rustdesk_id
+                     && req.conn_type.enum_value() == Ok(ConnType::DEFAULT_CONN) =>
+             {
+-                self.managed_request(&mut stream, service, key, route, addr, ManagedPath::Direct)
++                self.managed_request(&mut stream, service, key, route, addr, ManagedPath::Direct, false)
+                     .await
+             }
+             Some(Operation::RelayRequest(req))
+@@ -1255,10 +1257,10 @@ impl RendezvousServer {
+                     && req.id == route.target_rustdesk_id
+                     && req.conn_type.enum_value() == Ok(ConnType::DEFAULT_CONN) =>
+             {
+-                self.managed_request(&mut stream, service, key, route, addr, ManagedPath::Relay)
++                self.managed_request(&mut stream, service, key, route, addr, ManagedPath::Relay, regional)
+                     .await
+             }
+-            Some(Operation::DirectReady(_)) => {
++            Some(Operation::DirectReady(_)) if !regional => {
+                 self.managed_reply(
+                     &mut stream,
+                     service,
+@@ -1266,6 +1268,7 @@ impl RendezvousServer {
+                     route,
+                     addr,
+                     ManagedPath::Direct,
++                    false,
+                     &signal.offer_nonce,
+                 )
+                 .await
+@@ -1278,6 +1281,7 @@ impl RendezvousServer {
+                     route,
+                     addr,
+                     ManagedPath::Relay,
++                    regional,
+                     &signal.offer_nonce,
+                 )
+                 .await
+@@ -1294,6 +1298,7 @@ impl RendezvousServer {
+         route: DeskRealmRoute,
+         addr: SocketAddr,
+         path: ManagedPath,
++        regional: bool,
+     ) -> ResultType<()> {
+         let purpose = match path {
+             ManagedPath::Direct => TransportPurpose::DirectRequest,
+@@ -1302,7 +1307,7 @@ impl RendezvousServer {
+         let _ = service
+             .authenticate(stream, &route, purpose, PeerRole::Controller, &EMPTY_OFFER)
+             .await?;
+-        service.authorize(&route, path).await?;
++        service.authorize(&route, path, regional).await?;
+         let Some(peer) = self.pm.get(&route.target_rustdesk_id).await else {
+             bail!("managed peer unavailable")
+         };
+@@ -1327,6 +1332,7 @@ impl RendezvousServer {
+                     route: route.clone(),
+                     nonce: offer,
+                     path,
++                    regional,
+                     answer,
+                 },
+             );
+@@ -1339,12 +1345,14 @@ impl RendezvousServer {
+             ManagedPath::Relay => Operation::RelayRequest(RequestRelay {
+                 id: route.target_rustdesk_id.clone(),
+                 uuid: key.1.to_string(),
+-                relay_server: service.relay_address.clone(),
++                relay_server: if regional { String::new() } else { service.relay_address.clone() },
+                 secure: true,
+                 ..Default::default()
+             }),
+         };
+-        let candidate = managed::wrap(managed::signal(route, offer, operation));
++        let mut candidate = managed::signal(route, offer, operation);
++        candidate.regional_relay = regional;
++        let candidate = managed::wrap(candidate);
+         let result = async {
+             self.tx.send(Data::Msg(candidate.into(), peer_addr))?;
+             let response = tokio::select! {
+@@ -1369,6 +1377,7 @@ impl RendezvousServer {
+         route: DeskRealmRoute,
+         addr: SocketAddr,
+         path: ManagedPath,
++        regional: bool,
+         offer: &[u8],
+     ) -> ResultType<()> {
+         let offer: &[u8; 32] = offer.try_into()?;
+@@ -1380,7 +1389,10 @@ impl RendezvousServer {
+             .authenticate(stream, &route, purpose, PeerRole::Target, offer)
+             .await?;
+         let matches = |entry: &ManagedOffer| {
+-            entry.nonce == *offer && entry.path == path && managed::same_route(&entry.route, &route)
++            entry.nonce == *offer
++                && entry.path == path
++                && entry.regional == regional
++                && managed::same_route(&entry.route, &route)
+         };
+         if !self
+             .managed_offers
+@@ -1391,7 +1403,7 @@ impl RendezvousServer {
+         {
+             bail!("managed offer unavailable");
+         }
+-        service.authorize(&route, path).await?;
++        service.authorize(&route, path, regional).await?;
+         let mut pending = self.managed_offers.lock().await;
+         if !pending.get(&key).map_or(false, matches) {
+             bail!("managed offer unavailable");
+@@ -1422,17 +1434,16 @@ impl RendezvousServer {
+             ManagedPath::Relay => {
+                 let mut response = RelayResponse {
+                     uuid: key.1.to_string(),
+-                    relay_server: service.relay_address.clone(),
++                    relay_server: if regional { String::new() } else { service.relay_address.clone() },
+                     ..Default::default()
+                 };
+                 response.set_pk(signed.into());
+                 Operation::RelayResponse(response)
+             }
+         };
+-        if reply
+-            .send(managed::signal(route, *offer, operation))
+-            .is_err()
+-        {
++        let mut response = managed::signal(route, *offer, operation);
++        response.regional_relay = regional;
++        if reply.send(response).is_err() {
+             bail!("managed requester disconnected");
+         }
+         Ok(())

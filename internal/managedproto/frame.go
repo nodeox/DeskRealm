@@ -22,6 +22,9 @@ const (
 	RelayProbePermit Kind = 9
 	RelayProbeHolder Kind = 10
 	RelaySelection   Kind = 11
+	RelayTicket      Kind = 12
+	RelayTicketProof Kind = 13
+	RelayPairReceipt Kind = 14
 )
 
 const prefix = "DR-M2\x00\x01"
@@ -48,6 +51,9 @@ var fieldWidths = map[Kind][]int{
 	RelayProbePermit: {1, uuid, uuid, uuid, uuid, uuid, word, digest, digest, word, word},
 	RelayProbeHolder: {digest, 1, digest},
 	RelaySelection:   {1, uuid, uuid, uuid, uuid, uuid},
+	RelayTicket:      {1, uuid, uuid, uuid, uuid, uuid, word, digest, digest, word, word},
+	RelayTicketProof: {digest, digest},
+	RelayPairReceipt: {uuid, uuid, uuid, uuid, uuid, word},
 }
 
 // Encode produces the exact signed bytes. Frame validation checks the wire
@@ -120,14 +126,22 @@ func validValues(kind Kind, f [][]byte) bool {
 		return f[0][0] == 1 || f[0][0] == 2
 	case RelayProbe:
 		return (f[0][0] == 1 || f[0][0] == 2) && positive(f[6]) && validRelayProbeSamples(f[8])
-	case RelayProbePermit:
+	case RelayProbePermit, RelayTicket:
 		start, expires := binary.BigEndian.Uint64(f[9]), binary.BigEndian.Uint64(f[10])
+		window := uint64(2_000)
+		if kind == RelayTicket {
+			window = 10_000
+		}
 		return (f[0][0] == 1 || f[0][0] == 2) && positive(f[6]) && positive(f[9]) && positive(f[10]) &&
-			expires > start && expires-start <= 2000
+			expires > start && expires-start <= window
 	case RelayProbeHolder:
 		return f[1][0] < 3
 	case RelaySelection:
 		return f[0][0] == 1 || f[0][0] == 2
+	case RelayTicketProof:
+		return true
+	case RelayPairReceipt:
+		return positive(f[5])
 	default:
 		return false
 	}

@@ -39,6 +39,7 @@ type relaySelectionResult struct {
 	State      string                 `json:"state"`
 	Selected   *relaySelectionOption  `json:"selected,omitempty"`
 	Options    []relaySelectionOption `json:"options,omitempty"`
+	Ticket     *relaySessionTicket    `json:"ticket,omitempty"`
 }
 
 type relayRank struct {
@@ -187,7 +188,11 @@ func (a *API) relaySelection(w http.ResponseWriter, r *http.Request) {
 		if !now.Before(out.Deadline) {
 			return errSessionConflict
 		}
-		return a.selectRelay(ctx, tx, g, role, round, in, &out)
+		if err := a.selectRelay(ctx, tx, g, role, round, in, &out); err != nil || out.State != "confirmed" {
+			return err
+		}
+		out.Ticket, err = a.signRelayTicket(ctx, tx, g, round, role, key, out)
+		return err
 	})
 	if err != nil {
 		failure(w, "relay selection", err)
@@ -250,6 +255,10 @@ func (a *API) selectRelay(ctx context.Context, tx pgx.Tx, g sessionGrant, role b
 			}
 			if tag.RowsAffected() != 1 {
 				return errSessionConflict
+			}
+			if _, err := tx.Exec(ctx, `DELETE FROM managed_session_routes
+				WHERE session_id=$1 AND connection_id=$2 AND path='relay' AND relay_id=$3`, g.ID, round.Connection, in.Relay); err != nil {
+				return err
 			}
 			if err := auditRelayDecision(ctx, tx, g, "session.relay_selection_failed", "failed", "connection_failed"); err != nil {
 				return err

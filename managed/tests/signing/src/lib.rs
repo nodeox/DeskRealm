@@ -54,6 +54,15 @@ mod tests {
                     .unwrap();
             assert_eq!(sign::sign_detached(&frame, &secret), signature, "{name}");
             assert!(sign::verify_detached(&signature, &frame, &public), "{name}");
+            if kind == RELAY_TICKET {
+                let ticket =
+                    RelayCredential::verify_ticket(&frame, &signature.to_bytes(), &public).unwrap();
+                assert!(!ticket.active(ticket.opens - 1));
+                assert!(ticket.active(ticket.opens));
+                assert!(!ticket.active(ticket.expires));
+                assert!(RelayProbePermit::verify(&frame, &signature.to_bytes(), &public).is_none());
+                assert!(ticket.pair_receipt_frame().is_some());
+            }
             frame[7] ^= 0x01;
             assert!(
                 !sign::verify_detached(&signature, &frame, &public),
@@ -63,8 +72,11 @@ mod tests {
         }
         verified_kinds.sort_unstable();
         verified_kinds.dedup();
-        assert_eq!(verified_kinds, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
-        assert_eq!(rejected, 24);
+        assert_eq!(
+            verified_kinds,
+            [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
+        );
+        assert_eq!(rejected, 27);
     }
 
     #[test]

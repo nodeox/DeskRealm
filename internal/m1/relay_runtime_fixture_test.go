@@ -1,9 +1,11 @@
 package m1
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/ed25519"
+	"crypto/sha256"
 	"crypto/tls"
 	"encoding/base64"
 	"encoding/binary"
@@ -21,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"deskrealm/internal/managedproto"
 	"deskrealm/internal/relayprotocol"
 )
 
@@ -34,9 +37,19 @@ func relayFixtureListener(t *testing.T) net.Listener {
 	return listener
 }
 
-func relayFixturePublish(t *testing.T) (string, *atomic.Pointer[string]) {
+const regionalTicketPrefix = "DeskRealm/relay/v1/pair1\x00"
+
+// When enabled, reject relay tickets on the first node a fixture pair tries.
+// Health and RTT probes still reach both native listeners.
+type relayFixturePairGate struct {
+	enabled  atomic.Bool
+	rejected atomic.Pointer[string]
+}
+
+func relayFixturePublish(t *testing.T, gate *relayFixturePairGate) (string, *atomic.Pointer[string]) {
 	t.Helper()
 	listener := relayFixtureListener(t)
+	published := listener.Addr().String()
 	var backend atomic.Pointer[string]
 	go func() {
 		for {
@@ -46,6 +59,22 @@ func relayFixturePublish(t *testing.T) (string, *atomic.Pointer[string]) {
 			}
 			go func() {
 				defer client.Close()
+				_ = client.SetDeadline(time.Now().Add(5 * time.Second))
+				var data io.Reader = client
+				if gate != nil && gate.enabled.Load() {
+					reader := bufio.NewReader(client)
+					prefix, err := reader.Peek(len(regionalTicketPrefix))
+					if err != nil {
+						return
+					}
+					if string(prefix) == regionalTicketPrefix {
+						gate.rejected.CompareAndSwap(nil, &published)
+						if *gate.rejected.Load() == published {
+							return
+						}
+					}
+					data = reader
+				}
 				address := backend.Load()
 				if address == nil {
 					return
@@ -55,13 +84,13 @@ func relayFixturePublish(t *testing.T) (string, *atomic.Pointer[string]) {
 					return
 				}
 				defer server.Close()
-				deadline := time.Now().Add(3 * time.Second)
+				deadline := time.Now().Add(5 * time.Second)
 				_ = client.SetDeadline(deadline)
 				_ = server.SetDeadline(deadline)
 				forwarded := make(chan struct{})
 				go func() {
 					defer close(forwarded)
-					_, _ = io.Copy(server, client)
+					_, _ = io.Copy(server, data)
 					_ = server.Close()
 				}()
 				_, _ = io.Copy(client, server)
@@ -70,7 +99,7 @@ func relayFixturePublish(t *testing.T) (string, *atomic.Pointer[string]) {
 			}()
 		}
 	}()
-	return listener.Addr().String(), &backend
+	return published, &backend
 }
 
 func TestRegionalRelayRuntimePostgres(t *testing.T) {
@@ -86,7 +115,11 @@ func TestRegionalRelayRuntimePostgres(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	server.Config.Handler = NewHandler(store, origin, nil, AuthConfig{ManagedKey: f.signing})
+	transport, err := ConfigureManagedTransport(strings.TrimPrefix(f.rendezvous, rendezvousPrefix), "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.Config.Handler = NewHandler(store, origin, nil, AuthConfig{ManagedKey: f.signing, Transport: transport})
 	tlsDir := os.Getenv("DESKREALM_TEST_RELAY_TLS_DIR")
 	if tlsDir != "" {
 		cert, err := tls.LoadX509KeyPair(filepath.Join(tlsDir, "server.pem"), filepath.Join(tlsDir, "server.key"))
@@ -124,9 +157,10 @@ func TestRegionalRelayRuntimePostgres(t *testing.T) {
 		published                  *atomic.Pointer[string]
 		listener                   net.Listener
 	}
+	var gate relayFixturePairGate
 	create := func(name string) node {
 		t.Helper()
-		endpoint, published := relayFixturePublish(t)
+		endpoint, published := relayFixturePublish(t, &gate)
 		record := request(h, "POST", "/v1/admin/relays", testOrigin,
 			relayRequest{name, "site-" + name, "north", endpoint, "1.1.16", 2}, admin, csrf)
 		checkCode(t, record, 201, relayEnrollmentPrefix)
@@ -230,7 +264,29 @@ func TestRegionalRelayRuntimePostgres(t *testing.T) {
 	checkStates("available", "available")
 	sampleRegionalRelays(t, f, a.NodeID, b.NodeID)
 	if runner := os.Getenv("DESKREALM_TEST_RUST_RELAY_RUNNER"); runner != "" {
-		sampleRegionalRelaysFromRust(t, f, center.URL, ca, scratch, runner)
+		sampleRegionalRelaysFromRust(t, f, center.URL, ca, scratch, runner, "", "managed_native_endpoints_report_both_regional_relays")
+		if hbbs := os.Getenv("DESKREALM_TEST_HBBS_RUNNER"); hbbs != "" {
+			address := nativeRegionalRendezvous(t, f, center.URL, ca, scratch, hbbs)
+			for _, failover := range []bool{false, true} {
+				gate.enabled.Store(failover)
+				sampleRegionalRelaysFromRust(t, f, center.URL, ca, scratch, runner, address, "managed_native_endpoints_forward_on_selected_regional_relay")
+				f.count(t, 1, `SELECT count(*) FROM managed_session_redemptions d JOIN session_relay_rounds r
+				ON r.session_id=d.session_id AND r.connection_id=d.connection_id JOIN session_relay_selections s ON s.round_id=r.id
+				WHERE d.path='relay' AND d.relay_id=s.relay_id::text AND s.failed_at IS NULL AND d.lease_sequence=2
+				AND d.session_id=(SELECT id FROM managed_sessions ORDER BY issued_at DESC LIMIT 1)`)
+				if failover {
+					rejected := gate.rejected.Load()
+					if rejected == nil {
+						t.Fatal("no selected regional connection was rejected by the fixture")
+					}
+					f.count(t, 1, `SELECT count(*) FROM session_relay_selections s JOIN session_relay_rounds r ON r.id=s.round_id
+						JOIN session_relay_candidates c ON c.round_id=s.round_id AND c.relay_id=s.relay_id
+						WHERE s.attempt=1 AND s.failed_at IS NOT NULL AND c.endpoint=$1
+						AND r.session_id=(SELECT id FROM managed_sessions ORDER BY issued_at DESC LIMIT 1)`, *rejected)
+				}
+			}
+			gate.enabled.Store(false)
+		}
 	}
 	for _, n := range []node{a, b} {
 		checkCode(t, request(h, "GET", tasksPath+"/"+n.TaskID, "", nil, admin, ""), 200, "relay_available")
@@ -258,7 +314,7 @@ func TestRegionalRelayRuntimePostgres(t *testing.T) {
 	sequence := waitHealth(a, stoppedSequence)
 	sweep()
 	checkStates("available", "available")
-	newEndpoint, newPublished := relayFixturePublish(t)
+	newEndpoint, newPublished := relayFixturePublish(t, nil)
 	newPublished.Store(&a.local)
 	change := request(h, "POST", "/v1/admin/relays/"+a.NodeID+"/lifecycle", testOrigin,
 		relayChange{"change_endpoint", 1, newEndpoint}, admin, csrf)
@@ -402,12 +458,93 @@ func sampleRegionalRelays(t *testing.T, f sessionFixture, alpha, beta string) {
 	}
 	response = controller.selectRelay(t, f.h, grant, round, options.Options[0].Relay, "select")
 	checkCode(t, response, 200, "confirmed")
+	leftTicket := responseValue[relaySelectionResult](t, response.Body.Bytes()).Ticket
 	response = nativeRequest(f.h, "GET", selectionPath, target.bearer, nil)
 	checkCode(t, response, 200, options.Options[0].Relay)
-	if selected := responseValue[relaySelectionResult](t, response.Body.Bytes()).Selected; selected == nil ||
+	confirmed := responseValue[relaySelectionResult](t, response.Body.Bytes())
+	if selected := confirmed.Selected; selected == nil ||
 		selected.Relay != options.Options[0].Relay || selected.CombinedRTT == nil {
 		t.Fatalf("target did not receive the confirmed selection: %+v", selected)
 	}
+	testNativeRelayTickets(t, options.Options, leftTicket, confirmed.Ticket, controller.key, target.key)
+}
+
+func testNativeRelayTickets(t *testing.T, ranked []relaySelectionOption, left, right *relaySessionTicket,
+	controller, target ed25519.PrivateKey) {
+	t.Helper()
+	if left == nil || right == nil {
+		t.Fatal("expected both role tickets for native hbbr")
+	}
+	type attempt struct {
+		conn  net.Conn
+		frame []byte
+	}
+	sendTicket := func(endpoint string, ticket *relaySessionTicket) attempt {
+		t.Helper()
+		conn, err := net.DialTimeout("tcp", endpoint, time.Second)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = conn.Close() })
+		_ = conn.SetDeadline(time.Now().Add(time.Second))
+		frame, err := base64.RawURLEncoding.DecodeString(ticket.Frame)
+		signature, valid := canonicalSignature(ticket.Signature)
+		if err != nil || !valid {
+			t.Fatal("invalid ticket fixture")
+		}
+		if _, err := conn.Write(bytes.Join([][]byte{[]byte(regionalTicketPrefix), frame, signature}, nil)); err != nil {
+			t.Fatal(err)
+		}
+		return attempt{conn, frame}
+	}
+	prove := func(attempt attempt, key ed25519.PrivateKey) {
+		t.Helper()
+		var nonce [32]byte
+		if _, err := io.ReadFull(attempt.conn, nonce[:]); err != nil {
+			t.Fatal(err)
+		}
+		frameHash := sha256.Sum256(attempt.frame)
+		proof, err := managedproto.Encode(managedproto.RelayTicketProof, frameHash[:], nonce[:])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := attempt.conn.Write(ed25519.Sign(key, proof)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rejected := func(conn net.Conn) {
+		t.Helper()
+		var output [1]byte
+		n, err := conn.Read(output[:])
+		var timeout net.Error
+		if n != 0 || err == nil || (errors.As(err, &timeout) && timeout.Timeout()) {
+			t.Fatalf("native relay did not close a rejected ticket: %d bytes, %v", n, err)
+		}
+		_ = conn.Close()
+	}
+	rejected(sendTicket(ranked[1].Endpoint, left).conn)
+	wrongHolder := sendTicket(ranked[0].Endpoint, left)
+	prove(wrongHolder, target)
+	rejected(wrongHolder.conn)
+	first, second := sendTicket(ranked[0].Endpoint, left), sendTicket(ranked[0].Endpoint, right)
+	prove(first, controller)
+	prove(second, target)
+	var leftReceipt, rightReceipt [ed25519.SignatureSize]byte
+	if _, err := io.ReadFull(first.conn, leftReceipt[:]); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.ReadFull(second.conn, rightReceipt[:]); err != nil || rightReceipt != leftReceipt {
+		t.Fatalf("roles did not receive the same native pairing receipt: %v", err)
+	}
+	active, err := relayprotocol.Probe(context.Background(), ranked[0].Endpoint, relayprotocol.PublicKey(left.PublicKey), "1.1.16")
+	if err != nil || active != 1 {
+		t.Fatalf("native relay did not report its paired session: %d %v", active, err)
+	}
+	replay := sendTicket(ranked[0].Endpoint, left)
+	prove(replay, controller)
+	rejected(replay.conn)
+	_ = first.conn.Close()
+	_ = second.conn.Close()
 }
 
 func alteredProbePermit(t *testing.T, f sessionFixture, permit relayprotocol.SessionProbePermit, field int) relayprotocol.SessionProbePermit {
@@ -427,30 +564,90 @@ func alteredProbePermit(t *testing.T, f sessionFixture, permit relayprotocol.Ses
 	}
 }
 
-func sampleRegionalRelaysFromRust(t *testing.T, f sessionFixture, center, ca, scratch, runner string) {
+func nativeRegionalRendezvous(t *testing.T, f sessionFixture, center, ca, scratch, runner string) string {
+	t.Helper()
+	listener := relayFixtureListener(t)
+	address := listener.Addr().String()
+	_, port, err := net.SplitHostPort(address)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = listener.Close()
+	log, err := os.Create(filepath.Join(scratch, "hbbs.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer log.Close()
+	ctx, cancel := context.WithCancel(f.ctx)
+	cmd := exec.CommandContext(ctx, runner, port, ca)
+	cmd.Env = append(os.Environ(), "DESKREALM_MANAGED_CENTER="+center,
+		"DESKREALM_MANAGED_CENTER_KID="+f.signing.id,
+		"DESKREALM_MANAGED_CENTER_PUBLIC_KEY="+base64.RawURLEncoding.EncodeToString(f.signing.key.Public().(ed25519.PublicKey)),
+		"DESKREALM_MANAGED_RENDEZVOUS_TOKEN="+strings.TrimPrefix(f.rendezvous, rendezvousPrefix))
+	cmd.Stdout, cmd.Stderr = log, log
+	cmd.WaitDelay = 3 * time.Second
+	if err := cmd.Start(); err != nil {
+		cancel()
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait(); close(done) }()
+	t.Cleanup(func() { cancel(); <-done })
+	for wait := time.Now().Add(8 * time.Second); time.Now().Before(wait); {
+		select {
+		case err := <-done:
+			output, _ := os.ReadFile(log.Name())
+			t.Fatalf("regional hbbs startup: %v\n%s", err, output)
+		default:
+		}
+		if conn, err := net.DialTimeout("tcp", address, 100*time.Millisecond); err == nil {
+			_ = conn.Close()
+			return address
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	output, _ := os.ReadFile(log.Name())
+	t.Fatalf("regional hbbs did not begin listening\n%s", output)
+	return ""
+}
+
+func sampleRegionalRelaysFromRust(t *testing.T, f sessionFixture, center, ca, scratch, runner, rendezvous, testName string) {
 	t.Helper()
 	encode := base64.RawURLEncoding.EncodeToString
 	peer := func(id, credential string, key ed25519.PrivateKey) map[string]string {
 		return map[string]string{"device": id, "credential": credential, "seed": encode(key.Seed())}
 	}
+	var policy int64
+	if err := f.store.DB.QueryRow(f.ctx, "SELECT policy_version FROM managed_sessions ORDER BY issued_at DESC LIMIT 1").Scan(&policy); err != nil {
+		t.Fatal(err)
+	}
 	input, err := json.Marshal(map[string]any{
 		"center": center, "kid": f.signing.id, "center_key": encode(f.signing.key.Public().(ed25519.PublicKey)),
 		"controller": peer(f.controller, f.userToken, f.controllerKey),
 		"target":     peer(f.target, f.targetToken, f.targetKey),
+		"rendezvous": rendezvous, "policy_version": policy,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(scratch, "native-probe-fixture.json")
-	if err := os.WriteFile(path, input, 0600); err != nil {
+	file, err := os.CreateTemp(scratch, testName+"-*.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := file.Name()
+	if _, err := file.Write(input); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
 		t.Fatal(err)
 	}
 	defer os.Remove(path)
-	command := exec.CommandContext(f.ctx, runner, path, ca)
+	command := exec.CommandContext(f.ctx, runner, path, ca, testName)
 	// Check the native harness actually ran its named test.
 	output, err := command.CombinedOutput()
-	if err != nil || !bytes.Contains(output, []byte("managed_native_endpoints_report_both_regional_relays ... ok")) {
-		t.Fatalf("native relay endpoint check failed: %v\n%s", err, output)
+	if err != nil || !bytes.Contains(output, []byte(testName+" ... ok")) {
+		t.Fatalf("native relay endpoint %s failed: %v\n%s", testName, err, output)
 	}
 	f.count(t, 12, `SELECT count(*) FROM session_relay_reports reports
 		JOIN session_relay_rounds r ON r.id=reports.round_id

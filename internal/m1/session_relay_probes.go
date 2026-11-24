@@ -28,6 +28,7 @@ type relayRound struct {
 	Connection                       string                `json:"connection_id"`
 	Version                          int64                 `json:"version"`
 	NetworkRevision                  int64                 `json:"network_revision"`
+	Regional                         bool                  `json:"regional"`
 	Opened                           *time.Time            `json:"opened_at,omitempty"`
 	Deadline                         *time.Time            `json:"deadline,omitempty"`
 	State                            string                `json:"state"`
@@ -341,8 +342,16 @@ func (a *API) joinSessionRelayRound(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				return err
 			}
+			out.Regional, err = regionalRelayEnabled(ctx, tx, g.Organization)
+			if err != nil {
+				return err
+			}
 			return a.loadRelayRoundCandidates(ctx, tx, &out, now, g, role, key)
 		}
+		if err != nil {
+			return err
+		}
+		out.Regional, err = regionalRelayEnabled(ctx, tx, g.Organization)
 		if err != nil {
 			return err
 		}

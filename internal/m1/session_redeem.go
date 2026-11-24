@@ -196,7 +196,7 @@ func (a *API) redeemSessionGrant(w http.ResponseWriter, r *http.Request) {
 		if reason != "" {
 			return deny(errSessionDenied, reason)
 		}
-		if in.Path == "relay" && in.Relay != a.transport.relayID {
+		if in.Path == "relay" && !userIDPattern.MatchString(in.Relay) && in.Relay != a.transport.relayID {
 			return deny(errSessionDenied, "relay_not_configured")
 		}
 		reason, _, err = g.revalidate(ctx, tx)
@@ -248,6 +248,15 @@ func (a *API) redeemSessionGrant(w http.ResponseWriter, r *http.Request) {
 		}
 		if err != nil {
 			return err
+		}
+		if in.Path == "relay" && userIDPattern.MatchString(in.Relay) {
+			err := verifyRegionalRedemption(ctx, tx, g.ID, in.Connection, in.Relay)
+			if errors.Is(err, pgx.ErrNoRows) {
+				return deny(errSessionDenied, "route_evidence_missing")
+			}
+			if err != nil {
+				return err
+			}
 		}
 		out = sessionRedemption{Connection: in.Connection, Path: in.Path, Relay: in.Relay, Mask: int16(mask),
 			ProofHash: hash[:], Started: now, Until: now.Add(sessionLeaseDuration)}
