@@ -153,3 +153,21 @@ Task 1 的已有 Docker 首装开发验证通过。
 日志位于本地 Git 目录 `deskrealm-evidence/m3/4c2a785fad6e94da36a2fb06d5c35e617dde17d7/`。`relay-host.log` 的 SHA-256 为 `f5e0ab1040e98b8c4a5ed252c0de877fe28242955df4b5a27942a150c60126dd`，`relay-host-linux.log` 为 `55b46d83c58751dac06b94ed40654624f2164b4320ce51d4afdbea233adcb5db`，`m1-all.log` 为 `3514d1292e94d9c88abd82f5cc575d38cf5fab0126089855995e28b957f16131`。
 
 Task 1 继续启动两套受管 `hbbr`、从中继上报签名健康，并由中心对公布端点做独立协议探测。
+
+## 04-03 区域中继实例与独立入池探测
+
+2026-11-23，在 `8fdaedad6f4f6470933e1c9542d70c09ec03394d` 运行 `bash scripts/deskrealm-m3-test relay-enrollment`，退出 0。重放锁定的 RustDesk 服务端补丁并构建 Linux ARM64 `hbbr`。三项 Go 竞态用例使用临时 PostgreSQL 18.7，区域用例启动两个真实且独立的 `hbbr` 容器。
+
+| 检查 | 结果 |
+| --- | --- |
+| 主机健康与公布地址 | 两个节点分别以自己的私钥通过 HTTPS 上报健康，随后在不同公布端点应答独立签名挑战。仅有健康时保持待探测。将甲的公布端点转接到乙，即使 TCP 和协议均可达，甲仍无法以乙的公钥入池。 |
+| 入池和故障 | 两个正确端点分别通过，登记任务各只完成一次且各有一条入池审计。向已入池节点重复注入错误身份，第三次失败摘除，恢复正确端点后重新入池。 |
+| 容量与重启 | 在 PostgreSQL 注入容量上限及过期健康，目录分别排除相应节点。实际重建一个 `hbbr` 容器后，健康序号继续增长，恢复入池，沿用原公钥。 |
+| 构建 | Go 中心和节点 CLI 的 Linux amd64、arm64 静态构建通过。区域 `hbbr` 实例在 Linux ARM64 中运行。 |
+| 兼容路径 | 锁定补丁的 Linux ARM64 `hbbs` 和 `hbbr` 通过 M2 单中继原生夹具，覆盖有签名端点连接、会合路由与中继配对。同提交的 M1 全量回归和 12 项受管 Go 竞态检查通过。 |
+
+日志位于本地 Git 目录 `deskrealm-evidence/m3/8fdaedad6f4f6470933e1c9542d70c09ec03394d/`。`relay-enrollment.log` 的 SHA-256 为 `af538c4c584e147bd4bae103a4408546f1d1785205e3706cf6b928dbf071f07a`，`linux-builds.log` 为 `eab73106b6cca3b63fb8c7ee349ca41d17fa21d6a1d78aca004e8086c5886726`。
+
+同目录的 `managed-single-relay.log` SHA-256 为 `7dd5b9121d069667f8ecfdba82491543cbf5f52ad45379e7bf078209103561f5`，`managed-db.log` 为 `277e7f8e5671e9389a80d0f8c759eba481dde71a924b771dd6e601ec0d1e178c`，`m1-all.log` 为 `b74cd2114fce6e7e5f5172b91cb97591e87ff361bc4a971e1ca93c361a589bc0`。
+
+Task 1 的节点验活及入池开发验证通过。Task 2 接续排空、停用、地址切换和操作台。区域节点的应用会话转发在 04-04 随节点票据启用。

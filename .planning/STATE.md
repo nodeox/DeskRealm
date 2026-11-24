@@ -3,10 +3,10 @@ gsd_state_version: "1.0"
 current_phase: 4
 current_phase_name: M3 部署与自动化交付
 status: executing
-last_updated: "2026-11-24T00:04:27Z"
+last_updated: "2026-11-24T00:20:50Z"
 last_activity: 2026-11-23
-last_activity_desc: M3 04-03 中继主机持钥登记和 HTTPS 恢复通过
-state_head: 4c2a785fad6e94da36a2fb06d5c35e617dde17d7
+last_activity_desc: M3 04-03 两套受管中继通过签名健康和独立探测入池
+state_head: 8fdaedad6f4f6470933e1c9542d70c09ec03394d
 progress:
   total_phases: 5
   completed_phases: 3
@@ -27,9 +27,9 @@ See: .planning/PROJECT.md (updated 2026-11-22)
 ## Current Position
 
 Phase: 4 — M3 部署与自动化交付
-Plan: [04-03](phases/04-m3/04-03-PLAN.md) Task 1
-Status: In progress，中心签名健康、主机身份持久化及 HTTPS 登记恢复通过。接续受管 `hbbr` 与独立协议探测。
-Last activity: 2026-11-23 — 两个独立节点完成持钥登记，登记回复丢失后使用原密钥恢复。[04-03 验证](phases/04-m3/04-VALIDATION.md#04-03-中继主机身份和-https-登记)
+Plan: [04-03](phases/04-m3/04-03-PLAN.md) Task 2
+Status: In progress，Task 1 的真实区域 `hbbr`、签名健康、公布端点探测和入池已通过。接续中继生命周期与工作台。
+Last activity: 2026-11-23 — 两个隔离 Linux 实例分别入池，交叉公钥被拒，恢复后沿用原身份。[04-03 验证](phases/04-m3/04-VALIDATION.md#04-03-区域中继实例与独立入池探测)
 
 ## Accumulated Context
 
@@ -41,4 +41,4 @@ M0–M3 开发完成后进入目标环境验收。先 Linux 中心和一台中�
 
 M0、M1、M2 已完成开发验证。M2 交接包括账号停用后的续租拒绝、通讯录连接 ACL、实际会话回执和 Windows 受管入口。
 
-[04-03](phases/04-m3/04-03-PLAN.md) 继续两套受管 `hbbr` 实例、签名健康上报和公布端点独立探测。只有满足健康、探测和容量条件的节点才进入候选池。M2 受管基线 `c37fde7` 的双架构 Windows 构建及六项门禁通过。[M2 开发核对](phases/03-m2/03-VERIFICATION.md)
+[04-03](phases/04-m3/04-03-PLAN.md) 接续排空、停用、公布地址切换、探测结果及浏览器验收。区域节点的短期会话票据与实际转发由 04-04 接入。M2 受管基线 `c37fde7` 的双架构 Windows 构建及六项门禁通过。[M2 开发核对](phases/03-m2/03-VERIFICATION.md)
