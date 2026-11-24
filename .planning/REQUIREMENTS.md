@@ -80,7 +80,7 @@ M4 包括浏览器主控、原生 LDAP、邮件验证和恢复、更多平台、
 | FR-12 | Phase 3 | Complete (开发验证) |
 | NFR-01 | Phase 3 | Complete (开发验证) |
 | FR-01 | Phase 4 | Complete (04-01 开发验证) |
-| FR-05 | Phase 4 | Pending |
+| FR-05 | Phase 4 | Partial (双架构开发 ZIP 签名验签通过，接续中心任务、安装器和配置读取) |
 | FR-06 | Phase 4 | Pending |
 | FR-14 | Phase 4 | Complete (登记、双节点验活、容量、生命周期和控制台开发验证通过) |
 | FR-15 | Phase 4 | Complete (04-04 开发验证，目标网络和 Windows 留待 Phase 5) |

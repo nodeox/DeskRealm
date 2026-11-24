@@ -299,3 +299,20 @@ Task 2 接续已建立会话断线后的新授权重选、会话页明细和跨�
 本地 Git 证据目录 `deskrealm-evidence/m3/09b335f8123fdb4f7c9fab36080d0aa5df97c187/`。`multi-relay.log` SHA-256 为 `200660ef617c3d40f50ce3986e5f29b9e6a30f208356b78d9bb5a63d6e2ecf62`，`managed-browser.log` 为 `2d025ac137faec7189407e59b536bbca53a75f9184d014c3ef9730c4bcbf84c5`，`m1-all.log` 为 `97cf2a4b10fb5d4515e64df6049fd9d0f3251e830bef15c75f573bececee98cf`，`go-vet-test.log` 为 `1b3be2c0b239c5336075ebb80adb1e5b5676634aa380217866554fb067d3c090`。
 
 04-04 开发验证完成。重连指用户再次发起会话，中心为其签发独立授权。目标环境验收安排在 M0–M3 开发完成后。
+
+## 04-05 Windows 开发包签名
+
+2026-11-24，打包实现 `e830798a8d9326cbf5a3c32eb1a1b6dca60aac5f` 通过 `bash scripts/deskrealm-m3-test signed-build` 的 14 项测试，并通过 Go 全量测试与 vet。
+
+| 检查 | 结果 |
+| --- | --- |
+| 来源与模板 | 两架构包绑定原生构建提交、证据清单和内层客户端摘要。品牌版本、ICO 摘要、中心公开配置与目标组均进入批准记录，交付包内的配置仅携带公开信息。 |
+| 签名与隔离 | 打包环境生成清单，独立 OpenSSL Ed25519 签名进程仅持有清单和开发签名材料。验证器从独立提供的批准记录和开发公钥核对签名及两套归档。 |
+| 失败与重试 | 测试覆盖错误源码、修改构建证据、跨架构替换、重新计算外层摘要、错签名、错公钥、违规归档路径和配置中出现凭据字段。签名不可用时无签名输出，重试复用原候选。替换失败保留先前候选。 |
+| 实际开发工件 | x64 与 ARM64 使用 `c37fde79c99c840cfc234b8e17e9fd15499665af` 已验证的历史原生工件。重新打包产生相同 ZIP 和清单，独立验签通过。 |
+
+开发 ZIP 的 SHA-256 为 x64 `96441bacf6a1bb1f69d6138de902c7d24d1fe5f74f459f5271581e5aec1563d0` 和 ARM64 `55b4c7c1f9e8b46d9e604742934043b8e55ee97f463f1ab816e3947116804860`。工件、审批输入、开发公钥和证据日志存于本地 Git 目录 `deskrealm-evidence/m3/e830798a8d9326cbf5a3c32eb1a1b6dca60aac5f/`。
+
+当前 Windows 构建的 CI 提交为 `6acfe3f62c3da5bd9d2021865fb3db8ab780da99`，来自单独构建分支。锁定源码和构建输入范围与本地 `e830798` 一致。记录时两架构桥接均通过，原生构建仍在运行。[当前 Windows 构建](https://github.com/nodeox/DeskRealm/actions/runs/45368970255)
+
+本次签名范围为开发 ZIP 的分离签名。Task 1 继续接入中心授权提交、可恢复交付任务及构建证据展示。控制台发布和免填登记仍待开发，Windows Authenticode 安装器与目标环境安装亦待验证。
