@@ -437,3 +437,20 @@ Task 2 接续已建立会话断线后的新授权重选、会话页明细和跨�
 证据保存在 Git 目录 `deskrealm-evidence/m3/46d294abc34964a2363099cc9e0f06648eca1a3c/`。`center-restore.log` SHA-256 为 `163b82cf03fb1b447fb808f11cf22d19f4552a926b739c5b7c6a490a7d65d266`，`go-install-regression.log` 为 `d5701358e6692c861b398ec93a25d0a4b23b5051be7fc4ed2ee8c735951d80c6`。
 
 隔离开发检查覆盖标准中心部署及 PostgreSQL，外部代理和附加挂载按各自部署流程保留。升级、回切及发布批次仍在 04-06 开发范围内。
+
+## 04-06 中心 API 升级和兼容回滚
+
+2026-11-24，候选 `7b38d30ad1a1373c598fc69ab960591ad71c5aa5` 添加 `deskrealm-install upgrade` 和 `upgrade-status`。升级覆盖在线、同架构、同数据库结构的中心 API 镜像。切换前绑定已经隔离恢复的备份、原镜像和数据库结构。候选使用不可变摘要，升级和回滚均只更换 API 容器。状态落盘后可按原候选摘要继续。
+
+| 检查 | 结果 |
+| --- | --- |
+| PostgreSQL 18 和隔离恢复 | 恢复副本与源库的系统标识、迁移版本和结构摘要一致。直接修改表结构后，迁移版本保持原值且旧结构的恢复报告被拒绝。 |
+| 切换和故障演练 | Linux ARM64 临时 Compose 使用本地仓库中的摘要镜像。缺恢复报告或候选声明的迁移版本不符时拒绝切换。候选启动失败回切原摘要，健康候选切换后保留管理员状态、两类公钥及 PostgreSQL、迁移和会合容器 ID。 |
+| 重试或恢复 | 重复提交返回原记录。状态机测试覆盖恢复中断的回滚以及结构改变后停止中心并进入 `recovery_required`。升级后的备份和隔离恢复保留活动镜像记录。 |
+| 安装器回归 | Go 全量包竞态测试和 `go vet` 通过。 |
+
+候选的 `bash scripts/deskrealm-m3-test restore-upgrade` 完整复跑通过。首次门禁尝试的隔离恢复曾在业务记录检查阶段失败一次，随后启用诊断的四次专项恢复及完整门禁复跑均通过，原因未复现。
+
+证据保存在 Git 目录 `deskrealm-evidence/m3/7b38d30ad1a1373c598fc69ab960591ad71c5aa5/`。`restore-upgrade.log` SHA-256 为 `d869d2143babdd626169c16c86d3f19fd38190282e63fd18c5aceffbf3e5b030`，`go-regressions.log` 为 `8a4e3728de36b60b9a6787c4e529112675c54fca6ea9b385ec0c9c993eb72e32`。首次失败及专项重试的日志分别为 `restore-upgrade-attempt-1.log` 和 `restore-repeat-diagnostic.log`。
+
+数据库迁移、离线中心升级、中继排空升级和 Windows 终端分批发布各由对应流程处理。04-06 接续中继排空升级，目标 Linux 与双 Windows 的验收顺序沿用 Phase 5。
