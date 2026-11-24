@@ -22,6 +22,7 @@ export const auditLabels: Record<string, string> = {
   'task.delivery_created': '创建交付任务', 'task.target_canceled': '取消任务对象',
   'task.windows_delivery_created': '提交 Windows 开发包验证',
   'windows_release.published': '发布 Windows 开发包',
+  'windows_release.installers_published': '发布 Windows 签名安装器',
   'windows_release.revoked': '撤回 Windows 开发包',
   'windows_enrollment.issued': '发放 Windows 部署凭据',
   'windows_enrollment.revoked': '撤销 Windows 部署凭据',

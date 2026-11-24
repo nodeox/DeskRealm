@@ -115,20 +115,9 @@ func Configure(directory, publicKeyFile string, center Center) (*Verifier, error
 		return nil, errors.New("Windows delivery staging directory unavailable")
 	}
 	_ = root.Close()
-	keyFile, err := os.Open(publicKeyFile)
+	key, err := readEd25519PublicKey(publicKeyFile)
 	if err != nil {
-		return nil, errors.New("Windows delivery public key unavailable")
-	}
-	defer keyFile.Close()
-	raw, err := io.ReadAll(io.LimitReader(keyFile, 1025))
-	block, rest := pem.Decode(raw)
-	if err != nil || len(raw) > 1024 || block == nil || block.Type != "PUBLIC KEY" || strings.TrimSpace(string(rest)) != "" {
-		return nil, errors.New("Windows delivery requires a PEM Ed25519 public key")
-	}
-	parsed, err := x509.ParsePKIXPublicKey(block.Bytes)
-	key, ok := parsed.(ed25519.PublicKey)
-	if err != nil || !ok {
-		return nil, errors.New("Windows delivery requires a PEM Ed25519 public key")
+		return nil, err
 	}
 	if base64.StdEncoding.EncodeToString(key) == center.RendezvousKey ||
 		base64.RawURLEncoding.EncodeToString(key) == center.SigningKey {
@@ -137,6 +126,22 @@ func Configure(directory, publicKeyFile string, center Center) (*Verifier, error
 	return &Verifier{directory: directory, key: key, center: center}, nil
 }
 
+func readEd25519PublicKey(path string) (ed25519.PublicKey, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, errors.New("Windows delivery public key unavailable")
+	}
+	defer file.Close()
+	raw, err := io.ReadAll(io.LimitReader(file, 1025))
+	block, rest := pem.Decode(raw)
+	if err == nil && len(raw) <= 1024 && block != nil && block.Type == "PUBLIC KEY" && strings.TrimSpace(string(rest)) == "" {
+		parsed, err := x509.ParsePKIXPublicKey(block.Bytes)
+		if key, ok := parsed.(ed25519.PublicKey); err == nil && ok {
+			return key, nil
+		}
+	}
+	return nil, errors.New("Windows delivery requires a PEM Ed25519 public key")
+}
 func (v *Verifier) KeySHA() string {
 	return digest(v.key)
 }

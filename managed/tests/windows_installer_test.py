@@ -61,6 +61,22 @@ class WindowsInstallerTests(unittest.TestCase):
         evidence = setup.verify(signed, unsigned, host, ca, cert, self.authenticode, fixture.openssl)
         self.assertEqual(release_sha, setup.build.sha_file(fixture.destination / setup.delivery.MANIFEST))
         self.assertEqual(set(evidence["installers"]), set(setup.delivery.ARCH))
+        attestation_private, attestation_public = fixture.keys("attestation")
+        directory = fixture.root / "installers"
+        directory.mkdir()
+        statement = {"schema": 1, "scope": "authenticode-development", "source_commit": "a" * 40,
+                     "release_sha256": release_sha, **evidence}
+        expected = setup.stage_attestation(statement, signed, attestation_private, fixture.public, directory, fixture.openssl)
+        self.assertEqual(expected, setup.stage_attestation(statement, signed, attestation_private, fixture.public,
+                                                           directory, fixture.openssl))
+        with self.assertRaisesRegex(ValueError, "separate Ed25519 key"):
+            setup.stage_attestation(statement, signed, fixture.private, fixture.public, directory, fixture.openssl)
+        config = {"stage": str(fixture.root), "zip_key": str(fixture.public), "attestation_key": str(attestation_public),
+                  "certificate_sha": statement["signer_sha256"], "evidence_sha": expected, "release_sha": release_sha,
+                  "center": fixture.approval["center"]}
+        subprocess.run(["go", "test", "-count=1", "-run", "^TestPythonInstallerEvidence$", "-v", "./internal/windowsdelivery"],
+                       cwd=setup.build.ROOT, env={**os.environ, "DESKREALM_TEST_INSTALLER_INTEROP": setup.delivery.json_bytes(config).decode()},
+                       check=True)
         with self.assertRaises(subprocess.CalledProcessError):
             setup.verify(signed, unsigned, host, ca, alternate, self.authenticode, fixture.openssl)
         x64 = signed / setup.setup_name("x64")
@@ -68,6 +84,8 @@ class WindowsInstallerTests(unittest.TestCase):
         x64.write_bytes(arm64.read_bytes())
         with self.assertRaises(subprocess.CalledProcessError):
             setup.verify(signed, unsigned, host, ca, cert, self.authenticode, fixture.openssl)
+        with self.assertRaises(ValueError):
+            setup.stage_attestation(statement, signed, attestation_private, fixture.public, directory, fixture.openssl)
         weak = fixture.root / "weak"
         weak.mkdir()
         subprocess.run([self.authenticode, "sign", "-certs", str(cert), "-key", str(private), "-h", "sha1",

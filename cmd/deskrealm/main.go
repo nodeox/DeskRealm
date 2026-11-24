@@ -128,6 +128,14 @@ func run(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	store.WindowsInstallers, err = store.WindowsDelivery.ConfigureInstallers(
+		os.Getenv("DESKREALM_WINDOWS_INSTALLER_ATTESTATION_KEY_FILE"), os.Getenv("DESKREALM_WINDOWS_INSTALLER_SIGNER_SHA256"))
+	if err != nil {
+		return err
+	}
+	if store.WindowsInstallers != nil && store.WindowsReleases == nil {
+		return errors.New("Windows installer publication requires DESKREALM_WINDOWS_RELEASE_DIR")
+	}
 	transport, err := m1.ConfigureManagedTransport(os.Getenv("DESKREALM_MANAGED_RENDEZVOUS_TOKEN"),
 		os.Getenv("DESKREALM_MANAGED_RELAY_ID"), os.Getenv("DESKREALM_MANAGED_RELAY_TOKEN"))
 	if err != nil {

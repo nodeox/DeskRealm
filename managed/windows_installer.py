@@ -19,6 +19,9 @@ from windows_build import require
 
 SETUP = "./cmd/deskrealm-windows-setup"
 MAX_SIGNED_INSTALLER = delivery.MAX_ZIP + (80 << 20)
+ATTESTATION_PREFIX = b"DeskRealm/windows-installer-attestation/v1\x00"
+STATEMENT = "installer-verification.json"
+SIGNATURE = "installer-verification.sig"
 INPUTS = (
     "managed/windows_installer.py", "managed/windows_package.py", "managed/windows_build.py",
     "cmd/deskrealm-windows-setup", "internal/windowssetup", "internal/windowsdelivery", "go.mod", "go.sum",
@@ -61,6 +64,11 @@ def snapshot(source, destination, limit):
             out.write(chunk)
         require(remaining == 0, f"file shrank during verification: {source.name}")
     return size, digest.hexdigest()
+
+
+def matches_file(path, size, digest):
+    with delivery.open_regular(path) as present:
+        return os.fstat(present.fileno()).st_size == size and build.sha_stream(present) == digest
 
 
 def prepare(approval, candidate, signature, key, stage, work, openssl):
@@ -110,11 +118,41 @@ def verify(signed, unsigned, host, ca, signer, authenticode, openssl):
             digests = re.findall(r"^Message digest algorithm\s*:\s*(\w+)\s*$", verified.stdout, re.MULTILINE)
             require(len(digests) >= 2 and set(digests) == {"SHA256"},
                     f"{arch}: Authenticode and image digests must use SHA-256")
-            with delivery.open_regular(submitted) as present:
-                require(os.fstat(present.fileno()).st_size == size and build.sha_stream(present) == digest,
-                        f"{arch}: installer changed during verification")
+            require(matches_file(submitted, size, digest), f"{arch}: installer changed during verification")
             installers[arch] = {"file": name, "sha256": digest, "bytes": size}
     return {"signer_sha256": signer_sha, "installers": installers}
+
+
+def stage_attestation(statement, signed, key, release_key, directory, openssl):
+    public = subprocess.check_output([openssl, "pkey", "-in", str(key), "-pubout", "-outform", "DER"])
+    release_public = subprocess.check_output([openssl, "pkey", "-pubin", "-in", str(release_key), "-outform", "DER"])
+    require(len(public) == 44 and public[:12] == bytes.fromhex("302a300506032b6570032100")
+            and public != release_public, "installer attestation requires a separate Ed25519 key")
+    raw = delivery.json_bytes(statement)
+    expected = hashlib.sha256(raw).hexdigest()
+    destination = directory / expected
+    with tempfile.TemporaryDirectory(prefix=".deskrealm-attestation-", dir=directory) as work:
+        work = Path(work)
+        stage = work / "stage"
+        stage.mkdir()
+        for pkg in statement["installers"].values():
+            size, digest = snapshot(signed / pkg["file"], stage / pkg["file"], pkg["bytes"])
+            require(size == pkg["bytes"] and digest == pkg["sha256"], "installer changed after verification")
+        message = work / "message"
+        message.write_bytes(ATTESTATION_PREFIX + raw)
+        signature = subprocess.check_output([openssl, "pkeyutl", "-sign", "-rawin", "-inkey", str(key), "-in", str(message)])
+        require(len(signature) == 64, "invalid installer attestation signature")
+        (stage / STATEMENT).write_bytes(raw)
+        (stage / SIGNATURE).write_bytes(signature)
+        try:
+            stage.rename(destination)
+        except OSError:
+            require(destination.is_dir() and not destination.is_symlink()
+                    and delivery.read_small(destination / STATEMENT) == raw
+                    and delivery.read_small(destination / SIGNATURE, 64) == signature
+                    and all(matches_file(destination / p["file"], p["bytes"], p["sha256"])
+                            for p in statement["installers"].values()), "attestation already exists with different contents")
+    return expected
 
 
 def main():
@@ -129,6 +167,8 @@ def main():
             command.add_argument("code_signing_ca", type=Path)
             command.add_argument("code_signing_cert", type=Path)
             command.add_argument("--osslsigncode", default="osslsigncode")
+            command.add_argument("--attestation-key", type=Path)
+            command.add_argument("--attestation-directory", type=Path)
     args = parser.parse_args()
     try:
         commit = source_commit()
@@ -147,9 +187,18 @@ def main():
             if args.mode == "prepare":
                 stage.rename(destination)
             else:
+                require(bool(args.attestation_key) == bool(args.attestation_directory),
+                        "provide the attestation key and output directory together")
                 evidence = verify(destination, stage, host, args.code_signing_ca.absolute(),
                                   args.code_signing_cert.absolute(), args.osslsigncode, args.openssl)
-                print(delivery.json_bytes({"source_commit": commit, "release_sha256": release_sha, **evidence}).decode().rstrip())
+                statement = {"schema": 1, "scope": "authenticode-development", "source_commit": commit,
+                             "release_sha256": release_sha, **evidence}
+                if args.attestation_key:
+                    expected = stage_attestation(statement, destination, args.attestation_key.absolute(),
+                                                 args.release_key.absolute(), args.attestation_directory.absolute(), args.openssl)
+                    print(delivery.json_bytes({"evidence_sha256": expected, **statement}).decode().rstrip())
+                else:
+                    print(delivery.json_bytes(statement).decode().rstrip())
     except (OSError, ValueError, TypeError, KeyError, BadZipFile, subprocess.CalledProcessError) as error:
         print(f"DeskRealm Windows installer: {error}", file=sys.stderr)
         return 1

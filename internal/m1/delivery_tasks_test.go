@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -291,6 +292,9 @@ func TestDeliveryTaskBrowserPostgres(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	signer := strings.Repeat("b", 64)
+	installerVerifier, attester := configureInstallerFixture(t, verifier, signer)
+	store.WindowsInstallers = installerVerifier
 	h, admin, csrf, _ := adminSession(t, ctx, store)
 	groupResponse := request(h, "POST", "/v1/admin/device-groups", testOrigin, map[string]string{"name": "Windows 工作台"}, admin, csrf)
 	checkCode(t, groupResponse, 201, "")
@@ -302,6 +306,7 @@ func TestDeliveryTaskBrowserPostgres(t *testing.T) {
 	manifest := windowsFixtureStage(t, spool, approval, private)
 	approval.Version = "0.1.0-dev.4"
 	releaseCandidate := windowsFixtureStage(t, spool, approval, private)
+	installerEvidence, _, _ := windowsInstallerFixture(t, spool, releaseCandidate, signer, attester, "browser installer")
 	queuedWindows := request(h, "POST", tasksPath+"/windows-delivery", testOrigin,
 		map[string]string{"request_key": "browser-release", "manifest_sha256": releaseCandidate}, admin, csrf)
 	checkCode(t, queuedWindows, 202, "")
@@ -341,7 +346,8 @@ func TestDeliveryTaskBrowserPostgres(t *testing.T) {
 	command.Dir = root
 	command.Env = append(os.Environ(), "DESKREALM_BROWSER_BASE="+server.URL, "DESKREALM_BROWSER_OUTPUT="+scratch,
 		"DESKREALM_BROWSER_REPORT="+report, "DESKREALM_BROWSER_DELIVERY_TASK="+task, "DESKREALM_BROWSER_CANCEL_TASK="+cancelTask,
-		"DESKREALM_BROWSER_WINDOWS_MANIFEST="+manifest, "DESKREALM_BROWSER_WINDOWS_RELEASE_TASK="+releaseTask)
+		"DESKREALM_BROWSER_WINDOWS_MANIFEST="+manifest, "DESKREALM_BROWSER_WINDOWS_RELEASE_TASK="+releaseTask,
+		"DESKREALM_BROWSER_WINDOWS_INSTALLER_EVIDENCE="+installerEvidence)
 	output, err := command.CombinedOutput()
 	if err != nil {
 		t.Fatalf("Chromium delivery task regression: %v\n%s", err, output)

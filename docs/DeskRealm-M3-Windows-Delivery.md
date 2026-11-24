@@ -120,7 +120,28 @@ python3 -B managed/windows_installer.py verify \
 
 安装器以当前 Windows 用户运行。它通过 Windows Authenticode 信任检查后，按归档摘要安装到本地用户的 `Programs\DeskRealm\releases`，并创建指向 `DeskRealm.exe` 的开始菜单入口。重新安装相同归档会检查已有文件。新版本解压成功后才更新入口，旧安装目录及登记状态继续保留。部署凭据仍通过上一节的流程单独下发。
 
-本轮验证使用临时开发 CA。中心的分组下载暂以 ZIP 为交付物，签名安装器的发布记录与下载接入后续完成。
+### 中心发布签名安装器
+
+独立验签环境可以在验签通过后生成分离签名证据和两个安装器文件。验签证据使用专用的 Ed25519 密钥签名，密钥与 ZIP 签名密钥、代码签名证书和中心密钥分别管理。中心只配置证据验证公钥及组织批准的发布者证书 SHA-256 指纹。
+
+```bash
+python3 -B managed/windows_installer.py verify \
+  approval.json candidate release.sig developer-public.pem signed \
+  code-signing-ca.pem publisher.pem \
+  --attestation-key installer-attestation-private.pem \
+  --attestation-directory verified
+```
+
+将命令生成的 `verified/<evidence_sha256>/` 目录整体放到中心暂存区的 `installers/` 下。目录包含 `installer-verification.json`、`installer-verification.sig`、`DeskRealm-Setup-x64.exe` 和 `DeskRealm-Setup-arm64.exe`。在启用 ZIP 发布配置后，给中心配置以下两项。
+
+| 环境变量 | 内容 |
+| --- | --- |
+| `DESKREALM_WINDOWS_INSTALLER_ATTESTATION_KEY_FILE` | 独立验签环境的 Ed25519 公钥 PEM 文件 |
+| `DESKREALM_WINDOWS_INSTALLER_SIGNER_SHA256` | 预先批准的 Authenticode 发布者证书 DER SHA-256，小写十六进制 |
+
+平台管理员在已发布版本的「Windows 发布」页选择「发布签名安装器」，填入证据 SHA-256。中心验证证据签名、ZIP 发布清单关联、证书指纹及两个安装器的实际摘要，再把验签证据和文件保存至发布目录。相同证据重复提交返回同一记录。每个已发布版本关联一套安装器，替换安装器时发布新版本。获准下载 ZIP 的设备组可下载对应安装器。撤回发布后两个下载入口都失效，发放、下载与撤回由中心审计。
+
+开发验证使用临时开发 CA。正式签名及目标 Windows 的证书信任按组织交付策略配置。
 
 ```bash
 bash scripts/deskrealm-m3-test signed-build

@@ -7,7 +7,8 @@ test('任务中心展示外部回执并处理重试与执行前取消', async ({
   const cancelTask = process.env.DESKREALM_BROWSER_CANCEL_TASK
   const manifest = process.env.DESKREALM_BROWSER_WINDOWS_MANIFEST
   const releaseTask = process.env.DESKREALM_BROWSER_WINDOWS_RELEASE_TASK
-  if (!retryTask || !cancelTask || !manifest || !releaseTask) throw new Error('Run scripts/deskrealm-m3-test delivery-tasks')
+  const installerEvidence = process.env.DESKREALM_BROWSER_WINDOWS_INSTALLER_EVIDENCE
+  if (!retryTask || !cancelTask || !manifest || !releaseTask || !installerEvidence) throw new Error('Run scripts/deskrealm-m3-test delivery-tasks')
   await page.goto('/login')
   await page.getByLabel('账号').fill('admin')
   await page.getByLabel('密码', { exact: true }).fill('deskrealm test passphrase')
@@ -64,6 +65,19 @@ test('任务中心展示外部回执并处理重试与执行前取消', async ({
   expect(result.suggestedFilename()).toBe('DeskRealm-arm64.zip')
   const checksum = createHash('sha256').update(await readFile(await result.path())).digest('hex')
   await expect(release.getByText(checksum, { exact: true })).toHaveCount(1)
+
+  await release.getByRole('button', { name: '发布签名安装器' }).click()
+  const installer = page.getByRole('dialog', { name: '发布 0.1.0-dev.4 安装器' })
+  await installer.getByLabel('安装器验签证据 SHA-256').fill(installerEvidence)
+  await installer.getByRole('button', { name: '确认发布安装器' }).click()
+  const installerLink = release.getByRole('link', { name: '安装器 ARM64' })
+  await expect(installerLink).toBeVisible()
+  const installerDownload = page.waitForEvent('download')
+  await installerLink.click()
+  const installerResult = await installerDownload
+  expect(installerResult.suggestedFilename()).toBe('DeskRealm-Setup-arm64.exe')
+  const installerSHA = createHash('sha256').update(await readFile(await installerResult.path())).digest('hex')
+  await expect(release.getByText(installerSHA, { exact: true })).toHaveCount(1)
 
   await release.getByRole('button', { name: '撤回发布' }).click()
   await page.getByRole('dialog', { name: '撤回发布' }).getByRole('button', { name: '确认撤回' }).click()

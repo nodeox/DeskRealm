@@ -43,10 +43,11 @@ var (
 )
 
 type Store struct {
-	DB              *pgxpool.Pool
-	Delivery        DeliveryExecutor
-	WindowsDelivery *windowsdelivery.Verifier
-	WindowsReleases *windowsdelivery.Releases
+	DB                *pgxpool.Pool
+	Delivery          DeliveryExecutor
+	WindowsDelivery   *windowsdelivery.Verifier
+	WindowsReleases   *windowsdelivery.Releases
+	WindowsInstallers *windowsdelivery.InstallerVerifier
 }
 
 func Migrate(ctx context.Context, dsn string) error {

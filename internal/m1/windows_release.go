@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -20,11 +21,12 @@ type windowsRelease struct {
 	Packages    map[string]windowsdelivery.Package `json:"packages"`
 	Published   time.Time                          `json:"published_at"`
 	Revoked     *time.Time                         `json:"revoked_at,omitempty"`
+	Installer   *windowsInstallerPublication       `json:"installer_publication,omitempty"`
 	manifestSHA string
 	task        string
 }
 
-const windowsReleaseColumns = `SELECT r.id,r.version,r.signature_scope,r.packages,r.published_at,r.revoked_at,r.manifest_sha256,r.task_id`
+const windowsReleaseColumns = `SELECT r.id,r.version,r.signature_scope,r.packages,r.published_at,r.revoked_at,r.installer_publication,r.manifest_sha256,r.task_id`
 
 const windowsReleaseAccess = ` FROM windows_releases r WHERE r.organization_id=$1 AND ($3 OR (
 	r.revoked_at IS NULL AND EXISTS (
@@ -35,7 +37,7 @@ const windowsReleaseAccess = ` FROM windows_releases r WHERE r.organization_id=$
 func scanWindowsRelease(row pgx.Row) (windowsRelease, error) {
 	var result windowsRelease
 	err := row.Scan(&result.ID, &result.Version, &result.Scope, &result.Packages, &result.Published, &result.Revoked,
-		&result.manifestSHA, &result.task)
+		&result.Installer, &result.manifestSHA, &result.task)
 	return result, err
 }
 
@@ -63,13 +65,15 @@ func (a *API) listWindowsReleases(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx := r.Context()
 	result := struct {
-		Releases []windowsRelease `json:"releases"`
-		Next     string           `json:"next_cursor,omitempty"`
+		Releases             []windowsRelease `json:"releases"`
+		Next                 string           `json:"next_cursor,omitempty"`
+		CanPublishInstallers bool             `json:"can_publish_installers,omitempty"`
 	}{Releases: []windowsRelease{}}
 	err := a.withActor(r, false, func(tx pgx.Tx, who actor) error {
 		if a.store.WindowsReleases == nil {
 			return errWindowsDeliveryUnavailable
 		}
+		result.CanPublishInstallers = who.PlatformAdmin && a.store.WindowsInstallers != nil
 		rows, err := tx.Query(ctx, windowsReleaseColumns+windowsReleaseAccess+
 			` AND ($4::timestamptz IS NULL OR (r.published_at,r.id)<($4,NULLIF($5,'')::uuid))
 			ORDER BY r.published_at DESC,r.id DESC LIMIT $6`,
@@ -253,6 +257,24 @@ func (a *API) revokeWindowsRelease(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) downloadWindowsRelease(w http.ResponseWriter, r *http.Request) {
+	a.downloadWindowsArtifact(w, r, false)
+}
+
+func (a *API) downloadWindowsInstaller(w http.ResponseWriter, r *http.Request) {
+	a.downloadWindowsArtifact(w, r, true)
+}
+
+func (r windowsRelease) artifact(arch string, installer bool) (string, windowsdelivery.Package, time.Time) {
+	if !installer {
+		return r.manifestSHA, r.Packages[arch], r.Published
+	}
+	if r.Installer == nil {
+		return "", windowsdelivery.Package{}, time.Time{}
+	}
+	return r.Installer.EvidenceSHA, r.Installer.Installers[arch], r.Installer.PublishedAt
+}
+
+func (a *API) downloadWindowsArtifact(w http.ResponseWriter, r *http.Request, installer bool) {
 	id, arch := r.PathValue("id"), r.PathValue("arch")
 	if !userIDPattern.MatchString(id) || (arch != "x64" && arch != "arm64") {
 		failure(w, "download Windows release", errWindowsReleaseMissing)
@@ -275,8 +297,19 @@ func (a *API) downloadWindowsRelease(w http.ResponseWriter, r *http.Request) {
 		failure(w, "download Windows release", err)
 		return
 	}
-	pkg := release.Packages[arch]
-	file, err := a.store.WindowsReleases.Open(ctx, release.manifestSHA, arch, pkg)
+	snapshot, pkg, published := release.artifact(arch, installer)
+	if pkg.File == "" {
+		failure(w, "download Windows release", errWindowsReleaseMissing)
+		return
+	}
+	var file *os.File
+	contentType, reason := "application/zip", arch
+	if installer {
+		contentType, reason = "application/octet-stream", "installer:"+arch
+		file, err = a.store.WindowsReleases.OpenInstaller(ctx, snapshot, arch, pkg)
+	} else {
+		file, err = a.store.WindowsReleases.Open(ctx, snapshot, arch, pkg)
+	}
 	if err != nil {
 		failure(w, "download Windows release", releaseVerificationError(err))
 		return
@@ -290,11 +323,12 @@ func (a *API) downloadWindowsRelease(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return err
 		}
-		if current.Revoked != nil || current.manifestSHA != release.manifestSHA || current.Packages[arch] != pkg {
+		currentSnapshot, currentPackage, _ := current.artifact(arch, installer)
+		if current.Revoked != nil || currentSnapshot != snapshot || currentPackage != pkg {
 			return errWindowsReleaseMissing
 		}
 		if r.Method == http.MethodGet {
-			return auditWindowsRelease(ctx, tx, who, id, current.task, "windows_release.download_authorized", arch)
+			return auditWindowsRelease(ctx, tx, who, id, current.task, "windows_release.download_authorized", reason)
 		}
 		return nil
 	})
@@ -303,10 +337,10 @@ func (a *API) downloadWindowsRelease(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(5 * time.Minute))
-	w.Header().Set("Content-Type", "application/zip")
+	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("Content-Disposition", `attachment; filename="`+pkg.File+`"`)
 	w.Header().Set("ETag", `"`+pkg.SHA+`"`)
-	http.ServeContent(w, r, pkg.File, release.Published, file)
+	http.ServeContent(w, r, pkg.File, published, file)
 }
 
 func releaseVerificationError(err error) error {

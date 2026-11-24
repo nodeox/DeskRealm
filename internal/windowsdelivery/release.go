@@ -119,7 +119,11 @@ func syncDirectory(root *os.Root) error {
 }
 
 func copyArchive(ctx context.Context, source, target *os.Root, pkg Package) error {
-	from, size, err := regular(source, path.Join("bundle", pkg.File))
+	return copyVerifiedFile(ctx, source, target, path.Join("bundle", pkg.File), pkg)
+}
+
+func copyVerifiedFile(ctx context.Context, source, target *os.Root, sourceName string, pkg Package) error {
+	from, size, err := regular(source, sourceName)
 	if err != nil {
 		return err
 	}
@@ -144,7 +148,11 @@ func copyArchive(ctx context.Context, source, target *os.Root, pkg Package) erro
 }
 
 func checkSnapshot(ctx context.Context, root *os.Root, manifest Manifest) error {
-	for _, pkg := range manifest.Packages {
+	return checkPackages(ctx, root, manifest.Packages)
+}
+
+func checkPackages(ctx context.Context, root *os.Root, packages map[string]Package) error {
+	for _, pkg := range packages {
 		file, err := verifiedArchive(ctx, root, pkg)
 		if err != nil {
 			return err
