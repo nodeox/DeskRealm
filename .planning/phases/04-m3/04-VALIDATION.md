@@ -378,3 +378,19 @@ Task 2 接续已建立会话断线后的新授权重选、会话页明细和跨�
 证据保存在 Git 目录 `deskrealm-evidence/m3/737454d480be763754aeb9db2262dd36e28d5be8/`。双架构交叉编译日志 `launcher-cross-build.log` 的 SHA-256 为 `20184bcf8964f597dee44280f2a292d9aea6f6de6a0865911db3cb10fbb1f8ee`，`launcher-go.log` 为 `a9708e382f8dcaf29e63f96e58375c52c48f27da873aaac08d7e61dff70f5d00`，`managed-release.log` 为 `db9773b3a7b6460adccb5d3e61cdd0840e3e76fab17beed304c26f7fa98718b0`，`signed-build.log` 为 `a3a4ca8db559dd3ea89ae476afaef0ed2ae6343b97032b216fdba5edf072eb1d`。
 
 开发包的启动入口已约定从已验证归档手动解压布置。签名安装器、含启动程序的原生 CI 工件验签和目标环境的首次启动、直连及强制中继验证继续推进。
+
+## 04-05 Authenticode 开发安装器
+
+2026-11-24，候选 `35a2a4e02359f0e82c545ee735148a478b387abe` 支持从批准 ZIP 构建 x64、ARM64 自包含安装器。构建端复核原清单签名、归档摘要及内部 PE 架构。独立核验端重建未签安装器，核对签后原始映像、SHA-256 Authenticode、批准 CA 和发布者证书指纹。
+
+| 检查 | 结果 |
+| --- | --- |
+| 实际签名 | Go 交叉编译的两个 PE 使用隔离容器内的 osslsigncode 2.5 和临时开发 CA 签名。独立测试通过两个架构的证书链、证书指纹和映像摘要，并拒绝同 CA 下另一发布者证书、互换的架构包、SHA-1 签名及修改过的映像。 |
+| 解压和重复安装 | Go 测试验证原归档及公开配置按内容摘要安装，重复安装沿用同一目录并核对已有文件，拒绝路径穿越、Windows 保留名称、重名、覆盖公开配置及本地文件变更。 |
+| 支持范围 | 开发验证使用合成客户端归档和真实 Authenticode 签名。Windows 安装器使用系统 WinTrust 后才解压，并在完整解压后更新开始菜单入口。Windows 上的系统调用及首次启动仍待运行验证。 |
+
+中心分组发布当前提供 ZIP。含启动程序的原生 CI 已通过两架构桥接，原生构建和验证还在运行。下一步将签名安装器证据及分组下载接入中心。 [Windows 原生构建](https://github.com/nodeox/DeskRealm/actions/runs/45380636466)
+
+2026-11-24，候选 `1f0b09286ffe6dc335de2706eabbb324bf20b29a` 使用临时 CA 和非生产发布者证书完成 Authenticode 用例。核验通过 x64、ARM64、同受信 CA 另一张证书拒绝、安装器互换拒绝、SHA-1 摘要拒绝和归档摘要复验。Go 全量测试通过。真实签名校验日志 `deskrealm-evidence/m3/1f0b09286ffe6dc335de2706eabbb324bf20b29a/windows-installer.log` 的 SHA-256 为 `6f60dc88c7e646c9205fb3bccbffdd8330b687586941d97c866dbbc0c9936500`。正式安装器签名须使用组织发布者证书并配置 RFC 3161 时间戳。
+
+含启动程序的 Windows CI 候选 `71079b6` 的 ARM64 原生归档已下载并通过本地复验。该归档 `client.zip` 的 SHA-256 为 `51533d6bb73589d88d9f7cab9c9b47d807108b80442784848696f64dc5971a53`。x64 原生构建仍在运行。Go 全量检查和 14 项 Python 构建与打包回归通过。当前提交的 PostgreSQL 专项复跑因本机 Docker 无响应中断。

@@ -110,7 +110,7 @@ python3 -B managed/windows_installer.py prepare \
   approval.json candidate release.sig developer-public.pem unsigned
 ```
 
-独立签名环境以组织批准的代码签名证书和 SHA-256 为 `unsigned/DeskRealm-Setup-x64.exe`、`unsigned/DeskRealm-Setup-arm64.exe` 签名，将签后文件以相同文件名放在 `signed`。开发签名证书的私钥由签名环境持有。验证端独立保存已批准的 CA 及发布者证书，重建未签安装器，比较签名前后的字节，核对签名链、签名算法及发布者证书 SHA-256。
+独立签名环境以组织批准的代码签名证书和 SHA-256 为 `unsigned/DeskRealm-Setup-x64.exe`、`unsigned/DeskRealm-Setup-arm64.exe` 签名，将签后文件以相同文件名放在 `signed`。为让签名在证书过期后继续可验证，正式签名同时使用组织批准的 RFC 3161 时间戳服务及 SHA-256 时间戳摘要。发布者证书及私钥由签名环境持有。验证端独立保存批准的 CA 及发布者证书，重建未签安装器，比较签名前后的字节，核对签名链、摘要算法及发布者证书 SHA-256。
 
 ```bash
 python3 -B managed/windows_installer.py verify \

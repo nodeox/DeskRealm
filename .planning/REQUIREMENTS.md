@@ -81,7 +81,7 @@ M4 包括浏览器主控、原生 LDAP、邮件验证和恢复、更多平台、
 | NFR-01 | Phase 3 | Complete (开发验证) |
 | FR-01 | Phase 4 | Complete (04-01 开发验证) |
 | FR-05 | Phase 4 | Partial (开发 ZIP 签名与中心验签任务通过，接续当前原生工件、安装器和配置读取) |
-| FR-06 | Phase 4 | Partial (开发 ZIP 分组发布、单设备凭据和首次启动登记逻辑通过，部署工具交付和签名安装器继续开发) |
+| FR-06 | Phase 4 | Partial (ZIP 分组发布、单设备凭据、首次启动登记逻辑及安装器 Authenticode 开发签名核验通过，安装器分组发布及部署工具交付继续开发) |
 | FR-14 | Phase 4 | Complete (登记、双节点验活、容量、生命周期和控制台开发验证通过) |
 | FR-15 | Phase 4 | Complete (04-04 开发验证，目标网络和 Windows 留待 Phase 5) |
 | FR-16 | Phase 4 | Partial (安装记录导入、可恢复执行及中心开发签名包验证通过，发布和升级场景接续后续计划) |
