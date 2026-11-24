@@ -74,7 +74,28 @@ CANDIDATE_DIR/<manifest-sha256>/
 
 持有目标设备组读取委派的成员可在「Windows 发布」下载 x64 或 ARM64 ZIP。每次请求会核对当前会话、组权限、撤回状态和归档摘要。删除委派或撤回后，后续下载请求会被拒绝。工作台公开各架构的 SHA-256，下载支持 HTTP Range。平台管理员可以查看已撤回条目，审计保留发布、授权下载和撤回记录。
 
-分组下载目前使用控制台登录会话。部署工具凭据、Windows 安装器和设备免填登记继续开发。
+## 单台设备的部署凭据
+
+平台管理员或目标设备组的审批人可以为该组已发布的开发包发放凭据。发放、查询和撤销使用中心管理会话。写操作同时要求 CSRF 校验。
+
+1. 部署端在目标设备生成并保留设备 Ed25519 密钥，收集 RustDesk ID 和架构。向授权渠道提供 ID、架构和标准 Base64 编码的设备公钥。
+2. 向 `POST /v1/windows-releases/{release_id}/deployments` 提交下表字段。中心返回 `credential`、`expires_at` 及供查询的 `deployment_id`。通过组织的部署渠道将凭据单独传给该设备。公开归档只携带中心公开配置。
+3. 设备向 `POST /v1/enrollment/challenge` 提交凭据及 `group_id`、`platform`、`rustdesk_id`、`public_key`。其中 `platform` 值为 `windows-amd64` 或 `windows-arm64`。使用本机私钥签署既有登记挑战，再向 `POST /v1/enrollment/complete` 提交相同数据、`attempt_id` 和标准 Base64 编码的签名。
+4. 通过 `GET /v1/windows-releases/{release_id}/deployments/{deployment_id}` 查询凭据状态、设备登记结果、期望策略版本及已应用版本。待审批设备可从设备管理页审批。设备以既有协议上报策略应用回执。
+
+| 发放字段 | 内容 |
+| --- | --- |
+| `deployment_id` | 部署方为单次单台设备部署保留的 UUID |
+| `group_id` | 该发布已批准的目标组 UUID |
+| `arch` | `x64` 或 `arm64` |
+| `rustdesk_id` 与 `public_key` | 目标设备的 RustDesk ID 与 Ed25519 公钥 |
+| `purpose` | 审批用途文字 |
+| `lifetime_minutes` | 1 到 1440 分钟 |
+| `auto_approve` | 默认进入待审批。平台管理员可选择自动审批，设备提交有效持钥证明时中心复核发放人的权限 |
+
+发布有效且发放人仍有审批权限时，使用原输入和部署 UUID 重试会保留原到期时间，并在凭据可用时返回原凭据。需要重新发放时使用新的部署 UUID。审批人可通过 `POST /v1/windows-releases/{release_id}/deployments/{deployment_id}/revoke` 提交空 JSON 对象撤销待用凭据。撤回发布也会使对应的待用凭据失效。已登记设备的后续停用和回收通过设备管理执行。中心持久化凭据摘要和登记回执，部署渠道应保护凭据传递和设备私钥。
+
+当前可通过中心接口验证分组发布、登记、审批及策略回执。Windows 安装器读取公开配置与自动提交登记仍在开发。
 
 ```bash
 bash scripts/deskrealm-m3-test signed-build

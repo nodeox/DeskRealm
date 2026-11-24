@@ -206,6 +206,9 @@ func NewHandler(store Store, origin *url.URL, web fs.FS, config ...AuthConfig) h
 	mux.HandleFunc("POST /v1/admin/windows-releases/{id}/revoke", api.revokeWindowsRelease)
 	mux.HandleFunc("GET /v1/windows-releases", api.listWindowsReleases)
 	mux.HandleFunc("GET /v1/windows-releases/{id}/{arch}", api.downloadWindowsRelease)
+	mux.HandleFunc("POST /v1/windows-releases/{id}/deployments", api.issueWindowsEnrollment)
+	mux.HandleFunc("GET /v1/windows-releases/{id}/deployments/{deployment}", api.getWindowsEnrollment)
+	mux.HandleFunc("POST /v1/windows-releases/{id}/deployments/{deployment}/revoke", api.revokeWindowsEnrollment)
 	mux.HandleFunc("POST /v1/admin/tasks/{id}/retry", api.retryTask)
 	mux.HandleFunc("POST /v1/admin/tasks/{id}/cancel", api.cancelTask)
 	apiNotFound := func(w http.ResponseWriter, _ *http.Request) {

@@ -122,14 +122,26 @@ type lockedEnrollment struct {
 	Issuer                              string
 	Expires                             time.Time
 	Live, Consumed                      bool
+	Deployment, ReleaseTask, RustDeskID string
+	PublicKey                           []byte
+	AutoApprove                         bool
+}
+
+func (e lockedEnrollment) matches(in enrollmentRequest, key []byte) bool {
+	return e.GroupID == in.GroupID && e.Platform == in.Platform &&
+		(e.Deployment == "" || (e.RustDeskID == in.RustDeskID && bytes.Equal(e.PublicKey, key)))
 }
 
 func lockEnrollment(ctx context.Context, tx pgx.Tx, credential string) (lockedEnrollment, error) {
 	var e lockedEnrollment
-	err := tx.QueryRow(ctx, `SELECT id,organization_id,group_id,platform,expires_at,
-		expires_at>clock_timestamp(),consumed_at IS NOT NULL,issued_by
-		FROM enrollment_credentials WHERE digest=$1 FOR UPDATE`, digest(credential)).
-		Scan(&e.ID, &e.Organization, &e.GroupID, &e.Platform, &e.Expires, &e.Live, &e.Consumed, &e.Issuer)
+	err := tx.QueryRow(ctx, `SELECT e.id,e.organization_id,e.group_id,e.platform,e.expires_at,
+		e.expires_at>clock_timestamp() AND b.revoked_at IS NULL AND r.revoked_at IS NULL,
+		e.consumed_at IS NOT NULL,e.issued_by,COALESCE(b.deployment_id::text,''),
+		COALESCE(r.task_id::text,''),COALESCE(b.rustdesk_id,''),b.public_key,COALESCE(b.auto_approve,false)
+		FROM enrollment_credentials e LEFT JOIN windows_enrollment_bindings b ON b.credential_id=e.id
+		LEFT JOIN windows_releases r ON r.id=b.release_id WHERE e.digest=$1 FOR UPDATE OF e`, digest(credential)).
+		Scan(&e.ID, &e.Organization, &e.GroupID, &e.Platform, &e.Expires, &e.Live, &e.Consumed, &e.Issuer,
+			&e.Deployment, &e.ReleaseTask, &e.RustDeskID, &e.PublicKey, &e.AutoApprove)
 	if errors.Is(err, pgx.ErrNoRows) {
 		err = errEnrollment
 	}
@@ -161,7 +173,7 @@ func (s Store) challengeEnrollment(ctx context.Context, in enrollmentRequest, ke
 		if err != nil {
 			return err
 		}
-		if !e.Live || e.Consumed || e.GroupID != in.GroupID || e.Platform != in.Platform {
+		if !e.Live || e.Consumed || !e.matches(in, key) {
 			return errEnrollment
 		}
 		allowed, err := enrollmentIssuerAllowed(ctx, tx, e.ID)
@@ -218,15 +230,15 @@ func (s Store) completeEnrollment(ctx context.Context, in enrollmentRequest, key
 		if err != nil {
 			return err
 		}
-		if e.GroupID != in.GroupID || e.Platform != in.Platform {
+		if !e.matches(in, key) {
 			return errEnrollment
 		}
 		var storedKey []byte
-		var nonce, group, platform, rustdeskID string
+		var nonce, group, platform, rustdeskID, receiptState string
 		var live bool
 		err = tx.QueryRow(ctx, `SELECT nonce,group_id,platform,rustdesk_id,public_key,expires_at>clock_timestamp(),
-			COALESCE(device_id::text,'') FROM enrollment_attempts WHERE id=$1 AND credential_id=$2`, in.AttemptID, e.ID).
-			Scan(&nonce, &group, &platform, &rustdeskID, &storedKey, &live, &out.DeviceID)
+			COALESCE(device_id::text,''),receipt_state FROM enrollment_attempts WHERE id=$1 AND credential_id=$2`, in.AttemptID, e.ID).
+			Scan(&nonce, &group, &platform, &rustdeskID, &storedKey, &live, &out.DeviceID, &receiptState)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return errEnrollment
 		}
@@ -249,7 +261,7 @@ func (s Store) completeEnrollment(ctx context.Context, in enrollmentRequest, key
 				return errEnrollment
 			}
 			// A completed request always returns its original receipt. The status API tracks subsequent decisions.
-			out.State = "pending"
+			out.State = receiptState
 			return nil
 		}
 		if !live || !e.Live || e.Consumed {
@@ -298,7 +310,10 @@ func (s Store) completeEnrollment(ctx context.Context, in enrollmentRequest, key
 		}
 		_, err = addAuditEvent(ctx, tx, auditEvent{OrganizationID: e.Organization, ResourceID: out.DeviceID,
 			TaskID: taskID, DeviceGroupID: e.GroupID, Action: "device.enrollment_pending", Result: "success"})
-		return err
+		if err != nil || e.Deployment == "" {
+			return err
+		}
+		return finishWindowsEnrollment(ctx, tx, e, in.AttemptID, &out)
 	})
 	return out, err
 }

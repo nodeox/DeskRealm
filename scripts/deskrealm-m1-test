@@ -40,7 +40,7 @@ case "$mode" in
   relay-selection) tests=(TestSessionRelaySelectionPostgres TestRelaySelectionFallbackOrder TestRegionalRelayPairingPostgres) ;;
   delivery-tasks) tests=(TestDeliveryTaskRecoveryPostgres TestDeliveryTaskBrowserPostgres "${tasks[@]}") ;;
   windows-delivery) tests=(TestWindowsDeliveryPostgres) ;;
-  windows-release) tests=(TestWindowsReleasePostgres) ;;
+  windows-release) tests=(TestWindowsReleasePostgres TestWindowsEnrollmentPostgres) ;;
   overview) tests=("${overview[@]}") ;;
   managed-identity) tests=("${managed_identity[@]}") ;;
   connection-rules) tests=("${managed_rules[@]}") ;;

@@ -140,32 +140,36 @@ func (a *API) decideDevice(w http.ResponseWriter, r *http.Request) {
 		if result.RegistrationState != "pending" {
 			return errDeviceDecision
 		}
-		tag, err := tx.Exec(ctx, `UPDATE registration_approvals SET decision=$2,decided_by=$3,decided_at=now()
-			WHERE device_id=$1 AND decision IS NULL`, id, target, who.ID)
-		if err != nil {
-			return err
-		}
-		if tag.RowsAffected() != 1 {
-			return errDeviceDecision
-		}
-		if err := tx.QueryRow(ctx, `UPDATE devices SET registration_state=$2,version=version+1 WHERE id=$1 RETURNING version`, id, target).
-			Scan(&result.Version); err != nil {
-			return err
-		}
-		result.RegistrationState = target
-		taskID, err := finishEnrollmentTask(ctx, tx, id, who.ID, target)
-		if err != nil {
-			return err
-		}
-		_, err = addAuditEvent(ctx, tx, auditEvent{OrganizationID: who.Organization, ActorID: who.ID, ResourceID: id,
-			TaskID: taskID, DeviceGroupID: result.GroupID, Action: "device." + target, Result: "success"})
-		return err
+		return recordDeviceDecision(ctx, tx, who, &result, target)
 	})
 	if err != nil {
 		failure(w, "decide device", err)
 		return
 	}
 	writeJSON(w, 200, result)
+}
+
+func recordDeviceDecision(ctx context.Context, tx pgx.Tx, who actor, result *device, target string) error {
+	tag, err := tx.Exec(ctx, `UPDATE registration_approvals SET decision=$2,decided_by=$3,decided_at=now()
+		WHERE device_id=$1 AND decision IS NULL`, result.ID, target, who.ID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() != 1 {
+		return errDeviceDecision
+	}
+	if err := tx.QueryRow(ctx, `UPDATE devices SET registration_state=$2,version=version+1 WHERE id=$1 RETURNING version`, result.ID, target).
+		Scan(&result.Version); err != nil {
+		return err
+	}
+	result.RegistrationState = target
+	taskID, err := finishEnrollmentTask(ctx, tx, result.ID, who.ID, target)
+	if err != nil {
+		return err
+	}
+	_, err = addAuditEvent(ctx, tx, auditEvent{OrganizationID: who.Organization, ActorID: who.ID, ResourceID: result.ID,
+		TaskID: taskID, DeviceGroupID: result.GroupID, Action: "device." + target, Result: "success"})
+	return err
 }
 
 func isDeviceEnrollmentRequest(r *http.Request) bool {
