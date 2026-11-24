@@ -471,3 +471,20 @@ Task 2 接续已建立会话断线后的新授权重选、会话页明细和跨�
 本地证据位于 Git 目录 `deskrealm-evidence/m3/` 下各源码提交目录。`4732ce1` 的 `relay-upgrade.log` SHA-256 为 `ac8e2ea875f4b22e2cda2e8689f4f97669d949947b66a3a39c2456cb62bef8e6`，`relay-enrollment.log` 为 `563ed90a62061b5e7ec283f8cd7395fdd2f84b372f6618f888177f5807df1d06`。`3f29bc9` 的 `relay-lifecycle.log` 为 `985c005d93f1c8a51b391743991fa8eb905adb6873b99b30e804e6fd2d4c9673`。`6b4b257` 的 `center-restore-repeat.log` 为 `1f19a922a55614924ce7494176d0aa83cc47420b45171a46a1617631377b0f99`。
 
 升级覆盖与已有配置和会话协议兼容的同构建版本二进制。中心采用迁移 29。接续 Windows 终端分批发布和失败暂停，目标 Linux 和 Windows 环境验收留待 Phase 5。
+
+## 04-06 Windows 分批发布
+
+2026-11-24，候选 `5c336120e166460a9865a0e8e95d19bb7ccb2c51` 接入已登记 Windows 设备分批更新。中心采用迁移 30。平台管理员发布仅通过批次分发的版本，按组和设备 UUID 创建任务。部署工具使用分组令牌领取当前批次的签名安装器。终端通过组织现有设备管理渠道安装，继续使用原设备密钥。管理员根据下载授权、同身份的安装包摘要心跳和策略状态核对设备结果。当前批有失败时保留后续批的等待状态，重试保留已成功设备和过往尝试。指定原签名发布后，可核对失败设备回滚到故障前的包。
+
+| 检查 | 结果 |
+| --- | --- |
+| PostgreSQL 分批发布 | 拒绝组外设备及分组令牌、普通成员、重复请求键的不同内容、普通下载入口和提前领取后续批。通过 x64 与 ARM64 签名安装器元数据绑定、同请求去重、失败暂停、重试保留成功设备、回滚后新心跳核对以及已有心跳和超时隔离。 |
+| Chromium | 发布仅显示批次入口，分批任务提供批次、设备结果和旧版恢复信息。暂停时下一批操作不可用。 |
+| 构建及静态回归 | Go 部署工具、启动器与安装器均交叉编译到 Windows x64 和 ARM64，核对 PE 架构。锁定 Rust 源码成功应用变更并在 Linux 构建互操作测试程序。Go 竞态、`go vet` 和 Vue 类型检查通过。 |
+| 实际 Authenticode 签名 | `ca17281329d8c8854f3072be171f149f05ab1d7e` 修复 osslsigncode 2.5 输出缩进导致算法记录漏读的问题。用临时开发 CA 为两架构夹具安装器签名，验证实际签名并确认拒绝 SHA-1 和不匹配证书。 |
+
+`5c33612` 的本地证据保存在 Git 目录 `deskrealm-evidence/m3/5c336120e166460a9865a0e8e95d19bb7ccb2c51/`。`windows-rollout.log` SHA-256 为 `966c8f3edc76fc33451b1a8bfa5398014097cda149933f4975c54352e3e4a80a`，`windows-go-cross-build.log` 为 `5b6becd1ff32eae1ee1b9608156f090c62527937fa956af6d6b6149df1d8ed3d`，`rust-linux-compile.log` 为 `4c4902ec384c6d70e0e38fe1ca1d2899c3e7bb9062d30fc9e284503d5c8e722c`。
+
+`ca17281` 的 `windows-installer.log` SHA-256 为 `60cb517e0700a7943e59cfdc7bef16813b5248d994b0fc96354dc2ec71015eec`。
+
+现行代码通过现有组织渠道部署，不包含无人值守自更新。带新心跳字段的 Windows Rust 客户端未在本轮生成原生安装包。目标 Linux 及双 Windows 的验收仍由 Phase 5 按原顺序执行。04-06 接续授权样本迁移与 M0–M3 聚合开发门禁。
