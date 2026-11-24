@@ -268,3 +268,20 @@ Task 1 的开发验证完成。当前连接仍使用配置的单中继。Task 2 
 本地 Git 证据目录 `deskrealm-evidence/m3/2c645512405ac517c48ef22a1ab1422dc3a213c2/`。`relay-selection.log` SHA-256 为 `aa51100ad42138d4ebb6391d3ec21a4cff9cdf4eb5e58a25a80ad193d0c0f35d`，`native-relay-selection.log` 为 `686efb8746efcf117856f03dbed594faaac46053fcaf04148e44a117b7fc8e00`，`m1-all.log` 为 `1a64690d927511ca652e3126d27b50f66977eb915c6ea603d999f2ff5255a94d`，`go-vet-test.log` 为 `60be818331e6267067735b01ede3ea5e728c4ff8e892b2c4c152a17569a619a3`。
 
 已实现中心确认、当前状态复核及回退记录。会话实际连接仍未消费该选择，节点级会话票据、`hbbs` 协调与 `hbbr` 区域转发、失败后的真实重连和工作台选点明细仍待开发。Linux 中心与中继的目标环境安装及两台 Windows 的注册、直连、强制中继和服务重建保留公钥验收尚未开始。
+
+## 04-04 区域票据与实际转发
+
+2026-11-24，候选 `e4b0b20620bb402f9d6986e344ffb95236d8ea9a` 通过 `bash scripts/deskrealm-m3-test multi-relay`、Linux ARM64 受管桌面编译检查、原有直连和单中继原生回归、受管 PostgreSQL 回归、Go 全量测试与 vet。
+
+| 检查 | 结果 |
+| --- | --- |
+| 会合与实际转发 | Rust 主控和受控端经实际 Linux `hbbs` 加入同一轮次。两套 `hbbr` 提供 RTT 样本。两端通过所选区域中继配对，使用端到端加密流双向交换数据。PostgreSQL 核销记录中的节点 UUID 与确认选择一致，租约由 1 续到 2。 |
+| 首选失败 | 夹具在首选节点阻断票据连接，保留两节点的验活与 RTT 采样。主控记录首选失败，两端在同一轮次切换至另一节点，完成配对、核销、续租及双向传输。 |
+| 票据和回执约束 | 实际 `hbbr` 拒绝错节点、错持钥者与已消费票据，并通过签名验活报告当前配对会话数。PostgreSQL 回归拒绝未确认节点、错签名及主控提交回执，核销时拒绝已被新连接替换的轮次。 |
+| 保留路径 | 原生直连和固定单中继准入、受管端点恢复检查及四项租约回归通过。区域模式在组织已登记区域节点或启用受限策略时生效。 |
+
+本地 Git 证据目录 `deskrealm-evidence/m3/e4b0b20620bb402f9d6986e344ffb95236d8ea9a/`。`multi-relay.log` SHA-256 为 `99be7e5737bd84324844e493ebe6e71165b227b2a612ba29cf4494638f088105`，`legacy-native-admission.log` 为 `1f8bc348749fb0ad82e0dbea0fe3baed7180c806add22c66a31dfb67a98e4b69`，`desktop-check.log` 为 `a4b3d7c5c84b2e1dfd99a2a2ce755a517e912bd7ec23192fdcac35d986344ee0`，`managed-db.log` 为 `277e7f8e5671e9389a80d0f8c759eba481dde71a924b771dd6e601ec0d1e178c`，`go-vet-test.log` 为 `8d8a23a6411802c8dd386c01ac2442cb7bd2aad44255f1ffdb0d2c2bb52e5358`。
+
+Task 2 接续已建立会话断线后的新授权重选、会话页明细和跨设置验证。Linux 与双 Windows 目标环境验收仍安排在 M0–M3 开发完成后。
+
+同一候选的区域中继生命周期 PostgreSQL 和 Chromium 用例通过，`relay-lifecycle.log` SHA-256 为 `0b6681a707b2f9d46c427e1f16f8a696b4d77b21f691152f0afbd9001557a94e`。
