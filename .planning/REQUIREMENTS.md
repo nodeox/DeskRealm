@@ -82,7 +82,7 @@ M4 包括浏览器主控、原生 LDAP、邮件验证和恢复、更多平台、
 | FR-01 | Phase 4 | Complete (04-01 开发验证) |
 | FR-05 | Phase 4 | Pending |
 | FR-06 | Phase 4 | Pending |
-| FR-14 | Phase 4 | Partial (中心签发、持钥登记和签名健康通过，实际中继启动与入池待验证) |
+| FR-14 | Phase 4 | Partial (中心签发、主机持钥登记与恢复、签名健康 API 通过，实际中继启动与入池待验证) |
 | FR-15 | Phase 4 | Pending |
 | FR-16 | Phase 4 | Partial (安装记录导入和受控执行夹具通过，真实交付场景接续后续计划) |
 | FR-17 | Phase 4 | Pending |

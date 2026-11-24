@@ -137,3 +137,19 @@ Task 1 的已有 Docker 首装开发验证通过。
 | 原有路径 | 同提交的 M0/M1 全量回归通过，包含 Go 竞态检查、Vue 类型检查、首登、资源与角色 Chromium 场景。 |
 
 `relay-identity.log` 位于本地 Git 目录 `deskrealm-evidence/m3/765fb2cb73f27f00a6f7b78abbc866502e278920/`，SHA-256 为 `c0e0225e54580eeeb40d4f153953a826efb10e41f25764fcbf0f53f6e7462acd`。本轮通过中心协议，真实 `hbbr`、节点主机持久身份及独立探测留在 04-03 Task 1。
+
+## 04-03 中继主机身份和 HTTPS 登记
+
+2026-11-23，在 `4c2a785fad6e94da36a2fb06d5c35e617dde17d7` 运行 `bash scripts/deskrealm-m3-test relay-host`，退出 0。使用 macOS ARM64 的实际 CLI 子进程、HTTPS 中心处理器和 Linux Docker 内的隔离 PostgreSQL 18.7。
+
+| 检查 | 结果 |
+| --- | --- |
+| 独立主机身份 | 两个状态目录分别生成 Ed25519 身份，状态文件权限为 `0600`。重新准备、登记和读取状态均沿用各自公钥。更换中心绑定或丢失状态文件时命令拒绝执行。 |
+| HTTPS 与恢复 | 严格校验中心证书，拒绝未受信的证书。在中心事务提交后模拟回复丢失，删除一次性凭据，节点用同一密钥签名并取回配置。两个节点共完成两次登记及两条登记审计。 |
+| 中心校验 | 错误节点密钥、过期配置读取证明，以及映射到 IPv4 未指定地址、组播地址和带作用域地址的公布端点被拒绝。 |
+| Linux 构建及容器重建 | 静态 CLI 构建通过 Linux amd64、arm64。Linux ARM64 的三个独立容器挂载同一状态目录，均返回原节点身份。 |
+| 回归 | 同提交 `bash scripts/deskrealm-m1-test all` 退出 0，包含 vet、全仓 Go 竞态回归、Vue 类型检查及三个 Chromium 场景。 |
+
+日志位于本地 Git 目录 `deskrealm-evidence/m3/4c2a785fad6e94da36a2fb06d5c35e617dde17d7/`。`relay-host.log` 的 SHA-256 为 `f5e0ab1040e98b8c4a5ed252c0de877fe28242955df4b5a27942a150c60126dd`，`relay-host-linux.log` 为 `55b46d83c58751dac06b94ed40654624f2164b4320ce51d4afdbea233adcb5db`，`m1-all.log` 为 `3514d1292e94d9c88abd82f5cc575d38cf5fab0126089855995e28b957f16131`。
+
+Task 1 继续启动两套受管 `hbbr`、从中继上报签名健康，并由中心对公布端点做独立协议探测。
