@@ -11,14 +11,16 @@ import (
 type Kind byte
 
 const (
-	DeviceChallenge Kind = 1
-	UserBinding     Kind = 2
-	SessionGrant    Kind = 3
-	ConnectionProof Kind = 4
-	PolicyReceipt   Kind = 5
-	SessionConsent  Kind = 6
-	RelayRoundJoin  Kind = 7
-	RelayProbe      Kind = 8
+	DeviceChallenge  Kind = 1
+	UserBinding      Kind = 2
+	SessionGrant     Kind = 3
+	ConnectionProof  Kind = 4
+	PolicyReceipt    Kind = 5
+	SessionConsent   Kind = 6
+	RelayRoundJoin   Kind = 7
+	RelayProbe       Kind = 8
+	RelayProbePermit Kind = 9
+	RelayProbeHolder Kind = 10
 )
 
 const prefix = "DR-M2\x00\x01"
@@ -34,14 +36,16 @@ const (
 )
 
 var fieldWidths = map[Kind][]int{
-	DeviceChallenge: {uuid, uuid, uuid, digest, word, word, 2},
-	UserBinding:     {uuid, uuid, uuid, uuid, digest, digest, word, word},
-	SessionGrant:    {0, uuid, uuid, uuid, uuid, uuid, uuid, digest, digest, word, 1, 1, 0, word, word},
-	ConnectionProof: {1, digest, uuid, uuid, digest, digest, digest, 1},
-	PolicyReceipt:   {uuid, uuid, uuid, word, digest, word, 1, 1},
-	SessionConsent:  {digest, uuid, uuid, digest, 1},
-	RelayRoundJoin:  {1, uuid, uuid, uuid},
-	RelayProbe:      {1, uuid, uuid, uuid, uuid, uuid, word, digest, 15},
+	DeviceChallenge:  {uuid, uuid, uuid, digest, word, word, 2},
+	UserBinding:      {uuid, uuid, uuid, uuid, digest, digest, word, word},
+	SessionGrant:     {0, uuid, uuid, uuid, uuid, uuid, uuid, digest, digest, word, 1, 1, 0, word, word},
+	ConnectionProof:  {1, digest, uuid, uuid, digest, digest, digest, 1},
+	PolicyReceipt:    {uuid, uuid, uuid, word, digest, word, 1, 1},
+	SessionConsent:   {digest, uuid, uuid, digest, 1},
+	RelayRoundJoin:   {1, uuid, uuid, uuid},
+	RelayProbe:       {1, uuid, uuid, uuid, uuid, uuid, word, digest, 15},
+	RelayProbePermit: {1, uuid, uuid, uuid, uuid, uuid, word, digest, digest, word, word},
+	RelayProbeHolder: {digest, 1, digest},
 }
 
 // Encode produces the exact signed bytes. Frame validation checks the wire
@@ -114,6 +118,12 @@ func validValues(kind Kind, f [][]byte) bool {
 		return f[0][0] == 1 || f[0][0] == 2
 	case RelayProbe:
 		return (f[0][0] == 1 || f[0][0] == 2) && positive(f[6]) && validRelayProbeSamples(f[8])
+	case RelayProbePermit:
+		start, expires := binary.BigEndian.Uint64(f[9]), binary.BigEndian.Uint64(f[10])
+		return (f[0][0] == 1 || f[0][0] == 2) && positive(f[6]) && positive(f[9]) && positive(f[10]) &&
+			expires > start && expires-start <= 2000
+	case RelayProbeHolder:
+		return f[1][0] < 3
 	default:
 		return false
 	}

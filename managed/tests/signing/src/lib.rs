@@ -63,8 +63,8 @@ mod tests {
         }
         verified_kinds.sort_unstable();
         verified_kinds.dedup();
-        assert_eq!(verified_kinds, [1, 2, 3, 4, 5, 6, 7, 8]);
-        assert_eq!(rejected, 20);
+        assert_eq!(verified_kinds, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+        assert_eq!(rejected, 23);
     }
 
     #[test]

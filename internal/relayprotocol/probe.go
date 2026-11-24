@@ -44,10 +44,7 @@ func Probe(ctx context.Context, endpoint string, key ed25519.PublicKey, build st
 	}
 	var reply [probeBuildBytes + 4 + ed25519.SignatureSize]byte
 	if _, err := io.ReadFull(conn, reply[:]); err != nil {
-		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-			return 0, ErrProbeProtocol
-		}
-		return 0, err
+		return 0, probeReadError(err)
 	}
 	data, signature := reply[:probeBuildBytes+4], reply[probeBuildBytes+4:]
 	if len(key) != ed25519.PublicKeySize || !ed25519.Verify(key, append(challenge[:], data...), signature) ||

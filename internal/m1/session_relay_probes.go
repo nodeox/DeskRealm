@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"deskrealm/internal/managedproto"
+	"deskrealm/internal/relayprotocol"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -35,16 +36,17 @@ type relayRound struct {
 }
 
 type relayRoundCandidate struct {
-	ID         string            `json:"relay_id"`
-	Site       string            `json:"site"`
-	Region     string            `json:"region"`
-	Endpoint   string            `json:"endpoint"`
-	Build      string            `json:"build"`
-	PublicKey  string            `json:"public_key"`
-	Version    int64             `json:"config_version"`
-	Eligible   bool              `json:"eligible"`
-	Controller relayProbeSummary `json:"controller"`
-	Target     relayProbeSummary `json:"target"`
+	ID          string                            `json:"relay_id"`
+	Site        string                            `json:"site"`
+	Region      string                            `json:"region"`
+	Endpoint    string                            `json:"endpoint"`
+	Build       string                            `json:"build"`
+	PublicKey   string                            `json:"public_key"`
+	Version     int64                             `json:"config_version"`
+	Eligible    bool                              `json:"eligible"`
+	Controller  relayProbeSummary                 `json:"controller"`
+	Target      relayProbeSummary                 `json:"target"`
+	ProbePermit *relayprotocol.SessionProbePermit `json:"probe_permit,omitempty"`
 }
 
 type relayProbeSample struct {
@@ -215,7 +217,8 @@ func (out relayRound) matchesAddress(role byte, caller netip.Addr) bool {
 const relaySnapshotEligible = `relay_nodes.config_version=c.config_version AND relay_nodes.revision=c.node_revision
 	AND relay_nodes.endpoint=c.endpoint AND (` + relayStateSQL + `)='available'`
 
-func loadRelayRoundCandidates(ctx context.Context, tx pgx.Tx, round *relayRound, now time.Time) error {
+func (a *API) loadRelayRoundCandidates(ctx context.Context, tx pgx.Tx, round *relayRound, now time.Time,
+	g sessionGrant, role byte, holder ed25519.PublicKey) error {
 	round.State = "waiting_for_target"
 	if round.Deadline == nil {
 		return nil
@@ -242,9 +245,27 @@ func loadRelayRoundCandidates(ctx context.Context, tx pgx.Tx, round *relayRound,
 			&key, &candidate.Version, &candidate.Eligible, &left, &right)
 		candidate.PublicKey = base64.RawURLEncoding.EncodeToString(key)
 		candidate.Controller, candidate.Target = summarizeRelaySamples(left, closed), summarizeRelaySamples(right, closed)
+		if err == nil && !closed && candidate.Eligible {
+			candidate.ProbePermit, err = a.relayProbePermit(g, *round, role, holder, candidate)
+		}
 		return candidate, err
 	})
 	return err
+}
+
+func (a *API) relayProbePermit(g sessionGrant, round relayRound, role byte, holder ed25519.PublicKey,
+	candidate relayRoundCandidate) (*relayprotocol.SessionProbePermit, error) {
+	endpoint := sha256.Sum256([]byte(candidate.Endpoint))
+	frame, err := managedproto.Encode(managedproto.RelayProbePermit, []byte{role}, managedFrameUUID(g.ID),
+		managedFrameUUID(g.Grant), managedFrameUUID(round.Connection), managedFrameUUID(round.ID), managedFrameUUID(candidate.ID),
+		binary.BigEndian.AppendUint64(nil, uint64(candidate.Version)), endpoint[:], holder,
+		binary.BigEndian.AppendUint64(nil, uint64(round.Opened.UnixMilli())),
+		binary.BigEndian.AppendUint64(nil, uint64(round.Deadline.UnixMilli())))
+	if err != nil {
+		return nil, err
+	}
+	return &relayprotocol.SessionProbePermit{Frame: base64.RawURLEncoding.EncodeToString(frame),
+		Signature: base64.RawURLEncoding.EncodeToString(ed25519.Sign(a.managedKey.key, frame))}, nil
 }
 
 func (a *API) getSessionRelayRound(w http.ResponseWriter, r *http.Request) {
@@ -259,7 +280,7 @@ func (a *API) getSessionRelayRound(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var out relayRound
-	err := a.withRelaySession(r, func(tx pgx.Tx, g sessionGrant, role byte, _ ed25519.PublicKey, now time.Time) error {
+	err := a.withRelaySession(r, func(tx pgx.Tx, g sessionGrant, role byte, holder ed25519.PublicKey, now time.Time) error {
 		var err error
 		out, err = readRelayRound(r.Context(), tx, g.ID, connection)
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -271,7 +292,7 @@ func (a *API) getSessionRelayRound(w http.ResponseWriter, r *http.Request) {
 		if !out.matchesAddress(role, caller) {
 			return errSessionConflict
 		}
-		return loadRelayRoundCandidates(r.Context(), tx, &out, now)
+		return a.loadRelayRoundCandidates(r.Context(), tx, &out, now, g, role, holder)
 	})
 	if err != nil {
 		failure(w, "read relay round", err)
@@ -318,7 +339,7 @@ func (a *API) joinSessionRelayRound(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				return err
 			}
-			return loadRelayRoundCandidates(ctx, tx, &out, now)
+			return a.loadRelayRoundCandidates(ctx, tx, &out, now, g, role, key)
 		}
 		if err != nil {
 			return err
@@ -330,7 +351,7 @@ func (a *API) joinSessionRelayRound(w http.ResponseWriter, r *http.Request) {
 		} else if !out.matchesAddress(role, caller) {
 			return errSessionConflict
 		}
-		return loadRelayRoundCandidates(ctx, tx, &out, now)
+		return a.loadRelayRoundCandidates(ctx, tx, &out, now, g, role, key)
 	})
 	if err != nil {
 		failure(w, "join relay round", err)

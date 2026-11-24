@@ -16,8 +16,9 @@ exec docker run --rm --name "$DESKREALM_TEST_RELAY_LABEL-$port" \\
   --label "deskrealm.relay-test=$DESKREALM_TEST_RELAY_LABEL" \\
   --publish "127.0.0.1:$port:$port" --user "$(id -u):$(id -g)" \\
   --mount "type=bind,src=$DESKREALM_TEST_NATIVE_HBBR,dst=/hbbr,readonly" \\
-  --mount "type=bind,src=$DESKREALM_RELAY_STATE,dst=/relay-state,readonly" \\
-  --env DESKREALM_RELAY_STATE=/relay-state --entrypoint /hbbr \\
+  --mount "type=bind,src=$(dirname "$DESKREALM_RELAY_STATE"),dst=/relay-state,readonly" \\
+  --env "DESKREALM_RELAY_STATE=/relay-state/$(basename "$DESKREALM_RELAY_STATE")" \\
+  --env DESKREALM_REGIONAL_CENTER_PROBE_KEY --entrypoint /hbbr \\
   "$DESKREALM_TEST_RELAY_IMAGE" "$@"
 """
 

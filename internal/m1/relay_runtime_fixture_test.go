@@ -3,6 +3,8 @@ package m1
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/binary"
 	"encoding/pem"
 	"errors"
 	"io"
@@ -76,7 +78,14 @@ func TestRegionalRelayRuntimePostgres(t *testing.T) {
 	f := newSessionFixture(t)
 	ctx, store, h, admin := f.ctx, f.store, f.h, f.admin
 	csrf := csrfToken(admin.Value)
-	center := httptest.NewTLSServer(h)
+	server := httptest.NewUnstartedServer(nil)
+	origin, err := ParseOrigin("https://"+server.Listener.Addr().String(), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.Config.Handler = NewHandler(store, origin, nil, AuthConfig{ManagedKey: f.signing})
+	server.StartTLS()
+	center := server
 	defer center.Close()
 	scratch := t.TempDir()
 	ca := filepath.Join(scratch, "center-ca.pem")
@@ -237,7 +246,7 @@ func TestRegionalRelayRuntimePostgres(t *testing.T) {
 		t.Fatal("runtime restart or address change lost the relay identity or approved configuration")
 	}
 	var registrations, admissions int
-	err := store.DB.QueryRow(ctx, `SELECT count(*) FILTER (WHERE action='relay.registered'),
+	err = store.DB.QueryRow(ctx, `SELECT count(*) FILTER (WHERE action='relay.registered'),
 		count(*) FILTER (WHERE action='relay.available') FROM audit_events`).Scan(&registrations, &admissions)
 	if err != nil || registrations != 2 || admissions != 2 {
 		t.Fatalf("expected one registration and admission audit per node: %d %d %v", registrations, admissions, err)
@@ -256,8 +265,38 @@ func sampleRegionalRelays(t *testing.T, f sessionFixture, alpha, beta string) {
 	if len(round.Candidates) != 2 || round.Deadline == nil {
 		t.Fatalf("expected both enrolled native nodes: %+v", round)
 	}
+	controllerResponse := controller.get(f.h, grant, conn)
+	checkCode(t, controllerResponse, 200, round.ID)
+	controllerRound := responseValue[relayRound](t, controllerResponse.Body.Bytes())
+	left := roundCandidate(t, controllerRound, alpha)
+	right := roundCandidate(t, round, alpha)
+	other := roundCandidate(t, round, beta)
+	if left.ProbePermit == nil || right.ProbePermit == nil || other.ProbePermit == nil ||
+		left.ProbePermit.Frame == right.ProbePermit.Frame {
+		t.Fatal("center did not issue distinct permits for both roles and nodes")
+	}
 	ctx, stop := context.WithDeadline(f.ctx, *round.Deadline)
 	defer stop()
+	probe := func(ctx context.Context, destination relayRoundCandidate, permit relayprotocol.SessionProbePermit, p roundPeer, slot byte) (time.Duration, error) {
+		return relayprotocol.SessionProbeRTT(ctx, destination.Endpoint, relayprotocol.PublicKey(destination.PublicKey),
+			destination.Build, permit, p.key, slot)
+	}
+	for _, attempt := range []struct {
+		label       string
+		destination relayRoundCandidate
+		permit      relayprotocol.SessionProbePermit
+		peer        roundPeer
+	}{
+		{"wrong node", other, *left.ProbePermit, controller},
+		{"wrong role key", left, *left.ProbePermit, target},
+		{"wrong center signature", left, relayprotocol.SessionProbePermit{Frame: left.ProbePermit.Frame, Signature: right.ProbePermit.Signature}, controller},
+		{"wrong published endpoint", left, alteredProbePermit(t, f, *left.ProbePermit, 7), controller},
+		{"wrong configuration revision", left, alteredProbePermit(t, f, *left.ProbePermit, 6), controller},
+	} {
+		if _, err := probe(ctx, attempt.destination, attempt.permit, attempt.peer, 0); !errors.Is(err, relayprotocol.ErrProbeProtocol) {
+			t.Fatalf("native hbbr accepted or failed to reject %s: %v", attempt.label, err)
+		}
+	}
 	type measured struct {
 		peer      roundPeer
 		candidate relayRoundCandidate
@@ -265,18 +304,23 @@ func sampleRegionalRelays(t *testing.T, f sessionFixture, alpha, beta string) {
 		err       error
 	}
 	results := make(chan measured, 4)
-	for _, peer := range []roundPeer{controller, target} {
-		for _, candidate := range []relayRoundCandidate{roundCandidate(t, round, alpha), roundCandidate(t, round, beta)} {
+	for _, input := range []struct {
+		peer  roundPeer
+		round relayRound
+	}{{controller, controllerRound}, {target, round}} {
+		for _, candidate := range input.round.Candidates {
+			if candidate.ProbePermit == nil {
+				t.Fatal("eligible candidate lacks a probe permit")
+			}
 			go func() {
-				result := measured{peer: peer, candidate: candidate, samples: make([]relayProbeSample, 0, 3)}
-				for range 3 {
-					started := time.Now()
-					_, err := relayprotocol.Probe(ctx, candidate.Endpoint, relayprotocol.PublicKey(candidate.PublicKey), candidate.Build)
+				result := measured{peer: input.peer, candidate: candidate, samples: make([]relayProbeSample, 0, 3)}
+				for slot := range byte(3) {
+					rtt, err := probe(ctx, candidate, *candidate.ProbePermit, input.peer, slot)
 					if err != nil {
 						result.err = err
 						break
 					}
-					result.samples = append(result.samples, measuredRTT(uint32(time.Since(started).Microseconds())))
+					result.samples = append(result.samples, measuredRTT(uint32(rtt.Microseconds())))
 				}
 				results <- result
 			}()
@@ -298,4 +342,36 @@ func sampleRegionalRelays(t *testing.T, f sessionFixture, alpha, beta string) {
 		}
 	}
 	f.count(t, 4, "SELECT count(*) FROM session_relay_reports WHERE round_id=$1", round.ID)
+	if _, err := probe(ctx, left, *left.ProbePermit, controller, 0); !errors.Is(err, relayprotocol.ErrProbeProtocol) {
+		t.Fatalf("native hbbr accepted a spent sample: %v", err)
+	}
+	<-ctx.Done()
+	unusedExpired := alteredProbePermit(t, f, *left.ProbePermit, 4)
+	if _, err := probe(f.ctx, left, unusedExpired, controller, 0); !errors.Is(err, relayprotocol.ErrProbeProtocol) {
+		t.Fatalf("native hbbr accepted an expired permit: %v", err)
+	}
+	response = controller.get(f.h, grant, conn)
+	checkCode(t, response, 200, "complete")
+	for _, candidate := range responseValue[relayRound](t, response.Body.Bytes()).Candidates {
+		if candidate.ProbePermit != nil {
+			t.Fatal("center issued a permit after the round closed")
+		}
+	}
+}
+
+func alteredProbePermit(t *testing.T, f sessionFixture, permit relayprotocol.SessionProbePermit, field int) relayprotocol.SessionProbePermit {
+	t.Helper()
+	frame, err := base64.RawURLEncoding.DecodeString(permit.Frame)
+	if err != nil {
+		t.Fatal(err)
+	}
+	offset := 8
+	for i := 0; i < field; i++ {
+		offset += 2 + int(binary.BigEndian.Uint16(frame[offset:offset+2]))
+	}
+	last := offset + 1 + int(binary.BigEndian.Uint16(frame[offset:offset+2]))
+	frame[last] ^= 2
+	return relayprotocol.SessionProbePermit{
+		Frame: base64.RawURLEncoding.EncodeToString(frame), Signature: signRelay(f.signing.key, frame),
+	}
 }

@@ -11,6 +11,8 @@ pub const POLICY_RECEIPT: u8 = 5;
 pub const SESSION_CONSENT: u8 = 6;
 pub const RELAY_ROUND_JOIN: u8 = 7;
 pub const RELAY_PROBE: u8 = 8;
+pub const RELAY_PROBE_PERMIT: u8 = 9;
+pub const RELAY_PROBE_HOLDER: u8 = 10;
 
 const PREFIX: &[u8] = b"DR-M2\0\x01";
 
@@ -67,6 +69,16 @@ fn valid_values(kind: u8, f: &[&[u8]]) -> bool {
                     }
                 })
         }
+        RELAY_PROBE_PERMIT => {
+            let (start, expires) = (number(f[9]), number(f[10]));
+            (1..=2).contains(&f[0][0])
+                && positive(f[6])
+                && positive(f[9])
+                && positive(f[10])
+                && expires > start
+                && expires - start <= 2000
+        }
+        RELAY_PROBE_HOLDER => f[1][0] < 3,
         _ => false,
     }
 }
@@ -81,8 +93,44 @@ fn widths(kind: u8) -> Option<&'static [usize]> {
         SESSION_CONSENT => &[32, 16, 16, 32, 1],
         RELAY_ROUND_JOIN => &[1, 16, 16, 16],
         RELAY_PROBE => &[1, 16, 16, 16, 16, 16, 8, 32, 15],
+        RELAY_PROBE_PERMIT => &[1, 16, 16, 16, 16, 16, 8, 32, 32, 8, 8],
+        RELAY_PROBE_HOLDER => &[32, 1, 32],
         _ => return None,
     })
+}
+
+pub const SESSION_PROBE_FRAME_SIZE: usize = 199;
+pub const SESSION_PROBE_PREFIX: &[u8] = b"DeskRealm/relay/v1/rtt-1\0";
+
+pub struct RelayProbePermit {
+    pub node: [u8; 16],
+    pub version: u64,
+    pub endpoint: sha256::Digest,
+    pub holder: sign::PublicKey,
+    pub opens: u64,
+    pub expires: u64,
+}
+
+impl RelayProbePermit {
+    pub fn verify(frame: &[u8], signature: &[u8], key: &sign::PublicKey) -> Option<Self> {
+        let fields = decode(RELAY_PROBE_PERMIT, frame)?;
+        let signature = sign::Signature::from_bytes(signature).ok()?;
+        if !sign::verify_detached(&signature, frame, key) {
+            return None;
+        }
+        Some(Self {
+            node: fields[5].try_into().ok()?,
+            version: number(fields[6]),
+            endpoint: sha256::Digest::from_slice(fields[7])?,
+            holder: sign::PublicKey::from_slice(fields[8])?,
+            opens: number(fields[9]),
+            expires: number(fields[10]),
+        })
+    }
+
+    pub fn active(&self, now_ms: u64) -> bool {
+        self.opens <= now_ms && now_ms < self.expires
+    }
 }
 
 fn valid_fields(kind: u8, fields: &[&[u8]]) -> bool {

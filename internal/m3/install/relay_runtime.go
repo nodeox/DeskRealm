@@ -82,10 +82,22 @@ func runRelayHost(ctx context.Context, client *http.Client, directory, binary, p
 		return fmt.Errorf("invalid relay port: %w", err)
 	}
 	port = strconv.FormatUint(uint64(number), 10)
+	var centerKey struct {
+		ID     string `json:"kid"`
+		Public string `json:"public_key"`
+	}
+	err = relayCall(ctx, client, http.MethodGet, state.Center, "/v1/managed/signing-key", "", nil, &centerKey)
+	if err != nil && !errors.Is(err, relayHTTPStatus(http.StatusServiceUnavailable)) {
+		return fmt.Errorf("read center signing key: %w", err)
+	}
+	if err == nil && (centerKey.ID == "" || relayprotocol.PublicKey(centerKey.Public) == nil) {
+		return errors.New("center returned an invalid managed signing key")
+	}
 	childCtx, stop := context.WithCancel(ctx)
 	cmd := exec.CommandContext(childCtx, binary, "--port", port, "--deskrealm-regional")
 	cmd.Dir = directory
-	cmd.Env = append(os.Environ(), "DESKREALM_RELAY_STATE="+filepath.Join(directory, relayHostFile))
+	cmd.Env = append(os.Environ(), "DESKREALM_RELAY_STATE="+filepath.Join(directory, relayHostFile),
+		"DESKREALM_REGIONAL_CENTER_PROBE_KEY="+centerKey.Public)
 	cmd.Stdout, cmd.Stderr = stdout, stderr
 	cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGTERM) }
 	cmd.WaitDelay = 3 * time.Second

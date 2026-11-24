@@ -171,6 +171,10 @@ type relayHTTPStatus int
 func (s relayHTTPStatus) Error() string { return fmt.Sprintf("center returned HTTP %d", s) }
 
 func relayPost(ctx context.Context, client *http.Client, origin, path, credential string, body, out any) error {
+	return relayCall(ctx, client, http.MethodPost, origin, path, credential, body, out)
+}
+
+func relayCall(ctx context.Context, client *http.Client, method, origin, path, credential string, body, out any) error {
 	data, err := json.Marshal(body)
 	if err != nil {
 		return err
@@ -179,11 +183,17 @@ func relayPost(ctx context.Context, client *http.Client, origin, path, credentia
 	if err != nil {
 		return errors.New("invalid relay request URL")
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(data))
+	var payload io.Reader
+	if body != nil {
+		payload = bytes.NewReader(data)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, endpoint, payload)
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Content-Type", "application/json")
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
 	if credential != "" {
 		req.Header.Set("Authorization", "Bearer "+credential)
 	}
