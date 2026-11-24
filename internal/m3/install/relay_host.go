@@ -192,8 +192,15 @@ func relayPost(ctx context.Context, client *http.Client, origin, path, credentia
 		return fmt.Errorf("center HTTPS connection: %w", err)
 	}
 	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
+	expected := http.StatusOK
+	if out == nil {
+		expected = http.StatusNoContent
+	}
+	if response.StatusCode != expected {
 		return relayHTTPStatus(response.StatusCode)
+	}
+	if out == nil {
+		return nil
 	}
 	const maximum = 8192
 	data, err = io.ReadAll(io.LimitReader(response.Body, maximum+1))
@@ -277,26 +284,31 @@ func RunRelay(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 	const help = `Usage:
   deskrealm-relay prepare --state DIR --center HTTPS_ORIGIN --node NODE_ID
   deskrealm-relay enroll  --state DIR [--ca PEM] [--credential-file FILE]
+  deskrealm-relay run     --state DIR --hbbr ABSOLUTE_PATH [--port PORT] [--ca PEM]
   deskrealm-relay status  --state DIR
 `
 	if len(args) == 1 && (args[0] == "--help" || args[0] == "-h") {
 		_, err := io.WriteString(stdout, help)
 		return err
 	}
-	if len(args) == 0 || (args[0] != "prepare" && args[0] != "enroll" && args[0] != "status") {
+	if len(args) == 0 || (args[0] != "prepare" && args[0] != "enroll" && args[0] != "run" && args[0] != "status") {
 		return errors.New(help)
 	}
 	command := args[0]
 	flags := flag.NewFlagSet(command, flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	path := flags.String("state", "", "absolute private node state directory")
-	var center, id, credential, ca string
+	var center, id, credential, ca, hbbr, port string
 	switch command {
 	case "prepare":
 		flags.StringVar(&center, "center", "", "HTTPS center origin")
 		flags.StringVar(&id, "node", "", "center-assigned node ID")
 	case "enroll":
 		flags.StringVar(&credential, "credential-file", "", "private one-time credential file")
+		flags.StringVar(&ca, "ca", "", "optional center CA certificate")
+	case "run":
+		flags.StringVar(&hbbr, "hbbr", "", "absolute path of the managed hbbr binary")
+		flags.StringVar(&port, "port", "", "local TCP port, defaults to the published port")
 		flags.StringVar(&ca, "ca", "", "optional center CA certificate")
 	}
 	if err := flags.Parse(args[1:]); err != nil {
@@ -325,7 +337,7 @@ func RunRelay(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 		if err != nil {
 			return err
 		}
-	} else if command == "enroll" {
+	} else if command == "enroll" || command == "run" {
 		lock, err := lockDeployment(directory)
 		if err != nil {
 			return err
@@ -340,6 +352,9 @@ func RunRelay(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 			return err
 		}
 		defer client.CloseIdleConnections()
+		if command == "run" {
+			return runRelayHost(ctx, client, directory, hbbr, port, state, stdout, stderr)
+		}
 		state, err = enrollRelayHost(ctx, client, directory, credential, state)
 		if err != nil {
 			return err

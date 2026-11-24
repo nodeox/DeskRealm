@@ -155,13 +155,19 @@ func run(ctx context.Context, args []string) error {
 	}
 	workerCtx, cancelWorker := context.WithCancel(ctx)
 	workerDone := make(chan struct{})
+	relayWorkerDone := make(chan struct{})
 	go func() {
 		defer close(workerDone)
 		store.RunTaskWorker(workerCtx)
 	}()
+	go func() {
+		defer close(relayWorkerDone)
+		store.RunRelayProbes(workerCtx)
+	}()
 	defer func() {
 		cancelWorker()
 		<-workerDone
+		<-relayWorkerDone
 	}()
 	done := make(chan struct{})
 	defer close(done)

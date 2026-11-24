@@ -3,6 +3,9 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 case "${1:-}" in
+  relay-enrollment)
+    exec python3 -B managed/tests/relay_enrollment.py
+    ;;
   relay-host)
     scratch=$(mktemp -d "${TMPDIR:-/tmp}/deskrealm-relay.XXXXXX")
     trap 'rm -rf "$scratch"' EXIT
@@ -62,7 +65,7 @@ case "${1:-}" in
     )
     ;;
   *)
-    echo "usage: $0 install-preflight|install-prepare|install-bootstrap|install-offline|install-resume|install-relay|install-task|delivery-tasks|relay-identity|relay-host" >&2
+    echo "usage: $0 install-preflight|install-prepare|install-bootstrap|install-offline|install-resume|install-relay|install-task|delivery-tasks|relay-identity|relay-host|relay-enrollment" >&2
     exit 2
     ;;
 esac

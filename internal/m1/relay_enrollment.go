@@ -379,9 +379,7 @@ func (a *API) listRelayNodes(w http.ResponseWriter, r *http.Request) {
 			return errForbidden
 		}
 		rows, err := tx.Query(ctx, `SELECT id,endpoint,site,region,build,config_version,capacity,name,task_id,
-			CASE WHEN registered_at IS NULL THEN 'pending_enrollment'
-				WHEN health_at>clock_timestamp()-interval '15 seconds' AND protocol_ready THEN 'awaiting_probe'
-				ELSE 'awaiting_health' END,health_at,active_sessions
+			`+relayStateSQL+`,health_at,active_sessions
 			FROM relay_nodes WHERE organization_id=$1 ORDER BY name,id`, who.Organization)
 		if err != nil {
 			return err

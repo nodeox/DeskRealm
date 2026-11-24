@@ -16,7 +16,7 @@
 
 `POST /v1/relays/configuration` 接受已登记节点签名的 `relayprotocol.ConfigRequest`，用于同步中心批准的配置。请求携带节点 ID、随机 nonce 和当前观测时间。
 
-`GET /v1/admin/relays` 返回当前登记与健康状态。通过签名健康检查的节点显示为 `awaiting_probe`。独立的公布端点及协议探测仍是入池前置条件。
+`GET /v1/admin/relays` 返回节点状态。中心每五秒从自己的网络连接公布的 TCP 端点，发送随机挑战，并用登记公钥核对端点对构建版本与会话数的签名。首次通过探测并具有 15 秒内的签名健康回执和可用容量时，节点进入 `available`，登记任务写入 `relay_available` 和审计记录。探测结果 15 秒后过期，连续三次失败时节点进入 `probe_unreachable`，下一次有效探测可恢复。节点达到容量时显示为 `at_capacity`。
 
 ## 中继主机登记
 
@@ -25,15 +25,22 @@
 ```sh
 ./deskrealm-relay prepare --state /var/lib/deskrealm/relay --center https://deskrealm.example.com --node "$NODE_ID"
 ./deskrealm-relay enroll --state /var/lib/deskrealm/relay --credential-file /run/deskrealm/relay-credential
+./deskrealm-relay run --state /var/lib/deskrealm/relay --hbbr /usr/local/bin/hbbr
 ./deskrealm-relay status --state /var/lib/deskrealm/relay
 ```
 
-中心使用私有 CA 时，在 `enroll` 中指定 `--ca /path/to/center-ca.pem`。登记成功后移除凭据文件，并将状态目录作为私密数据持久挂载或备份。重建主机时用原状态目录运行 `enroll`，节点会用原密钥同步配置。中心已经完成登记但回复丢失时，同一条命令也可恢复配置，无需再次使用凭据。
+中心使用私有 CA 时，在 `enroll` 和 `run` 中指定 `--ca /path/to/center-ca.pem`。登记成功后移除凭据文件，并将状态目录作为私密数据持久挂载或备份。中心已经完成登记但回复丢失时，用原状态目录运行 `enroll` 可取回配置，无需再次使用凭据。
+
+用 `scripts/deskrealm-managed-source prepare /path/to/source --apply-patches` 准备锁定源码，再在准备好的 `server` 目录运行 `cargo build --locked --release --bin hbbr`。
+
+`run` 在前台启动补丁版 `hbbr`，默认监听公布端口。使用端口映射时可用 `--port` 指定本机端口，中心仍探测登记的公布端点。进程从本机验证 `hbbr` 并上报签名健康。重启沿用状态目录中的密钥和健康序号。
+
+当前区域模式提供身份验证和候选目录所需的探测监听。双端选点、节点票据和实际会话转发由 04-04 接续。
 
 ## 开发验证
 
 ```sh
-bash scripts/deskrealm-m3-test relay-host
+bash scripts/deskrealm-m3-test relay-enrollment
 ```
 
-受管 `hbbr` 启动和独立协议探测接续 04-03。目标环境的 Linux 中心、中继和双 Windows 验收安排在 M0–M3 开发完成后。
+该检查构建受管 `hbbr` 并运行两个隔离的 Linux 实例。目标环境的 Linux 中心、中继和双 Windows 验收安排在 M0–M3 开发完成后。

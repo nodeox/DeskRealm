@@ -34,6 +34,7 @@ case "$mode" in
   install-task) tests=(TestInstallationTaskImportPostgres "${tasks[@]}" "${enrollment[@]}") ;;
   relay-identity) tests=(TestRelayEnrollmentAndHealthPostgres) ;;
   relay-host) tests=(TestRelayEnrollmentAndHealthPostgres TestRelayHostEnrollmentPostgres) ;;
+  relay-enrollment) tests=(TestRelayEnrollmentAndHealthPostgres TestRelayHostEnrollmentPostgres TestRegionalRelayRuntimePostgres) ;;
   delivery-tasks) tests=(TestDeliveryTaskRecoveryPostgres TestDeliveryTaskBrowserPostgres "${tasks[@]}") ;;
   overview) tests=("${overview[@]}") ;;
   managed-identity) tests=("${managed_identity[@]}") ;;
@@ -47,7 +48,7 @@ case "$mode" in
   resources-browser) browser_suite=resources; browser_test='共享通讯录、审计和任务中心按实际授权与结果运行' ;;
   roles-browser) browser_suite=roles; browser_test='四类角色的概览、入口和操作遵守真实授权' ;;
   managed-browser) browser_suite=managed; browser_test='策略、设备回执和会话按实际授权与状态运行' ;;
-  *) echo "usage: $0 all|bootstrap-api|user-status|identity-lifecycle|identity-federation|management-scopes|authorization|enrollment|device-lifecycle|addressbooks|audit|tasks|install-task|delivery-tasks|relay-identity|relay-host|overview|managed-identity|connection-rules|managed-policies|managed-sessions|session-leases|managed-db|bootstrap-browser|resources-browser|roles-browser|managed-browser" >&2; exit 2 ;;
+  *) echo "usage: $0 all|bootstrap-api|user-status|identity-lifecycle|identity-federation|management-scopes|authorization|enrollment|device-lifecycle|addressbooks|audit|tasks|install-task|delivery-tasks|relay-identity|relay-host|relay-enrollment|overview|managed-identity|connection-rules|managed-policies|managed-sessions|session-leases|managed-db|bootstrap-browser|resources-browser|roles-browser|managed-browser" >&2; exit 2 ;;
 esac
 
 scratch=$(mktemp -d "${TMPDIR:-/tmp}/deskrealm-m1.XXXXXX")
@@ -95,7 +96,7 @@ if [[ "$mode" != *-browser ]]; then
   if [[ "$mode" == all ]]; then
     go mod verify
     go vet ./...
-    go_args=(-race ./... -skip '^(TestDeliveryTaskBrowserPostgres|TestRelayHostEnrollmentPostgres)$')
+    go_args=(-race ./... -skip '^(TestDeliveryTaskBrowserPostgres|TestRelayHostEnrollmentPostgres|TestRegionalRelayRuntimePostgres)$')
   else
     pattern=$(IFS='|'; echo "${tests[*]}")
     go_args=(./internal/m1 -run "^($pattern)$")
