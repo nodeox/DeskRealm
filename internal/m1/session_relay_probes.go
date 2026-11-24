@@ -9,6 +9,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"net/http"
+	"net/netip"
 	"slices"
 	"time"
 
@@ -22,13 +23,15 @@ const (
 )
 
 type relayRound struct {
-	ID         string                `json:"round_id"`
-	Connection string                `json:"connection_id"`
-	Version    int64                 `json:"version"`
-	Opened     *time.Time            `json:"opened_at,omitempty"`
-	Deadline   *time.Time            `json:"deadline,omitempty"`
-	State      string                `json:"state"`
-	Candidates []relayRoundCandidate `json:"candidates"`
+	ID                               string                `json:"round_id"`
+	Connection                       string                `json:"connection_id"`
+	Version                          int64                 `json:"version"`
+	NetworkRevision                  int64                 `json:"network_revision"`
+	Opened                           *time.Time            `json:"opened_at,omitempty"`
+	Deadline                         *time.Time            `json:"deadline,omitempty"`
+	State                            string                `json:"state"`
+	Candidates                       []relayRoundCandidate `json:"candidates"`
+	controllerAddress, targetAddress string
 }
 
 type relayRoundCandidate struct {
@@ -194,10 +197,19 @@ func (a *API) withRelaySession(r *http.Request, fn func(pgx.Tx, sessionGrant, by
 
 func readRelayRound(ctx context.Context, tx pgx.Tx, session, connection string) (relayRound, error) {
 	out := relayRound{Connection: connection, Candidates: []relayRoundCandidate{}}
-	err := tx.QueryRow(ctx, `SELECT id,version,opened_at,deadline FROM session_relay_rounds
+	err := tx.QueryRow(ctx, `SELECT id,version,network_revision,opened_at,deadline,host(controller_address),
+		COALESCE(host(target_address),'') FROM session_relay_rounds
 		WHERE session_id=$1 AND connection_id=$2 AND superseded_at IS NULL`, session, connection).
-		Scan(&out.ID, &out.Version, &out.Opened, &out.Deadline)
+		Scan(&out.ID, &out.Version, &out.NetworkRevision, &out.Opened, &out.Deadline, &out.controllerAddress, &out.targetAddress)
 	return out, err
+}
+
+func (out relayRound) matchesAddress(role byte, caller netip.Addr) bool {
+	address := out.controllerAddress
+	if role == relayTarget {
+		address = out.targetAddress
+	}
+	return address == caller.String()
 }
 
 const relaySnapshotEligible = `relay_nodes.config_version=c.config_version AND relay_nodes.revision=c.node_revision
@@ -241,8 +253,13 @@ func (a *API) getSessionRelayRound(w http.ResponseWriter, r *http.Request) {
 		failure(w, "read relay round", errSessionInput)
 		return
 	}
+	caller, valid := a.relayIngress.clientIP(r)
+	if !valid {
+		failure(w, "read relay round", errSessionDenied)
+		return
+	}
 	var out relayRound
-	err := a.withRelaySession(r, func(tx pgx.Tx, g sessionGrant, _ byte, _ ed25519.PublicKey, now time.Time) error {
+	err := a.withRelaySession(r, func(tx pgx.Tx, g sessionGrant, role byte, _ ed25519.PublicKey, now time.Time) error {
 		var err error
 		out, err = readRelayRound(r.Context(), tx, g.ID, connection)
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -250,6 +267,9 @@ func (a *API) getSessionRelayRound(w http.ResponseWriter, r *http.Request) {
 		}
 		if err != nil {
 			return err
+		}
+		if !out.matchesAddress(role, caller) {
+			return errSessionConflict
 		}
 		return loadRelayRoundCandidates(r.Context(), tx, &out, now)
 	})
@@ -273,6 +293,11 @@ func (a *API) joinSessionRelayRound(w http.ResponseWriter, r *http.Request) {
 		failure(w, "join relay round", errSessionInput)
 		return
 	}
+	caller, valid := a.relayIngress.clientIP(r)
+	if !valid {
+		failure(w, "join relay round", errSessionDenied)
+		return
+	}
 	ctx := r.Context()
 	var out relayRound
 	err := a.withRelaySession(r, func(tx pgx.Tx, g sessionGrant, role byte, key ed25519.PublicKey, now time.Time) error {
@@ -285,27 +310,25 @@ func (a *API) joinSessionRelayRound(w http.ResponseWriter, r *http.Request) {
 			if role != relayController {
 				return errSessionConflict
 			}
-			out, err = createRelayRound(ctx, tx, g.ID, in.Connection)
+			policy, err := readRelayNetworkPolicy(ctx, tx, g.Organization)
+			if err != nil {
+				return err
+			}
+			out, err = createRelayRound(ctx, tx, g.ID, in.Connection, caller, policy.Revision)
+			if err != nil {
+				return err
+			}
+			return loadRelayRoundCandidates(ctx, tx, &out, now)
 		}
 		if err != nil {
 			return err
 		}
 		if role == relayTarget && out.Opened == nil {
-			deadline := now.Add(2 * time.Second)
-			if g.Expires.Before(deadline) {
-				deadline = g.Expires
-			}
-			if _, err := tx.Exec(ctx, `UPDATE session_relay_rounds SET opened_at=$2,deadline=$3 WHERE id=$1`, out.ID, now, deadline); err != nil {
+			if err := openRelayRound(ctx, tx, g, &out, caller, now); err != nil {
 				return err
 			}
-			_, err := tx.Exec(ctx, `INSERT INTO session_relay_candidates
-				(round_id,relay_id,site,region,endpoint,build,identity_key,config_version,node_revision)
-				SELECT $1,id,site,region,endpoint,build,identity_key,config_version,revision FROM relay_nodes
-				WHERE organization_id=$2 AND (`+relayStateSQL+`)='available'`, out.ID, g.Organization)
-			if err != nil {
-				return err
-			}
-			out.Opened, out.Deadline = &now, &deadline
+		} else if !out.matchesAddress(role, caller) {
+			return errSessionConflict
 		}
 		return loadRelayRoundCandidates(ctx, tx, &out, now)
 	})
@@ -316,8 +339,42 @@ func (a *API) joinSessionRelayRound(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
-func createRelayRound(ctx context.Context, tx pgx.Tx, session, connection string) (relayRound, error) {
-	out := relayRound{Connection: connection, Candidates: []relayRoundCandidate{}}
+func openRelayRound(ctx context.Context, tx pgx.Tx, g sessionGrant, out *relayRound, caller netip.Addr, now time.Time) error {
+	policy, err := readRelayNetworkPolicy(ctx, tx, g.Organization)
+	if err != nil {
+		return err
+	}
+	if out.NetworkRevision != policy.Revision {
+		return errSessionConflict
+	}
+	controller, err := netip.ParseAddr(out.controllerAddress)
+	if err != nil {
+		return err
+	}
+	deadline := now.Add(2 * time.Second)
+	if g.Expires.Before(deadline) {
+		deadline = g.Expires
+	}
+	if _, err := tx.Exec(ctx, `UPDATE session_relay_rounds SET opened_at=$2,deadline=$3,target_address=$4
+		WHERE id=$1`, out.ID, now, deadline, caller); err != nil {
+		return err
+	}
+	scope := policy.scope(controller, caller)
+	_, err = tx.Exec(ctx, `INSERT INTO session_relay_candidates
+		(round_id,relay_id,site,region,endpoint,build,identity_key,config_version,node_revision)
+		SELECT $1,id,site,region,endpoint,build,identity_key,config_version,revision FROM relay_nodes
+		WHERE organization_id=$2 AND (`+relayStateSQL+`)='available'
+			AND ($3 OR (region=ANY($4::text[]) AND id=ANY($5::uuid[])))`,
+		out.ID, g.Organization, policy.Mode == "organization", scope.regions, scope.nodes)
+	if err == nil {
+		out.Opened, out.Deadline, out.targetAddress = &now, &deadline, caller.String()
+	}
+	return err
+}
+
+func createRelayRound(ctx context.Context, tx pgx.Tx, session, connection string, caller netip.Addr, networkRevision int64) (relayRound, error) {
+	out := relayRound{Connection: connection, Candidates: []relayRoundCandidate{},
+		NetworkRevision: networkRevision, controllerAddress: caller.String()}
 	var exists bool
 	err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM session_relay_rounds
 		WHERE session_id=$1 AND connection_id=$2)`, session, connection).Scan(&exists)
@@ -331,9 +388,9 @@ func createRelayRound(ctx context.Context, tx pgx.Tx, session, connection string
 		WHERE session_id=$1 AND superseded_at IS NULL`, session); err != nil {
 		return out, err
 	}
-	err = tx.QueryRow(ctx, `INSERT INTO session_relay_rounds(session_id,connection_id,version)
-		SELECT $1,$2,COALESCE(max(version),0)+1 FROM session_relay_rounds WHERE session_id=$1 RETURNING id,version`,
-		session, connection).Scan(&out.ID, &out.Version)
+	err = tx.QueryRow(ctx, `INSERT INTO session_relay_rounds(session_id,connection_id,version,network_revision,controller_address)
+		SELECT $1,$2,COALESCE(max(version),0)+1,$3,$4 FROM session_relay_rounds WHERE session_id=$1 RETURNING id,version`,
+		session, connection, networkRevision, caller).Scan(&out.ID, &out.Version)
 	return out, err
 }
 
@@ -355,6 +412,11 @@ func (a *API) reportSessionRelayProbe(w http.ResponseWriter, r *http.Request) {
 		failure(w, "report relay probe", errSessionInput)
 		return
 	}
+	caller, valid := a.relayIngress.clientIP(r)
+	if !valid {
+		failure(w, "report relay probe", errSessionDenied)
+		return
+	}
 	ctx := r.Context()
 	err := a.withRelaySession(r, func(tx pgx.Tx, g sessionGrant, role byte, key ed25519.PublicKey, now time.Time) error {
 		round, err := readRelayRound(ctx, tx, g.ID, in.Connection)
@@ -364,7 +426,7 @@ func (a *API) reportSessionRelayProbe(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return err
 		}
-		if round.ID != in.Round || round.Deadline == nil || !now.Before(*round.Deadline) {
+		if round.ID != in.Round || round.Deadline == nil || !now.Before(*round.Deadline) || !round.matchesAddress(role, caller) {
 			return errSessionConflict
 		}
 		var endpoint string

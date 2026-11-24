@@ -4,6 +4,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 case "${1:-}" in
   relay-probes)
+    go test -race -count=1 ./internal/m3/install -run '^TestRenderComposeForRelayIngress$'
     GOFLAGS="${GOFLAGS:-} -race" bash scripts/deskrealm-m1-test relay-probes
     bash scripts/deskrealm-m2-test vectors
     exec python3 -B managed/tests/relay_enrollment.py

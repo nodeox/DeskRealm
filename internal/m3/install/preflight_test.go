@@ -73,6 +73,8 @@ func TestInstallConfigRejectsUnsafeValues(t *testing.T) {
 		{"unpinned", func(c *config) { c.Images.Center = "deskrealm:latest" }, "pinned"},
 		{"image injection", func(c *config) { c.Images.Center = "a/../x" + c.Images.Center }, "pinned"},
 		{"proxy key", func(c *config) { c.HTTPS.PrivateKey = "/key" }, "reverse proxy"},
+		{"proxy CIDR", func(c *config) { c.HTTPS.RelayTrustedProxies = "10.0.0.0/8" }, "distinct IP addresses"},
+		{"proxy in provided HTTPS", func(c *config) { c.HTTPS.Mode, c.HTTPS.RelayTrustedProxies = httpsProvided, "127.0.0.1" }, "requires external HTTPS"},
 		{"duplicate port", func(c *config) { c.Ports.API = 21115 }, "must be distinct"},
 		{"invalid local bind", func(c *config) { c.Ports.BindHost = "0.0.0.0" }, "unicast IPv4"},
 	} {

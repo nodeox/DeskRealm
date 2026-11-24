@@ -36,7 +36,7 @@ case "$mode" in
   relay-host) tests=(TestRelayEnrollmentAndHealthPostgres TestRelayHostEnrollmentPostgres) ;;
   relay-enrollment) tests=(TestRelayEnrollmentAndHealthPostgres TestRelayHostEnrollmentPostgres TestRegionalRelayRuntimePostgres) ;;
   relay-lifecycle) tests=(TestRegionalRelayLifecyclePostgres TestRegionalRelayBrowserPostgres) ;;
-  relay-probes) tests=(TestSessionRelayRoundPostgres) ;;
+  relay-probes) tests=(TestSessionRelayRoundPostgres TestSessionRelayNetworkPolicyPostgres TestRelayIngressUsesOnlyTrustedProxy) ;;
   delivery-tasks) tests=(TestDeliveryTaskRecoveryPostgres TestDeliveryTaskBrowserPostgres "${tasks[@]}") ;;
   overview) tests=("${overview[@]}") ;;
   managed-identity) tests=("${managed_identity[@]}") ;;

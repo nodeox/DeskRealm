@@ -49,11 +49,36 @@
 
 主控使用发起会话的受管用户凭据，受控端使用此会话目标设备的受管设备凭据。两端各自用设备密钥签署加入证明，向 `POST /v1/sessions/{id}/relay-candidates` 提交 `connection_id` 和 `signature`。主控先创建等待轮次，目标设备加入后开启最长两秒的采样窗口。新连接开始时替换此前轮次。
 
-`GET /v1/sessions/{id}/relay-candidates?connection_id=…` 返回当前轮次、有效期、快照中的公布地址、公钥、构建及配置版本。候选快照按组织及当前健康、探测、排空与容量状态生成。轮次内配置或资格变动的节点标记为不可用。
+`GET /v1/sessions/{id}/relay-candidates?connection_id=…` 返回当前轮次、有效期、网络规则修订、快照中的公布地址、公钥、构建及配置版本。候选须通过健康、探测、排空、容量和网络规则。轮次内配置或资格变动的节点标记为不可用。任一端来源地址变更时，主控应以新连接 ID 发起轮次。
 
 两端通过 `POST /v1/sessions/{id}/relay-probes` 各自为每个节点提交一批三个有序采样。请求包含 `connection_id`、`round_id`、`relay_id`、`samples` 和 `signature`。每个采样的 `result` 为 `ok`、`unreachable`、`timeout`、`protocol_mismatch` 或 `missing`。仅成功采样携带 `rtt_us`。至少两个成功采样才计算中位数。加入和报告使用共用的 Go/Rust 签名帧，报告签名覆盖会话、连接、轮次、角色、节点、配置版本及公布端点摘要。
 
-此检查点已提供中心轮次与结果接口。站点及 CIDR 规则、受管客户端采样入口、节点探测授权与实际转发接续开发。
+受管客户端的原生采样入口、节点探测授权与实际转发接续开发。
+
+### 站点与网络策略
+
+平台管理员通过 `GET /v1/admin/relay-network-policy` 查看当前规则与修订号，并在同源会话中提交 `POST /v1/admin/relay-network-policy`。保存时提供当前 `revision` 和完整规则，中心返回新修订。保存后，尚未核销会话的当前探测轮次失效，已提交的历史样本保留。初始修订为 0，使用 `organization` 模式，候选按组织与节点可用状态筛选。将模式设回 `organization` 时，提交空的规则数组。
+
+`restricted` 模式按最长 CIDR 前缀确定每端的站点，站点对按主控到受控的方向匹配。节点须位于站点对许可的区域，且双方的来源地址分别命中该节点的一个 CIDR。没有匹配规则的节点不会出现在候选中。以下例子中的节点 ID 应替换为控制台已登记的节点 ID。
+
+```json
+{
+  "revision": 0,
+  "mode": "restricted",
+  "networks": [
+    { "cidr": "10.10.0.0/16", "site": "office" },
+    { "cidr": "2001:db8:20::/64", "site": "plant" }
+  ],
+  "site_pairs": [
+    { "controller_site": "office", "target_site": "plant", "regions": ["north"] }
+  ],
+  "relay_networks": [
+    { "relay_id": "1c2fa0ac-3c92-4cdc-8b5e-803acdbb80ca", "cidrs": ["10.10.0.0/16", "2001:db8:20::/64"] }
+  ]
+}
+```
+
+直连中心时使用 TCP 对端地址。经 HTTPS 反代的部署可配置 `DESKREALM_RELAY_TRUSTED_PROXIES`，值为逗号分隔的直接反代 IP。反代须覆盖客户端提供的 `X-Forwarded-For`，并只转发一个已核验的客户端 IP。中心忽略其他来源的转发头；受信反代缺少该头或提供多值时，中心拒绝该轮次请求。通过安装器部署时使用 `https.relay_trusted_proxies`。
 
 ## 开发验证
 

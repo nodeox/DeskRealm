@@ -33,10 +33,11 @@ type imageConfig struct {
 }
 
 type httpsConfig struct {
-	Mode          string `json:"mode"`
-	Certificate   string `json:"certificate,omitempty"`
-	PrivateKey    string `json:"private_key,omitempty"`
-	CACertificate string `json:"ca_certificate,omitempty"`
+	Mode                string `json:"mode"`
+	Certificate         string `json:"certificate,omitempty"`
+	PrivateKey          string `json:"private_key,omitempty"`
+	CACertificate       string `json:"ca_certificate,omitempty"`
+	RelayTrustedProxies string `json:"relay_trusted_proxies,omitempty"`
 }
 
 type portConfig struct {
@@ -145,6 +146,9 @@ func validateConfig(c config, now time.Time) (config, error) {
 	}
 	switch c.HTTPS.Mode {
 	case httpsExternal:
+		if _, err := m1.ConfigureRelayIngress(c.HTTPS.RelayTrustedProxies); err != nil {
+			return c, fmt.Errorf("https.relay_trusted_proxies: %w", err)
+		}
 		if c.HTTPS.Certificate != "" || c.HTTPS.PrivateKey != "" {
 			return c, errors.New("external HTTPS uses the reverse proxy's certificate and private key")
 		}
@@ -152,6 +156,9 @@ func validateConfig(c config, now time.Time) (config, error) {
 			c.Ports.API = 8080
 		}
 	case httpsProvided:
+		if c.HTTPS.RelayTrustedProxies != "" {
+			return c, errors.New("https.relay_trusted_proxies requires external HTTPS")
+		}
 		if err := checkCertificate(c.HTTPS, origin.Hostname(), now); err != nil {
 			return c, err
 		}

@@ -60,6 +60,8 @@ Compose 包含 PostgreSQL、一次性迁移、Go 中心和受管会合四个服�
 
 使用自建 CA 时，可通过 `https.ca_certificate` 指定 PEM 绝对路径供受管会合校验中心 HTTPS。已有反代模式发布回环 API 端口，提供证书模式由 Go 服务读取挂载的证书和私钥。
 
+启用中继网络策略时，外部反代部署可在 `https.relay_trusted_proxies` 填写逗号分隔的反代 IP，以中心容器实际看到的直接对端地址为准。反代须用一个已核验的客户端地址覆盖 `X-Forwarded-For`。[中继网络策略](DeskRealm-M3-Relay.md#站点与网络策略)
+
 密钥和服务凭据保存在受限权限的部署目录。检查 Compose 时保留服务环境文件的路径，以免在输出中展开凭据。[Compose 配置命令](https://docs.docker.com/reference/cli/docker/compose/config/)
 
 ```sh

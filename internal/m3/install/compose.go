@@ -118,6 +118,9 @@ func renderCompose(d deployment) ([]byte, error) {
 		DependsOn: map[string]composeDependency{"migrate": {Condition: "service_completed_successfully"}},
 		Restart:   "unless-stopped",
 	}
+	if c.HTTPS.RelayTrustedProxies != "" {
+		center.Environment["DESKREALM_RELAY_TRUSTED_PROXIES"] = c.HTTPS.RelayTrustedProxies
+	}
 	if c.HTTPS.Mode == httpsProvided {
 		center.Ports = []composePort{port(c.Ports.API, c.Ports.API, "tcp", c.Ports.BindHost)}
 		center.Environment["DESKREALM_HTTP_ADDR"] = joinPort("0.0.0.0", c.Ports.API)

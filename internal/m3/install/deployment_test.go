@@ -198,3 +198,24 @@ func TestRenderComposeForProvidedTLS(t *testing.T) {
 		t.Fatal("managed rendezvous did not receive the configured CA")
 	}
 }
+
+func TestRenderComposeForRelayIngress(t *testing.T) {
+	c := fixtureConfig(t)
+	proxies := "192.0.2.7,2001:db8::5"
+	c.HTTPS.RelayTrustedProxies = proxies
+	c, err := validateConfig(c, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, files, err := newDeployment(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var model composeConfig
+	if err := json.Unmarshal(files[composeName], &model); err != nil {
+		t.Fatal(err)
+	}
+	if model.Services["center"].Environment["DESKREALM_RELAY_TRUSTED_PROXIES"] != proxies {
+		t.Fatal("center did not receive the configured ingress addresses")
+	}
+}

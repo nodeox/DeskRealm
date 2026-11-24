@@ -18,18 +18,19 @@ import (
 )
 
 type API struct {
-	store      Store
-	origin     string
-	secure     bool
-	web        fs.FS
-	hashSlots  chan struct{}
-	mu         sync.Mutex
-	attempts   map[string]attempt
-	pruneAt    time.Time
-	totp       *TOTPKey
-	oidc       *OIDC
-	managedKey *ManagedSigningKey
-	transport  ManagedTransport
+	store        Store
+	origin       string
+	secure       bool
+	web          fs.FS
+	hashSlots    chan struct{}
+	mu           sync.Mutex
+	attempts     map[string]attempt
+	pruneAt      time.Time
+	totp         *TOTPKey
+	oidc         *OIDC
+	managedKey   *ManagedSigningKey
+	transport    ManagedTransport
+	relayIngress RelayIngress
 }
 
 type attempt struct {
@@ -57,10 +58,11 @@ func Loopback(host string) bool {
 }
 
 type AuthConfig struct {
-	TOTP       *TOTPKey
-	OIDC       *OIDC
-	ManagedKey *ManagedSigningKey
-	Transport  ManagedTransport
+	TOTP         *TOTPKey
+	OIDC         *OIDC
+	ManagedKey   *ManagedSigningKey
+	Transport    ManagedTransport
+	RelayIngress RelayIngress
 }
 
 func NewHandler(store Store, origin *url.URL, web fs.FS, config ...AuthConfig) http.Handler {
@@ -68,6 +70,7 @@ func NewHandler(store Store, origin *url.URL, web fs.FS, config ...AuthConfig) h
 		web: web, hashSlots: make(chan struct{}, 4), attempts: make(map[string]attempt)}
 	if len(config) > 0 {
 		api.totp, api.oidc, api.managedKey, api.transport = config[0].TOTP, config[0].OIDC, config[0].ManagedKey, config[0].Transport
+		api.relayIngress = config[0].RelayIngress
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/bootstrap/status", api.bootstrapStatus)
@@ -161,6 +164,8 @@ func NewHandler(store Store, origin *url.URL, web fs.FS, config ...AuthConfig) h
 	mux.HandleFunc("POST /v1/internal/managed/rendezvous/authorize", api.authorizeSessionRoute)
 	mux.HandleFunc("POST /v1/internal/managed/relay/paired", api.authorizeSessionRoute)
 	mux.HandleFunc("GET /v1/admin/relays", api.listRelayNodes)
+	mux.HandleFunc("GET /v1/admin/relay-network-policy", api.getRelayNetworkPolicy)
+	mux.HandleFunc("POST /v1/admin/relay-network-policy", api.saveRelayNetworkPolicy)
 	mux.HandleFunc("GET /v1/admin/relays/{id}", api.relayNodeDetail)
 	mux.HandleFunc("POST /v1/admin/relays/{id}/lifecycle", api.changeRelayLifecycle)
 	mux.HandleFunc("POST /v1/admin/relays", api.issueRelayEnrollment)
