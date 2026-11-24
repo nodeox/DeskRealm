@@ -3,6 +3,9 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 case "${1:-}" in
+  signed-build)
+    exec python3 -B -m unittest discover -v -s managed/tests -p 'windows_*test.py'
+    ;;
   multi-relay)
     bash scripts/deskrealm-m3-test relay-selection
     exec python3 -B managed/tests/relay_enrollment.py --multi-relay
@@ -83,7 +86,7 @@ case "${1:-}" in
     )
     ;;
   *)
-    echo "usage: $0 install-preflight|install-prepare|install-bootstrap|install-offline|install-resume|install-relay|install-task|delivery-tasks|relay-identity|relay-host|relay-enrollment|relay-lifecycle|relay-probes|relay-selection|multi-relay" >&2
+    echo "usage: $0 install-preflight|install-prepare|install-bootstrap|install-offline|install-resume|install-relay|install-task|delivery-tasks|relay-identity|relay-host|relay-enrollment|relay-lifecycle|relay-probes|relay-selection|multi-relay|signed-build" >&2
     exit 2
     ;;
 esac
