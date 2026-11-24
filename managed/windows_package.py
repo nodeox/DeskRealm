@@ -386,6 +386,7 @@ def verify(approval, directory, signature_path, key, openssl):
         openssl_signature(openssl, "-verify", raw, pinned_key, signature)
     check_artifacts(directory, approval, records)
     print(f"DeskRealm {approval['version']}: x64 and ARM64 development packages verified")
+    return raw, records
 
 
 def main():

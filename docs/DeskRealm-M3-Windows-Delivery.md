@@ -39,7 +39,7 @@ python3 -B managed/windows_package.py sign approval.json release.json developer-
 python3 -B managed/windows_package.py verify approval.json candidate release.sig developer-public.pem
 ```
 
-同一批准输入和构建证据会产生相同的包与清单。打包失败时保留原候选目录，签名服务恢复后可用同一清单重试。签名范围记录为 `development`，使用组织信任的开发公钥验证。当前交付物是带分离签名的开发 ZIP。Windows Authenticode 安装器和客户端读取配置在后续开发中接入。
+同一批准输入和构建证据会产生相同的包与清单。打包失败时保留原候选目录，签名服务恢复后可用同一清单重试。签名范围记录为 `development`，使用组织信任的开发公钥验证。该 ZIP 可用于中心分组下载，也可作为 Authenticode 安装器的输入。
 
 ## 中心任务验证
 
@@ -101,10 +101,30 @@ CANDIDATE_DIR/<manifest-sha256>/
 
 获授权的发放人使用输出字段申请上一节的凭据。部署工具将发放接口返回的 JSON 放到 `deployment_file`，文件应与密钥目录使用同一 Windows 用户的访问权限。部署工具应在该用户第一次启动前完成写入。直接启动 `DeskRealm.exe` 时，程序从公开配置获取中心地址和公钥，通过 Windows 信任的 HTTPS 连接核对中心签名身份，用本机密钥提交挑战，并将登记回执保存到当前用户的 `LOCALAPPDATA\DeskRealm\deployments`。保存回执后删除部署文件。中心已登记但回执丢失时，程序在下次启动重试原挑战。后续启动沿用本机身份与回执，并将中心、会合和中继设置传给受管客户端。
 
-开发包使用手动解压步骤。Windows Authenticode 安装器将自动放置已验证文件并创建指向 `DeskRealm.exe` 的入口。
+## Authenticode 开发安装器
+
+用已批准且包含启动程序的 x64 和 ARM64 ZIP 生成两个自包含安装器。构建端使用已提交的安装器源码和 `Go 1.27.4`，复验原发布签名、归档摘要与内部 PE 架构，再将原 ZIP 嵌入对应架构的安装器。
+
+```bash
+python3 -B managed/windows_installer.py prepare \
+  approval.json candidate release.sig developer-public.pem unsigned
+```
+
+独立签名环境以组织批准的代码签名证书和 SHA-256 为 `unsigned/DeskRealm-Setup-x64.exe`、`unsigned/DeskRealm-Setup-arm64.exe` 签名，将签后文件以相同文件名放在 `signed`。开发签名证书的私钥由签名环境持有。验证端独立保存已批准的 CA 及发布者证书，重建未签安装器，比较签名前后的字节，核对签名链、签名算法及发布者证书 SHA-256。
+
+```bash
+python3 -B managed/windows_installer.py verify \
+  approval.json candidate release.sig developer-public.pem signed \
+  code-signing-ca.pem publisher.pem > installer-verification.json
+```
+
+安装器以当前 Windows 用户运行。它通过 Windows Authenticode 信任检查后，按归档摘要安装到本地用户的 `Programs\DeskRealm\releases`，并创建指向 `DeskRealm.exe` 的开始菜单入口。重新安装相同归档会检查已有文件。新版本解压成功后才更新入口，旧安装目录及登记状态继续保留。部署凭据仍通过上一节的流程单独下发。
+
+本轮验证使用临时开发 CA。中心的分组下载暂以 ZIP 为交付物，签名安装器的发布记录与下载接入后续完成。
 
 ```bash
 bash scripts/deskrealm-m3-test signed-build
 bash scripts/deskrealm-m3-test delivery-tasks
 bash scripts/deskrealm-m3-test managed-release
+bash scripts/deskrealm-m3-test windows-installer
 ```
