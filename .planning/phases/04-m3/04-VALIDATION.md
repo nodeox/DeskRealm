@@ -237,3 +237,19 @@ Task 1 接续受管客户端的原生采样入口，以及绑定会话、角色�
 同目录的 `relay-enrollment.log` SHA-256 为 `8fca02e7cc548dffe667adceb7ff0333d11dfdec49665e665c3b0c08645e6d78`，`managed-db.log` 为 `277e7f8e5671e9389a80d0f8c759eba481dde71a924b771dd6e601ec0d1e178c`。
 
 Task 1 接续 Rust 主控和受控端的采样入口。节点在本地校验，中心撤销后，之前签出的凭据可用到两秒窗口结束。
+
+## 04-04 Rust 双端原生探测
+
+2026-11-24，候选 `1c492ce446e53aa67a2fb3b7e4f6f8371c693cd6` 的 `relay-probes`、Linux ARM64 受管桌面编译检查、M2 原生准入回归和 M1 全量回归均通过。
+
+| 检查 | 结果 |
+| --- | --- |
+| 原生会话入口 | 主控发起中继会话时以当前连接创建探测轮次。受控端处理会合转发的中继请求时加入。双方使用现有 Rust `Authority` 的 HTTPS 与设备签名。桌面接入通过 `cargo check --locked --lib`。 |
+| 双端真实采样 | 隔离 Linux ARM64 Rust 测试经真实 Go 中心和测试 CA，与两套实际 `hbbr` 通信。双方验证中心签发的节点凭据及中继响应，分别提交每节点三个成功 RTT。在 PostgreSQL 验证共 12 个成功样本，关联同一会话。 |
+| 原有路径 | M2 直连、单中继端点准入和四项租约检查通过。M1 全仓 Go 竞态检查、Vue 类型检查和三个 Chromium 场景通过。 |
+
+日志保存在本地 Git 目录 `deskrealm-evidence/m3/1c492ce446e53aa67a2fb3b7e4f6f8371c693cd6/`。`relay-probes.log` 的 SHA-256 为 `2994d411060ce2df2ddfa1d8678ad140f75536220bdb31a295ef6e5cbfcd5a17`，`desktop-check.log` 为 `59ecb96c0ee6578434061b09edaa86a2f20d7b81dc5e5b5df29b0f72525fb324`。
+
+同目录的 `native-admission.log` SHA-256 为 `76be8b2bac92b127c50ef3c9e071ec0674999ef16fd22013469dfd27c4cdabd6`，`m1-all.log` 为 `3b68f329646ce3cc149029b1bd69f278bad8e13fa107765172083d0b14b4217b`。
+
+Task 1 的开发验证完成。当前连接仍使用配置的单中继。Task 2 接续按双端样本选点、回退与区域会话转发。

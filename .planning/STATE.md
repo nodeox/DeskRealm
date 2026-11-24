@@ -3,10 +3,10 @@ gsd_state_version: "1.0"
 current_phase: 4
 current_phase_name: M3 部署与自动化交付
 status: executing
-last_updated: "2026-11-24T04:23:38Z"
-last_activity: 2026-11-23
-last_activity_desc: M3 04-04 两套 Linux 中继的会话探测凭据与端点持钥验证通过
-state_head: 3672befa982631e3e2a7fd9c812bf37165f1c632
+last_updated: "2026-11-24T06:00:42Z"
+last_activity: 2026-11-24
+last_activity_desc: M3 04-04 Rust 两端经真实区域中继完成探测与结果提交
+state_head: 1c492ce446e53aa67a2fb3b7e4f6f8371c693cd6
 progress:
   total_phases: 5
   completed_phases: 3
@@ -27,9 +27,9 @@ See: .planning/PROJECT.md (updated 2026-11-22)
 ## Current Position
 
 Phase: 4 — M3 部署与自动化交付
-Plan: [04-04](phases/04-m3/04-04-PLAN.md) Task 1
-Status: In progress，节点凭据校验与双端持钥探测通过，接续 Rust 受管会话中的采样触发与提交。
-Last activity: 2026-11-23 — 两套 Linux `hbbr` 完成角色绑定探测，四组签名报告入库。[04-04 验证](phases/04-m3/04-VALIDATION.md#04-04-中继侧探测授权)
+Plan: [04-04](phases/04-m3/04-04-PLAN.md) Task 2
+Status: Ready，Task 1 的双端原生探测通过，接续选点、回退和区域中继转发。
+Last activity: 2026-11-24 — Rust 两端对两套 Linux `hbbr` 提交四组签名报告，共 12 次成功采样。[04-04 验证](phases/04-m3/04-VALIDATION.md#04-04-rust-双端原生探测)
 
 ## Accumulated Context
 
@@ -41,4 +41,4 @@ M0–M3 开发完成后进入目标环境验收。先 Linux 中心和一台中�
 
 M0、M1、M2 已完成开发验证。M2 交接包括账号停用后的续租拒绝、通讯录连接 ACL、实际会话回执和 Windows 受管入口。
 
-[04-03 小结](phases/04-m3/04-03-SUMMARY.md) 记录双中继入池、故障恢复和操作。04-04 Task 1 接续 Rust 主控和受控端的原生会话采样入口。Task 2 接续最低 RTT 选点、会话转发票据和实际转发。
+[04-03 小结](phases/04-m3/04-03-SUMMARY.md) 记录双中继入池、故障恢复和操作。04-04 Task 2 接续双端中位 RTT 排序与中心实时复核、无样本回退、重连、会话转发票据和实际转发。
