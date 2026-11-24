@@ -97,8 +97,10 @@ class WindowsEvidenceTests(unittest.TestCase):
             log = "".join(f"test path::tests::{case} ... ok\n" for case in tests)
             log += f"test result: ok. {len(tests)} passed; 0 failed\n\nExit code: 0\n"
             (directory / name).write_text(log, encoding="utf-8")
-        for name in ("flutter-build.log", "vcpkg-build.log"):
+        for name in ("flutter-build.log", "vcpkg-build.log", "launcher-build.log"):
             (directory / name).write_bytes(b"synthetic log\nExit code: 0\n")
+        launcher_tests = "".join(f"--- PASS: {case} (0.01s)\n" for case in build.LAUNCHER_TESTS)
+        (directory / "launcher-tests.log").write_text(launcher_tests + "\nExit code: 0\n", encoding="utf-8")
         build.write_json(directory / "manifest.json", {
             "schema": 1, "source": self.source, "upstream": self.upstream, "target": target,
             "cargo_lock_sha256": "c" * 64, "flutter_lock_sha256": "d" * 64,
@@ -109,6 +111,7 @@ class WindowsEvidenceTests(unittest.TestCase):
                 "dart": f"windows_{spec['arch']}", "vcpkg_commit": build.VCPKG_COMMIT,
                 "triplet": f"{spec['arch']}-windows-static", "clang": f"clang version {spec['llvm']}",
                 "msvc": "example", "windows_sdk": "example",
+                "go": f"go version {build.GO_VERSION} windows/{'amd64' if spec['arch'] == 'x64' else 'arm64'}",
             },
             "files": {name: build.sha_file(directory / name) for name in build.EVIDENCE_FILES},
         })

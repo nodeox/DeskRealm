@@ -19,10 +19,9 @@ import runpy
 import subprocess
 import sys
 
-identity = runpy.run_path("managed/windows_build.py")["source_identity"]()
-paths = ["managed/upstream.lock", "managed/patches", "managed/native/deskrealm_protocol.rs",
-         "managed/windows_build.py", "managed/tests/windows_build_test.py",
-         "scripts/deskrealm-managed-source", ".github/workflows/deskrealm-windows.yml"]
+build = runpy.run_path("managed/windows_build.py")
+identity = build["source_identity"]()
+paths = [path for path in build["WINDOWS_INPUTS"] if path != "scripts/deskrealm-m2-test"]
 if set(subprocess.check_output(["git", "ls-files", "--", *paths], text=True).splitlines()) != (
         set(identity["inputs"]) - {"scripts/deskrealm-m2-test"}):
     sys.exit("Windows build input list changed")
