@@ -1,0 +1,92 @@
+diff --git a/libs/base/src/deskrealm_endpoint.rs b/libs/base/src/deskrealm_endpoint.rs
+index 9a48b2c10d18c00fa41cc4f780e191e796262d3f..1e7d63f4798c999aaf6309af32d765a05325691c 100644
+--- a/libs/base/src/deskrealm_endpoint.rs
++++ b/libs/base/src/deskrealm_endpoint.rs
+@@ -737,6 +737,28 @@ fn now_ms() -> ResultType<u64> {
+     )?)
+ }
+ 
++fn validate_challenge_expiry(expires_ms: u64, now_ms: u64) -> ResultType<()> {
++    const CHALLENGE_TTL_MS: u64 = 60_000;
++    const CLOCK_SKEW_MARGIN_MS: u64 = 5_000;
++    let remaining_ms = expires_ms.saturating_sub(now_ms);
++    // The center still enforces the original expiry when consuming the challenge.
++    if !(1..=CHALLENGE_TTL_MS + CLOCK_SKEW_MARGIN_MS).contains(&remaining_ms) {
++        bail!("设备认证挑战已过期或与本机时钟不符");
++    }
++    Ok(())
++}
++
++#[test]
++fn identity_challenge_allows_small_clock_skew() {
++    let now = 1_800_000_000_000;
++    assert!(validate_challenge_expiry(now + 60_000, now).is_ok());
++    assert!(validate_challenge_expiry(now + 60_001, now).is_ok());
++    assert!(validate_challenge_expiry(now + 65_000, now).is_ok());
++    assert!(validate_challenge_expiry(now + 65_001, now).is_err());
++    assert!(validate_challenge_expiry(now, now).is_err());
++    assert!(validate_challenge_expiry(now - 1, now).is_err());
++}
++
+ fn uuid_bytes(value: &str) -> ResultType<Uuid> {
+     let uuid = Uuid::parse_str(value)?;
+     if uuid.to_string() != value {
+diff --git a/libs/base/src/deskrealm_endpoint/account.rs b/libs/base/src/deskrealm_endpoint/account.rs
+index 2a33386dd393c691355af18af5717bf4779f366c..a252e06ae40977e84d265d19518a252ec48b3129 100644
+--- a/libs/base/src/deskrealm_endpoint/account.rs
++++ b/libs/base/src/deskrealm_endpoint/account.rs
+@@ -1,6 +1,6 @@
+ use super::{
+-    check_credential, encode, now_ms, uuid_bytes, Authority, DeviceCredential, DeviceIdentity,
+-    URL_SAFE_NO_PAD,
++    check_credential, encode, now_ms, uuid_bytes, validate_challenge_expiry, Authority,
++    DeviceCredential, DeviceIdentity, URL_SAFE_NO_PAD,
+ };
+ use hbb_common::{
+     anyhow::{anyhow, bail},
+@@ -284,16 +284,15 @@ impl BindingChallenge {
+         organization: Uuid,
+         epoch: u64,
+     ) -> ResultType<Vec<u8>> {
+-        let expires = self.expires_ms.saturating_sub(now_ms()?);
+         if uuid_bytes(&self.organization_id)? != organization
+             || uuid_bytes(&self.device_id)? != device.id
+             || uuid_bytes(&self.user_id)? != session.user
+             || self.key_epoch != epoch
+             || self.protocol_version != 1
+-            || !(1..=60_000).contains(&expires)
+         {
+             bail!("设备绑定挑战与当前账号或设备不符");
+         }
++        validate_challenge_expiry(self.expires_ms, now_ms()?)?;
+         let id = uuid_bytes(&self.challenge_id)?;
+         let nonce = URL_SAFE_NO_PAD.decode(&self.nonce)?;
+         check_credential(&self.flow, "")?;
+diff --git a/libs/base/src/deskrealm_endpoint/runtime.rs b/libs/base/src/deskrealm_endpoint/runtime.rs
+index fcfdc600f89eaf9c8bae8337d0550a18b1e1d9a4..35168dcb69a30b0c276e7ab17fb3f34549653d90 100644
+--- a/libs/base/src/deskrealm_endpoint/runtime.rs
++++ b/libs/base/src/deskrealm_endpoint/runtime.rs
+@@ -1,6 +1,6 @@
+ use super::{
+     check_credential, decode_hex_32, encode, now_ms, policy_mask, uuid_bytes, valid_identifier,
+-    Authority, DeviceIdentity, URL_SAFE_NO_PAD,
++    validate_challenge_expiry, Authority, DeviceIdentity, URL_SAFE_NO_PAD,
+ };
+ use hbb_common::{
+     anyhow::{anyhow, bail},
+@@ -107,14 +107,13 @@ impl Authority {
+         let challenge: DeviceChallenge =
+             serde_json::from_slice(&body).map_err(|_| anyhow!("invalid device challenge"))?;
+         let id = uuid_bytes(&challenge.challenge_id)?;
+-        let expires = challenge.expires_ms.saturating_sub(now_ms()?);
+         if uuid_bytes(&challenge.device_id)? != device.id
+             || uuid_bytes(&challenge.organization_id)? != organization
+             || challenge.protocol_version != 1
+-            || !(1..=60_000).contains(&expires)
+         {
+             bail!("device challenge does not match this identity");
+         }
++        validate_challenge_expiry(challenge.expires_ms, now_ms()?)?;
+         let nonce = URL_SAFE_NO_PAD.decode(challenge.nonce)?;
+         let proof = encode(
+             DEVICE_CHALLENGE,
