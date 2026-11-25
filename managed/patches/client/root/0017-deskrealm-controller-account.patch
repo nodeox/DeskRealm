@@ -1,0 +1,990 @@
+diff --git a/flutter/lib/common/widgets/deskrealm_account.dart b/flutter/lib/common/widgets/deskrealm_account.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..4a4d4ba8b74f73134f376b13cbe0685313420c24
+--- /dev/null
++++ b/flutter/lib/common/widgets/deskrealm_account.dart
+@@ -0,0 +1,173 @@
++import 'dart:convert';
++
++import 'package:flutter/material.dart';
++
++import '../../common.dart';
++import '../../models/platform_model.dart';
++
++bool get hasDeskRealmAccount =>
++    isWindows &&
++    bind.mainGetBuildinOption(key: 'deskrealm-managed-mode') == 'Y';
++
++String get deskRealmCenter =>
++    bind.mainGetBuildinOption(key: 'deskrealm-managed-origin');
++
++class DeskRealmAccount extends StatefulWidget {
++  const DeskRealmAccount({super.key, this.onSignedIn});
++
++  final VoidCallback? onSignedIn;
++
++  @override
++  State<DeskRealmAccount> createState() => _DeskRealmAccountState();
++}
++
++class _DeskRealmAccountState extends State<DeskRealmAccount> {
++  final _username = TextEditingController();
++  final _password = TextEditingController();
++  final _code = TextEditingController();
++  String _state = 'signed_out';
++  String _account = '';
++  String? _error;
++  bool _busy = false;
++
++  @override
++  void initState() {
++    super.initState();
++    _request('status');
++  }
++
++  @override
++  void dispose() {
++    _username.dispose();
++    _password.dispose();
++    _code.dispose();
++    super.dispose();
++  }
++
++  Future<void> _request(String action) async {
++    if (_busy) return;
++    final username = _username.text.trim();
++    final secret = action == 'verify'
++        ? _code.text.trim()
++        : action == 'login'
++        ? _password.text
++        : '';
++    if ((action == 'login' && (username.isEmpty || secret.isEmpty)) ||
++        (action == 'verify' && !RegExp(r'^[0-9]{6}$').hasMatch(secret))) {
++      setState(() => _error = action == 'login' ? '请输入端域账号和密码' : '请输入六位验证码');
++      return;
++    }
++    setState(() {
++      _busy = true;
++      _error = null;
++    });
++    _password.clear();
++    _code.clear();
++    Map<String, dynamic> result;
++    try {
++      final raw = await bind.mainDeskrealmAccount(
++        action: action,
++        username: username,
++        secret: secret,
++      );
++      result = jsonDecode(raw) as Map<String, dynamic>;
++    } catch (_) {
++      result = {'error': '无法读取端域账号状态，请重试'};
++    }
++    if (!mounted) return;
++    setState(() {
++      _busy = false;
++      _error = result['error'] as String?;
++      if (result['state'] is String) {
++        _state = result['state'] as String;
++        _account = result['username'] as String? ?? '';
++      } else if (action == 'logout') {
++        _state = 'signed_out';
++        _account = '';
++      }
++    });
++    if (_state == 'signed_in' && _error == null) widget.onSignedIn?.call();
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    final origin = deskRealmCenter;
++    final signedIn = _state == 'signed_in';
++    final verifying = _state == 'totp';
++    return Padding(
++      padding: const EdgeInsets.symmetric(vertical: 8),
++      child: Column(
++        mainAxisSize: MainAxisSize.min,
++        crossAxisAlignment: CrossAxisAlignment.start,
++        children: [
++          SelectableText(origin.isEmpty ? '安装包缺少端域中心地址' : '端域中心 $origin'),
++          const SizedBox(height: 12),
++          if (signedIn)
++            Text('已登录 $_account')
++          else if (verifying)
++            TextField(
++              controller: _code,
++              autofocus: true,
++              enabled: !_busy,
++              decoration: const InputDecoration(labelText: '身份验证码'),
++              keyboardType: TextInputType.number,
++              onSubmitted: (_) => _request('verify'),
++            )
++          else ...[
++            TextField(
++              controller: _username,
++              enabled: !_busy,
++              decoration: const InputDecoration(labelText: '端域账号'),
++            ),
++            TextField(
++              controller: _password,
++              enabled: !_busy,
++              decoration: const InputDecoration(labelText: '密码'),
++              obscureText: true,
++              onSubmitted: (_) => _request('login'),
++            ),
++          ],
++          if (_error != null)
++            Padding(
++              padding: const EdgeInsets.only(top: 8),
++              child: Text(
++                _error!,
++                style: TextStyle(color: Theme.of(context).colorScheme.error),
++              ),
++            ),
++          const SizedBox(height: 12),
++          Wrap(
++            spacing: 8,
++            children: [
++              FilledButton(
++                onPressed: _busy || origin.isEmpty
++                    ? null
++                    : () => _request(
++                        signedIn
++                            ? 'logout'
++                            : verifying
++                            ? 'verify'
++                            : 'login',
++                      ),
++                child: Text(
++                  _busy
++                      ? '正在处理…'
++                      : signedIn
++                      ? '退出登录'
++                      : verifying
++                      ? '验证并登录'
++                      : '登录端域',
++                ),
++              ),
++              if (verifying)
++                TextButton(
++                  onPressed: _busy ? null : () => _request('cancel'),
++                  child: const Text('返回账号登录'),
++                ),
++            ],
++          ),
++        ],
++      ),
++    );
++  }
++}
+diff --git a/flutter/lib/common/widgets/login.dart b/flutter/lib/common/widgets/login.dart
+index 826949456d4e4dd2a2371ce9f6cd371e44dc4208..49d74962e5cc627a14ab0199408619bc17c93e2c 100644
+--- a/flutter/lib/common/widgets/login.dart
++++ b/flutter/lib/common/widgets/login.dart
+@@ -12,6 +12,7 @@ import 'package:url_launcher/url_launcher.dart';
+ 
+ import '../../common.dart';
+ import './dialog.dart';
++import './deskrealm_account.dart';
+ import './oidc_auth_status.dart';
+ 
+ const kOpSvgList = [
+@@ -713,6 +714,20 @@ Future<bool?> loginDialog() {
+ 
+ Future<bool?> _openLoginDialogOnce() async {
+   try {
++    if (hasDeskRealmAccount) {
++      final context = Get.context;
++      if (context == null) return false;
++      return await showDialog<bool>(
++        context: context,
++        builder: (context) => AlertDialog(
++          title: const Text('登录端域'),
++          content: SizedBox(
++            width: 400,
++            child: DeskRealmAccount(onSignedIn: () => Navigator.of(context).pop(true)),
++          ),
++        ),
++      );
++    }
+     return await _openLoginDialog();
+   } finally {
+     _activeLoginDialog = null;
+diff --git a/flutter/lib/desktop/pages/desktop_setting_page.dart b/flutter/lib/desktop/pages/desktop_setting_page.dart
+index 730d75827d4ddde459e17d7cee721ff7fe2bbbc3..14831868ccde3e5dd85d88b6bdb1e8e975998224 100644
+--- a/flutter/lib/desktop/pages/desktop_setting_page.dart
++++ b/flutter/lib/desktop/pages/desktop_setting_page.dart
+@@ -26,6 +26,7 @@ import 'package:url_launcher/url_launcher.dart';
+ import 'package:url_launcher/url_launcher_string.dart';
+ 
+ import '../../common/widgets/dialog.dart';
++import '../../common/widgets/deskrealm_account.dart';
+ import '../../common/widgets/login.dart';
+ 
+ const double _kTabWidth = 200;
+@@ -1925,7 +1926,13 @@ class _NetworkState extends State<_Network> with AutomaticKeepAliveClientMixin {
+           child: Column(
+             crossAxisAlignment: CrossAxisAlignment.start,
+             children: [
+-              if (!hideServer)
++              if (!hideServer && hasDeskRealmAccount)
++                ListTile(
++                  leading: const Icon(Icons.dns_outlined),
++                  title: const Text('端域 API 地址'),
++                  subtitle: SelectableText(deskRealmCenter),
++                )
++              else if (!hideServer)
+                 listTile(
+                   icon: Icons.dns_outlined,
+                   title: 'ID/Relay Server',
+@@ -2285,7 +2292,12 @@ class _AccountState extends State<_Account> {
+     return ListView(
+       controller: scrollController,
+       children: [
+-        _Card(title: 'Account', children: [accountAction(), useInfo()]),
++        _Card(
++          title: 'Account',
++          children: hasDeskRealmAccount
++              ? [const DeskRealmAccount()]
++              : [accountAction(), useInfo()],
++        ),
+       ],
+     ).marginOnly(bottom: _kListViewBottomMargin);
+   }
+diff --git a/flutter/lib/models/user_model.dart b/flutter/lib/models/user_model.dart
+index 405a9faddc9198215655ff7e359e6c6f5336e107..a3727777f606710df14da856b097d2c12369014e 100644
+--- a/flutter/lib/models/user_model.dart
++++ b/flutter/lib/models/user_model.dart
+@@ -51,7 +51,11 @@ class UserModel {
+   }
+ 
+   void refreshCurrentUser() async {
+-    if (bind.isDisableAccount()) return;
++    if (bind.isDisableAccount() ||
++        (isWindows &&
++            bind.mainGetBuildinOption(key: 'deskrealm-managed-mode') == 'Y')) {
++      return;
++    }
+     networkError.value = '';
+     networkErrorFromServer.value = false;
+     final token = bind.mainGetLocalOption(key: 'access_token');
+diff --git a/flutter/lib/web/bridge.dart b/flutter/lib/web/bridge.dart
+index a2e7f4fa12aa15c3d8e6ee85826771f89222394c..e54fb53e8fba3a47d9d713cbd074f449831a42db 100644
+--- a/flutter/lib/web/bridge.dart
++++ b/flutter/lib/web/bridge.dart
+@@ -938,6 +938,14 @@ class RustdeskImpl {
+     return Future(() => js.context.callMethod('getByName', ['api_server']));
+   }
+ 
++  Future<String> mainDeskrealmAccount(
++      {required String action,
++      required String username,
++      required String secret,
++      dynamic hint}) async {
++    return '';
++  }
++
+   Future<void> mainPostRequest(
+       {required String url,
+       required String body,
+diff --git a/libs/base/src/deskrealm_endpoint.rs b/libs/base/src/deskrealm_endpoint.rs
+index 9551e1388d2d98c3837f5680fa5ac41f2f8c99c1..9a48b2c10d18c00fa41cc4f780e191e796262d3f 100644
+--- a/libs/base/src/deskrealm_endpoint.rs
++++ b/libs/base/src/deskrealm_endpoint.rs
+@@ -37,6 +37,7 @@ const INITIAL_LEASE: Duration = Duration::from_secs(30);
+ const MAX_HTTP_BODY: usize = 8192;
+ const MAX_HANDSHAKE_FRAME: usize = 1024;
+ 
++mod account;
+ mod lease;
+ mod relay_probes;
+ mod relay_selection;
+@@ -46,6 +47,7 @@ pub use lease::{
+     send_controller_end, FileDirection, FileEvent, FileResult, ManagedAction, SessionAccess,
+     SessionFileReceipts, SessionStatus, StopReason,
+ };
++pub use account::{ControllerCredential, ControllerLogin, ControllerSession, PendingTOTP};
+ pub use runtime::{DeviceCredential, InstalledPolicy};
+ 
+ const ACTIONS: [&str; 5] = ["view", "input", "audio", "clipboard", "file_transfer"];
+diff --git a/libs/base/src/deskrealm_endpoint/account.rs b/libs/base/src/deskrealm_endpoint/account.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..2a33386dd393c691355af18af5717bf4779f366c
+--- /dev/null
++++ b/libs/base/src/deskrealm_endpoint/account.rs
+@@ -0,0 +1,393 @@
++use super::{
++    check_credential, encode, now_ms, uuid_bytes, Authority, DeviceCredential, DeviceIdentity,
++    URL_SAFE_NO_PAD,
++};
++use hbb_common::{
++    anyhow::{anyhow, bail},
++    base64::Engine as _,
++    chrono::{DateTime, Utc},
++    deskrealm_protocol::USER_BINDING,
++    sodiumoxide::crypto::hash::sha256,
++    uuid::Uuid,
++    ResultType,
++};
++use reqwest::{
++    header::{COOKIE, ORIGIN, SET_COOKIE},
++    Response, StatusCode,
++};
++use serde_derive::Deserialize;
++use serde_json::{json, Value};
++use std::time::Duration;
++use tokio::time::Instant;
++
++const SESSION_COOKIE: &str = "__Host-deskrealm";
++const TOTP_COOKIE: &str = "__Host-deskrealm-totp";
++
++pub struct PendingTOTP(String);
++
++pub enum ControllerLogin {
++    SignedIn(ControllerSession),
++    NeedsTOTP(PendingTOTP),
++}
++
++pub struct ControllerSession {
++    cookie: String,
++    csrf: String,
++    user: Uuid,
++    username: String,
++}
++
++pub struct ControllerCredential {
++    value: String,
++    deadline: Instant,
++}
++
++impl ControllerSession {
++    pub fn username(&self) -> &str {
++        &self.username
++    }
++}
++
++impl ControllerCredential {
++    pub fn bearer(&self) -> &str {
++        &self.value
++    }
++
++    pub fn needs_refresh(&self) -> bool {
++        Instant::now() + Duration::from_secs(60) >= self.deadline
++    }
++}
++
++#[derive(Deserialize)]
++struct Principal {
++    user_id: String,
++    username: String,
++    csrf_token: String,
++}
++
++#[derive(Deserialize)]
++struct BindingChallenge {
++    organization_id: String,
++    device_id: String,
++    user_id: String,
++    challenge_id: String,
++    nonce: String,
++    flow: String,
++    key_epoch: u64,
++    expires_ms: u64,
++    protocol_version: u16,
++}
++
++impl Authority {
++    pub async fn controller_login(
++        &self,
++        username: &str,
++        password: &str,
++    ) -> ResultType<ControllerLogin> {
++        let body = Self::read_response(
++            self.client
++                .get(self.center.join("/v1/managed/signing-key")?),
++            &[200],
++        )
++        .await?;
++        let identity: Value = serde_json::from_slice(&body)?;
++        let key = URL_SAFE_NO_PAD.encode(self.center_key.0);
++        if identity["kid"].as_str() != Some(self.kid.as_str())
++            || identity["public_key"].as_str() != Some(key.as_str())
++        {
++            bail!("中心签名身份与安装配置不符");
++        }
++        let response = self
++            .account_post(
++                "/v1/auth/login",
++                None,
++                None,
++                json!({"username": username, "password": password}),
++            )
++            .await?;
++        match response.status() {
++            StatusCode::NO_CONTENT => Ok(ControllerLogin::SignedIn(
++                self.controller_session(read_cookie(&response, SESSION_COOKIE)?)
++                    .await?,
++            )),
++            StatusCode::ACCEPTED => Ok(ControllerLogin::NeedsTOTP(PendingTOTP(read_cookie(
++                &response,
++                TOTP_COOKIE,
++            )?))),
++            StatusCode::UNAUTHORIZED => bail!("用户名或密码不正确，或账号已停用"),
++            StatusCode::TOO_MANY_REQUESTS => bail!("登录请求过多，请稍后重试"),
++            status => bail!("端域中心登录失败（HTTP {}）", status.as_u16()),
++        }
++    }
++
++    pub async fn controller_totp(
++        &self,
++        pending: &PendingTOTP,
++        code: &str,
++    ) -> ResultType<ControllerSession> {
++        let response = self
++            .account_post(
++                "/v1/auth/totp/verify",
++                Some((TOTP_COOKIE, &pending.0)),
++                None,
++                json!({"code": code}),
++            )
++            .await?;
++        match response.status() {
++            StatusCode::NO_CONTENT => {
++                self.controller_session(read_cookie(&response, SESSION_COOKIE)?)
++                    .await
++            }
++            StatusCode::UNAUTHORIZED => bail!("验证码不正确或已过期，请重试或重新登录"),
++            status => bail!("端域中心验证失败（HTTP {}）", status.as_u16()),
++        }
++    }
++
++    async fn controller_session(&self, cookie: String) -> ResultType<ControllerSession> {
++        let body = Self::read_response(
++            self.client
++                .get(self.center.join("/v1/auth/session")?)
++                .header(COOKIE, format!("{}={}", SESSION_COOKIE, cookie)),
++            &[200],
++        )
++        .await?;
++        let principal: Principal = serde_json::from_slice(&body)?;
++        check_credential(&principal.csrf_token, "")?;
++        Ok(ControllerSession {
++            cookie,
++            csrf: principal.csrf_token,
++            user: uuid_bytes(&principal.user_id)?,
++            username: principal.username,
++        })
++    }
++
++    pub async fn bind_controller(
++        &self,
++        session: &ControllerSession,
++        device: &DeviceIdentity,
++        organization: Uuid,
++        credential: &DeviceCredential,
++    ) -> ResultType<ControllerCredential> {
++        let response = self
++            .account_post(
++                "/v1/managed/users/challenge",
++                Some((SESSION_COOKIE, &session.cookie)),
++                Some(&session.csrf),
++                json!({"device_id": device.id.to_string(), "device_credential": credential.bearer()}),
++            )
++            .await?;
++        if response.status() != StatusCode::OK {
++            bail!("端域中心拒绝设备绑定，请检查账号登录和设备审批状态");
++        }
++        let body = Self::read_response_body(response, super::MAX_HTTP_BODY).await?;
++        let challenge: BindingChallenge = serde_json::from_slice(&body)?;
++        let proof = challenge.proof(session, device, organization, credential.key_epoch)?;
++        let started = Instant::now();
++        let response = self
++            .account_post(
++                "/v1/managed/users/complete",
++                Some((SESSION_COOKIE, &session.cookie)),
++                Some(&session.csrf),
++                json!({
++                    "device_id": device.id.to_string(),
++                    "challenge_id": challenge.challenge_id,
++                    "signature": URL_SAFE_NO_PAD.encode(device.sign(&proof)),
++                }),
++            )
++            .await?;
++        if response.status() != StatusCode::CREATED {
++            bail!("端域中心未签发主控凭据，请重新登录");
++        }
++        let body = Self::read_response_body(response, super::MAX_HTTP_BODY).await?;
++        #[derive(Deserialize)]
++        struct Credential {
++            credential: String,
++            expires_at: String,
++        }
++        let credential: Credential = serde_json::from_slice(&body)?;
++        check_credential(&credential.credential, "dru_")?;
++        let expires = DateTime::parse_from_rfc3339(&credential.expires_at)?;
++        let lifetime = expires.signed_duration_since(Utc::now()).to_std()?;
++        let deadline = started + lifetime.min(Duration::from_secs(15 * 60));
++        if deadline <= Instant::now() {
++            bail!("端域主控凭据已过期");
++        }
++        Ok(ControllerCredential {
++            value: credential.credential,
++            deadline,
++        })
++    }
++
++    pub async fn controller_logout(&self, session: &ControllerSession) -> ResultType<()> {
++        let response = self
++            .account_post(
++                "/v1/auth/logout",
++                Some((SESSION_COOKIE, &session.cookie)),
++                Some(&session.csrf),
++                json!({}),
++            )
++            .await?;
++        if !matches!(
++            response.status(),
++            StatusCode::NO_CONTENT | StatusCode::UNAUTHORIZED
++        ) {
++            bail!("本机已退出登录，中心尚未确认退出");
++        }
++        Ok(())
++    }
++
++    pub async fn controller_session_active(&self, session: &ControllerSession) -> ResultType<bool> {
++        let response = self
++            .client
++            .get(self.center.join("/v1/auth/session")?)
++            .header(COOKIE, format!("{}={}", SESSION_COOKIE, session.cookie))
++            .send()
++            .await
++            .map_err(|_| anyhow!("无法连接端域中心"))?;
++        match response.status() {
++            StatusCode::OK => Ok(true),
++            StatusCode::UNAUTHORIZED => Ok(false),
++            status => bail!("无法确认端域账号状态（HTTP {}）", status.as_u16()),
++        }
++    }
++
++    async fn account_post(
++        &self,
++        path: &str,
++        cookie: Option<(&str, &str)>,
++        csrf: Option<&str>,
++        body: Value,
++    ) -> ResultType<Response> {
++        let mut request = self
++            .client
++            .post(self.center.join(path)?)
++            .header(ORIGIN, self.center.origin().ascii_serialization())
++            .json(&body);
++        if let Some((name, value)) = cookie {
++            request = request.header(COOKIE, format!("{}={}", name, value));
++        }
++        if let Some(value) = csrf {
++            request = request.header("X-CSRF-Token", value);
++        }
++        request
++            .send()
++            .await
++            .map_err(|_| anyhow!("无法连接端域中心"))
++    }
++}
++
++impl BindingChallenge {
++    fn proof(
++        &self,
++        session: &ControllerSession,
++        device: &DeviceIdentity,
++        organization: Uuid,
++        epoch: u64,
++    ) -> ResultType<Vec<u8>> {
++        let expires = self.expires_ms.saturating_sub(now_ms()?);
++        if uuid_bytes(&self.organization_id)? != organization
++            || uuid_bytes(&self.device_id)? != device.id
++            || uuid_bytes(&self.user_id)? != session.user
++            || self.key_epoch != epoch
++            || self.protocol_version != 1
++            || !(1..=60_000).contains(&expires)
++        {
++            bail!("设备绑定挑战与当前账号或设备不符");
++        }
++        let id = uuid_bytes(&self.challenge_id)?;
++        let nonce = URL_SAFE_NO_PAD.decode(&self.nonce)?;
++        check_credential(&self.flow, "")?;
++        let flow = sha256::hash(&URL_SAFE_NO_PAD.decode(&self.flow)?);
++        encode(
++            USER_BINDING,
++            &[
++                organization.as_bytes(),
++                device.id.as_bytes(),
++                session.user.as_bytes(),
++                id.as_bytes(),
++                &nonce,
++                &flow.0,
++                &self.key_epoch.to_be_bytes(),
++                &self.expires_ms.to_be_bytes(),
++            ],
++        )
++        .ok_or_else(|| anyhow!("设备绑定挑战格式无效"))
++    }
++}
++
++fn read_cookie(response: &Response, name: &str) -> ResultType<String> {
++    let mut matches = response
++        .headers()
++        .get_all(SET_COOKIE)
++        .iter()
++        .filter_map(|header| {
++            let first = header.to_str().ok()?.split(';').next()?;
++            let (key, value) = first.split_once('=')?;
++            (key == name).then_some(value)
++        });
++    let value = matches
++        .next()
++        .ok_or_else(|| anyhow!("端域中心未返回登录会话"))?;
++    if matches.next().is_some() {
++        bail!("端域中心返回了重复的登录会话");
++    }
++    check_credential(value, "")?;
++    Ok(value.to_owned())
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use hbb_common::sodiumoxide::crypto::sign;
++
++    #[test]
++    fn controller_binding_signs_only_the_active_account_and_device() {
++        let organization = Uuid::from_u128(1);
++        let device = DeviceIdentity::from_seed(Uuid::from_u128(2), &sign::Seed([3; 32])).unwrap();
++        let user = Uuid::from_u128(4);
++        let session = ControllerSession {
++            cookie: String::new(),
++            csrf: String::new(),
++            user,
++            username: "operator".into(),
++        };
++        let id = Uuid::from_u128(5);
++        let nonce = [6; 32];
++        let flow = [7; 32];
++        let flow_hash = sha256::hash(&flow);
++        let expires = now_ms().unwrap() + 30_000;
++        let mut challenge = BindingChallenge {
++            organization_id: organization.to_string(),
++            device_id: device.id.to_string(),
++            user_id: user.to_string(),
++            challenge_id: id.to_string(),
++            nonce: URL_SAFE_NO_PAD.encode(nonce),
++            flow: URL_SAFE_NO_PAD.encode(flow),
++            key_epoch: 8,
++            expires_ms: expires,
++            protocol_version: 1,
++        };
++        let mut expected = b"DR-M2\x00\x01\x02".to_vec();
++        for field in [
++            &organization.as_bytes()[..],
++            device.id.as_bytes(),
++            user.as_bytes(),
++            id.as_bytes(),
++            &nonce,
++            &flow_hash.0,
++            &8_u64.to_be_bytes(),
++            &expires.to_be_bytes(),
++        ] {
++            expected.extend_from_slice(&(field.len() as u16).to_be_bytes());
++            expected.extend_from_slice(field);
++        }
++        assert_eq!(
++            challenge.proof(&session, &device, organization, 8).unwrap(),
++            expected
++        );
++        assert!(challenge.proof(&session, &device, organization, 9).is_err());
++        assert!(challenge.proof(&session, &device, Uuid::nil(), 8).is_err());
++        challenge.user_id = Uuid::from_u128(10).to_string();
++        assert!(challenge.proof(&session, &device, organization, 8).is_err());
++    }
++}
+diff --git a/libs/base/src/deskrealm_endpoint/runtime.rs b/libs/base/src/deskrealm_endpoint/runtime.rs
+index 4e454184dc3f3121eed1a417a14d140717f6aacc..fcfdc600f89eaf9c8bae8337d0550a18b1e1d9a4 100644
+--- a/libs/base/src/deskrealm_endpoint/runtime.rs
++++ b/libs/base/src/deskrealm_endpoint/runtime.rs
+@@ -19,7 +19,7 @@ pub struct DeviceCredential {
+     value: String,
+     organization: Uuid,
+     device: Uuid,
+-    key_epoch: u64,
++    pub(super) key_epoch: u64,
+     deadline: Instant,
+ }
+ 
+diff --git a/src/deskrealm_desktop.rs b/src/deskrealm_desktop.rs
+index 248301d139f8bf51482610fd1f76f4e5d02bf1a0..f599027372630568c9dbdd3656192322e4ca5e4a 100644
+--- a/src/deskrealm_desktop.rs
++++ b/src/deskrealm_desktop.rs
+@@ -2,6 +2,8 @@
+ 
+ #[cfg(any(windows, test))]
+ mod consent;
++#[cfg(any(windows, test))]
++pub(crate) mod account;
+ 
+ use base::{
+     deskrealm_endpoint::{
+@@ -135,7 +137,7 @@ pub(crate) struct Desktop {
+ }
+ 
+ impl Desktop {
+-    async fn configured() -> ResultType<Self> {
++    fn identity() -> ResultType<(Authority, DeviceIdentity, Uuid)> {
+         if optional("DESKREALM_MANAGED_MODE")?.as_deref() != Some("1") {
+             bail!("managed desktop configuration is incomplete");
+         }
+@@ -146,10 +148,6 @@ impl Desktop {
+             device,
+             &sign::Seed(decode_key(std::str::from_utf8(&seed)?.trim())?),
+         )?;
+-        let rustdesk_id = required("DESKREALM_MANAGED_RUSTDESK_ID")?;
+-        if !valid_rustdesk_id(&rustdesk_id) {
+-            bail!("invalid managed RustDesk ID");
+-        }
+         let key = sign::PublicKey(decode_key(&required(
+             "DESKREALM_MANAGED_CENTER_PUBLIC_KEY",
+         )?)?);
+@@ -162,6 +160,15 @@ impl Desktop {
+             key,
+             ca.as_deref(),
+         )?;
++        Ok((authority, device, organization))
++    }
++
++    async fn configured() -> ResultType<Self> {
++        let (authority, device, organization) = Self::identity()?;
++        let rustdesk_id = required("DESKREALM_MANAGED_RUSTDESK_ID")?;
++        if !valid_rustdesk_id(&rustdesk_id) {
++            bail!("invalid managed RustDesk ID");
++        }
+         let rendezvous = resolve(&required("DESKREALM_MANAGED_RENDEZVOUS_ADDRESS")?).await?;
+         let relay = match (
+             optional("DESKREALM_MANAGED_RELAY_ID")?,
+@@ -236,11 +243,21 @@ pub(crate) async fn connect(
+         .authority
+         .heartbeat(&credential, crate::VERSION)
+         .await?;
+-    let bearer = read_limited(
++    #[cfg(windows)]
++    let bearer = if optional("DESKREALM_MANAGED_BUNDLE_SHA256")?.is_some() {
++        account::bearer(&desktop, &credential).await?
++    } else {
++        match optional("DESKREALM_MANAGED_CONTROLLER_CREDENTIAL_FILE")? {
++            Some(path) => String::from_utf8(read_limited(&path, 128)?)?,
++            None => account::bearer(&desktop, &credential).await?,
++        }
++    };
++    #[cfg(not(windows))]
++    let bearer = String::from_utf8(read_limited(
+         &required("DESKREALM_MANAGED_CONTROLLER_CREDENTIAL_FILE")?,
+         128,
+-    )?;
+-    let bearer = std::str::from_utf8(&bearer)?.trim();
++    )?)?;
++    let bearer = bearer.trim();
+     let purpose = optional("DESKREALM_MANAGED_PURPOSE")?.unwrap_or_else(|| "helpdesk".to_owned());
+     let path = if force_relay {
+         Path::Relay
+diff --git a/src/deskrealm_desktop/account.rs b/src/deskrealm_desktop/account.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..097054d6460b4207f3fb212a1875f26327757dcb
+--- /dev/null
++++ b/src/deskrealm_desktop/account.rs
+@@ -0,0 +1,158 @@
++use super::Desktop;
++use base::deskrealm_endpoint::{
++    Authority, ControllerCredential, ControllerLogin, ControllerSession, DeviceCredential,
++    DeviceIdentity, PendingTOTP,
++};
++use hbb_common::{
++    anyhow::{anyhow, bail},
++    tokio::{self, sync::Mutex},
++    uuid::Uuid,
++    ResultType,
++};
++use serde_json::{json, Value};
++
++struct SignedIn {
++    session: ControllerSession,
++    credential: ControllerCredential,
++}
++
++enum Account {
++    SignedOut,
++    Pending(PendingTOTP),
++    SignedIn(SignedIn),
++}
++
++static ACCOUNT: Mutex<Account> = Mutex::const_new(Account::SignedOut);
++
++pub async fn bearer(desktop: &Desktop, device_credential: &DeviceCredential) -> ResultType<String> {
++    let mut account = ACCOUNT.lock().await;
++    let Account::SignedIn(current) = &mut *account else {
++        bail!("请先在「设置 → 账号」登录端域");
++    };
++    if current.credential.needs_refresh() {
++        current.credential = desktop
++            .authority
++            .bind_controller(
++                &current.session,
++                &desktop.device,
++                desktop.organization,
++                device_credential,
++            )
++            .await?;
++    }
++    Ok(current.credential.bearer().to_owned())
++}
++
++async fn finish_login(
++    authority: &Authority,
++    device: &DeviceIdentity,
++    organization: Uuid,
++    session: ControllerSession,
++) -> ResultType<SignedIn> {
++    let result = async {
++        let credential = authority.authenticate_device(device, organization).await?;
++        authority
++            .bind_controller(&session, device, organization, &credential)
++            .await
++    }
++    .await;
++    match result {
++        Ok(credential) => Ok(SignedIn {
++            session,
++            credential,
++        }),
++        Err(err) => {
++            let _ = authority.controller_logout(&session).await;
++            Err(err)
++        }
++    }
++}
++
++fn snapshot(account: &Account) -> Value {
++    match account {
++        Account::SignedOut => json!({"state": "signed_out"}),
++        Account::Pending(_) => json!({"state": "totp"}),
++        Account::SignedIn(current) => {
++            json!({"state": "signed_in", "username": current.session.username()})
++        }
++    }
++}
++
++async fn update(action: &str, username: &str, secret: &str) -> ResultType<Value> {
++    let mut account = ACCOUNT.lock().await;
++    if action == "cancel" {
++        if matches!(*account, Account::Pending(_)) {
++            *account = Account::SignedOut;
++        }
++        return Ok(snapshot(&account));
++    }
++    if action == "status" && !matches!(*account, Account::SignedIn(_)) {
++        return Ok(snapshot(&account));
++    }
++    if action == "logout" {
++        if let Account::SignedIn(current) = std::mem::replace(&mut *account, Account::SignedOut) {
++            let confirmed = async {
++                let (authority, _, _) = Desktop::identity()?;
++                authority.controller_logout(&current.session).await
++            }
++            .await;
++            confirmed.map_err(|_| anyhow!("本机已退出登录，中心尚未确认退出"))?;
++        }
++        return Ok(snapshot(&account));
++    }
++    let (authority, device, organization) = Desktop::identity()?;
++    match action {
++        "status" => {
++            if let Account::SignedIn(current) = &*account {
++                if !authority
++                    .controller_session_active(&current.session)
++                    .await?
++                {
++                    *account = Account::SignedOut;
++                }
++            }
++        }
++        "login" if !matches!(*account, Account::SignedIn(_)) => {
++            *account = Account::SignedOut;
++            match authority.controller_login(username, secret).await? {
++                ControllerLogin::NeedsTOTP(pending) => *account = Account::Pending(pending),
++                ControllerLogin::SignedIn(session) => {
++                    *account = Account::SignedIn(
++                        finish_login(&authority, &device, organization, session).await?,
++                    );
++                }
++            }
++        }
++        "verify" => {
++            let Account::Pending(pending) = &*account else {
++                bail!("请重新输入端域账号和密码");
++            };
++            let session = authority.controller_totp(pending, secret).await?;
++            *account = Account::SignedOut;
++            *account =
++                Account::SignedIn(finish_login(&authority, &device, organization, session).await?);
++        }
++        _ => bail!("端域账号操作无效"),
++    }
++    Ok(snapshot(&account))
++}
++
++pub fn handle(action: &str, username: &str, secret: &str) -> String {
++    let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
++        .enable_all()
++        .build()
++    else {
++        return json!({"error": "无法初始化端域账号连接"}).to_string();
++    };
++    runtime.block_on(async {
++        let response = match update(action, username, secret).await {
++            Ok(response) => response,
++            Err(error) => {
++                let mut response = snapshot(&*ACCOUNT.lock().await);
++                response["error"] = json!(error.to_string());
++                response
++            }
++        };
++        response.to_string()
++    })
++}
+diff --git a/src/flutter_ffi.rs b/src/flutter_ffi.rs
+index 50bbd5dd6ae31c5123894533818e528776a6badb..c15e3d889164e678cf1924de727c6af6ea62b0ea 100644
+--- a/src/flutter_ffi.rs
++++ b/src/flutter_ffi.rs
+@@ -1211,6 +1211,15 @@ pub fn main_get_api_server() -> String {
+     get_api_server()
+ }
+ 
++pub fn main_deskrealm_account(action: String, username: String, secret: String) -> String {
++    #[cfg(windows)]
++    if crate::deskrealm_desktop::enabled() {
++        return crate::deskrealm_desktop::account::handle(&action, &username, &secret);
++    }
++    let _ = (action, username, secret);
++    String::new()
++}
++
+ pub fn main_deploy_device(token: String, id: String) -> String {
+     #[cfg(target_os = "android")]
+     {
+@@ -2675,6 +2684,10 @@ pub fn main_get_hard_option(key: String) -> SyncReturn<String> {
+ }
+ 
+ pub fn main_get_buildin_option(key: String) -> SyncReturn<String> {
++    #[cfg(windows)]
++    if key == "deskrealm-managed-origin" && crate::deskrealm_desktop::enabled() {
++        return SyncReturn(std::env::var("DESKREALM_MANAGED_CENTER").unwrap_or_default());
++    }
+     #[cfg(windows)]
+     if key == "deskrealm-managed-mode" {
+         return SyncReturn(if crate::deskrealm_desktop::enabled() {

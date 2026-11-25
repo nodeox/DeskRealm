@@ -29,8 +29,7 @@ func ParsePublicProfile(raw []byte) (PublicProfile, error) {
 func (c Center) validProfile() bool {
 	origin, err := url.Parse(c.Origin)
 	if err != nil || origin.Scheme != "https" || origin.User != nil || origin.Host == "" ||
-		origin.Port() != "" || origin.Path != "" || origin.String() != c.Origin ||
-		c.Origin != "https://"+origin.Host || !profileHost(origin.Hostname()) ||
+		c.Origin != "https://"+origin.Host || !profileOriginAuthority(origin) ||
 		!profileAuthority(c.IDServer) || !idPattern.MatchString(c.SigningKeyID) {
 		return false
 	}
@@ -43,6 +42,20 @@ func (c Center) validProfile() bool {
 		return false
 	}
 	return c.DefaultRelay == nil || idPattern.MatchString(c.DefaultRelay.ID) && profileAuthority(c.DefaultRelay.Address)
+}
+
+func profileOriginAuthority(origin *url.URL) bool {
+	if port := origin.Port(); port != "" {
+		return port != "443" && profileAuthority(origin.Host)
+	}
+	host := origin.Hostname()
+	if !profileHost(host) {
+		return false
+	}
+	if strings.Contains(host, ":") {
+		return origin.Host == "["+host+"]"
+	}
+	return origin.Host == host
 }
 
 func profileAuthority(authority string) bool {

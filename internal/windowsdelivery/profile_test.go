@@ -23,10 +23,16 @@ func TestParsePublicProfile(t *testing.T) {
 		_, err = ParsePublicProfile(raw)
 		return err
 	}
-	if err := parse(valid); err != nil {
-		t.Fatalf("valid profile rejected: %v", err)
+	for _, origin := range []string{valid.Center.Origin, "https://192.168.139.226:8443", "https://[2001:db8::1]:8443"} {
+		changed := valid
+		changed.Center.Origin = origin
+		if err := parse(changed); err != nil {
+			t.Errorf("valid profile with origin %q rejected: %v", origin, err)
+		}
 	}
 	for _, invalid := range []string{"http://center.example.test", "https://center.example.test:443",
+		"https://center.example.test:", "https://center.example.test:0", "https://center.example.test:08443",
+		"https://center.example.test:65536", "https://center.example.test:8443/path", "https://[center.example.test]",
 		"https://center.example.test/", "https://center.example.test?", "https://guest@center.example.test"} {
 		changed := valid
 		changed.Center.Origin = invalid
